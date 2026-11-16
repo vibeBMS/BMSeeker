@@ -2,7 +2,14 @@
 
 BMS 라이브러리 도구: 난이도표를 읽고, 라이브러리에 없는 곡을 작가·난이도표가 걸어 둔
 링크에서 바로 받아 풀고, 차분(差分) 채보를 그 곡의 폴더에 넣습니다.
-vibeBMS가 쓰는 라이브러리이자, 게임 없이 쓰는 명령줄 도구입니다.
+[vibeBMS](https://github.com/vibeBMS/vibe)가 쓰는 라이브러리이자, 게임 없이 쓰는 명령줄 도구입니다.
+
+```sh
+cargo install --git https://github.com/vibeBMS/BMSeeker --features cli   # bmseeker 명령
+```
+
+라이브러리로: `bmseeker = { git = "https://github.com/vibeBMS/BMSeeker" }` (명령줄 도구의 의존성 `clap`은
+`cli` 기능을 켤 때만 들어옵니다).
 
 ```text
 bmseeker [--json] [--config 파일] <명사> <동사> ...
@@ -49,11 +56,12 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","
 `user_agent`, `mirror_catalog`(BMS 이벤트 미러 목록, 비우면 안 씀), `manbow`, `bmssearch_api`, `stella_list`,
 `mega_api`, `sources`, `tables`, `downloads`(라이브러리 안 대기 폴더), `min_coverage`.
 
-`cargo run -p bmseeker --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0` (설치: `cargo install --path crates/bmseeker --features cli`)
+`cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
 
 ## 창
 
-egui로 만든 창(`bmseeker-gui`)은 내렸습니다. CLI를 품는 Go(MyGo) GUI로 다시 만듭니다 ([DESIGN.md](DESIGN.md)).
+CLI를 품는 Go([MyGo](https://github.com/egoist/mygo)) GUI를 `gui/`에 만듭니다 ([DESIGN.md](DESIGN.md)): 릴리즈는 CLI
+바이너리 하나와, CLI를 품어 CLI 명령을 주면 CLI로 동작하는 GUI 바이너리 하나.
 
 ## 모듈
 
@@ -75,6 +83,12 @@ egui로 만든 창(`bmseeker-gui`)은 내렸습니다. CLI를 품는 Go(MyGo) GU
 `hosts::Resolver`(링크를 `Host` 전략들로), `table::TableLoader`, `bmssearch::Lookup`. 네이티브는
 `net::run`으로 블로킹, 브라우저(vibeBMS 웹 빌드)는 비동기로 같은 작업을 돌립니다. 읽는 곳(API, 미러,
 목록)과 사용자 에이전트는 모두 `config::Config`에 있습니다. 앞으로의 구조는 [DESIGN.md](DESIGN.md).
+
+## 웹 (wasm32)
+
+라이브러리는 wasm32에서도 빌드됩니다(네트워크는 `net::Task`라 브라우저가 요청을 대신). 다만 RAR을 푸는 `unrar-rs`는
+0.16.3까지 wasm32-unknown-unknown에서 빌드되지 않아, 이 리포는 고친 브랜치로 바꿔 씁니다(`[patch.crates-io]`,
+업스트림 PR 대기). 이 크레이트를 쓰는 쪽도 웹 빌드라면 같은 패치가 필요합니다.
 
 ## 출처
 

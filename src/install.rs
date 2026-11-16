@@ -20,6 +20,15 @@ pub enum Done {
     Failed(String),
 }
 
+/// The MD5 of `bytes`, in hex.
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::Digest;
+    md5::Md5::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// A link to a chart file of its own (`….bms` and the like).
 pub fn chart_link(u: &str) -> bool {
     let path = u.split(['?', '#']).next().unwrap_or("");
@@ -202,9 +211,7 @@ pub fn holds_chart(fs: &dyn Fs, dir: &Path, md5: &str) -> bool {
             if e.is_dir {
                 todo.push(e.path);
             } else if crate::placement::is_chart(&e.path)
-                && fs
-                    .read(&e.path)
-                    .is_ok_and(|b| vibebms_core::bms::md5_hex(&b) == md5)
+                && fs.read(&e.path).is_ok_and(|b| md5_hex(&b) == md5)
             {
                 return true;
             }

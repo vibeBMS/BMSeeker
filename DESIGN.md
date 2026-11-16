@@ -1,8 +1,13 @@
 # bmseeker: design
 
-Where this crate is going before it moves to its own repository
-(`vibeBMS/bmseeker`): a library with no hard-coded places, a CLI whose
-commands read and write streams, and a GUI (Go, MyGo) on top of the CLI.
+A library with no hard-coded places, a CLI whose commands read and write
+streams, and a GUI (Go, MyGo) on top of the CLI, in this one repository:
+
+```
+Cargo.toml, src/        the library and the CLI (src/bin/bmseeker, feature `cli`)
+gui/                    the GUI: a Go module that embeds the CLI binary
+.github/workflows/      CI; releases build the CLI, then the GUI around it
+```
 
 ## Layers
 

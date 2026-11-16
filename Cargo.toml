@@ -1,11 +1,13 @@
 [package]
 name = "bmseeker"
 description = "BMS library tools: difficulty tables, downloads from where authors link songs, unpacking, and putting charts into their songs' folders"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vibeBMS/BMSeeker"
+keywords = ["bms", "rhythm-game", "beatoraja", "lr2"]
+categories = ["command-line-utilities", "games"]
 
 [lib]
 name = "bmseeker"
@@ -20,16 +22,15 @@ required-features = ["cli"]
 cli = ["dep:clap"]
 
 [dependencies]
-vibebms-core.workspace = true
-serde.workspace = true
+serde = { version = "1", features = ["derive"] }
 # works.json keeps its keys in order
-serde_json = { workspace = true, features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 clap = { version = "4", features = ["derive"], optional = true }
-log.workspace = true
-encoding_rs.workspace = true
-md-5.workspace = true
-sha2.workspace = true
+log = "0.4"
+encoding_rs = "0.8"
+md-5 = "0.10"
+sha2 = "0.10"
 url = "2"
 web-time = "1"
 ehttp = { version = "0.7", features = ["streaming"] }
@@ -45,3 +46,15 @@ flate2 = "1"
 # Desktop: trust the OS certificate store (corporate proxies, custom CAs).
 [target.'cfg(any(windows, target_os = "macos", target_os = "linux"))'.dependencies]
 ehttp = { version = "0.7", features = ["platform-verifier"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# unrar-rs 0.16.3 does not build for wasm32-unknown-unknown (its DOS time
+# conversion needs libc's mktime): the branch that fixes it, until upstream
+# releases it. Only this repository's own builds use it.
+[patch.crates-io]
+unrar-rs = { git = "https://github.com/eseiker/rarpar", branch = "unrar-wasm32-unknown" }

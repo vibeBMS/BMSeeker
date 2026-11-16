@@ -11,14 +11,7 @@ use crate::fs::Fs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// What placement needs from a chart.
-#[derive(Clone, Debug, Default)]
-pub struct ChartInfo {
-    pub title: String,
-    pub artist: String,
-    /// Sound files it uses (names as written in the chart).
-    pub sounds: Vec<String>,
-}
+pub use crate::chart::ChartInfo;
 
 /// A folder of the library: its files and the charts in it.
 #[derive(Clone, Debug, Default)]
@@ -275,12 +268,7 @@ pub fn folders(
 /// The title, artist and sounds of a chart file.
 pub fn chart_info(fs: &dyn Fs, path: &std::path::Path) -> Option<ChartInfo> {
     let bytes = fs.read(path).ok()?;
-    let c = vibebms_core::load_chart_bytes(path, &bytes, &Default::default()).ok()?;
-    Some(ChartInfo {
-        title: c.meta.title,
-        artist: c.meta.artist,
-        sounds: c.sound_files,
-    })
+    crate::chart::info(path, &bytes)
 }
 
 /// Where `chart` belongs among the folders below `library` (see [`place`]),

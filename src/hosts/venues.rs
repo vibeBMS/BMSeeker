@@ -128,7 +128,7 @@ impl Task for ManbowWork {
             }
             State::Venue => Next::Done(match answer {
                 Ok(body) => {
-                    let page = vibebms_core::encoding::decode_text(&body);
+                    let page = crate::text::decode_text(&body);
                     match pick(&venue_links(&page)) {
                         Some(next) => Resolved::Follow(next),
                         None => Resolved::Page,
