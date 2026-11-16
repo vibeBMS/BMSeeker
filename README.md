@@ -85,7 +85,7 @@ bmseeker-gui <CLI 명령>...    CLI 그대로 (link, song, table, library, event
 - **Waiting**: 곡보다 먼저 온 차분과 가장 그럴듯한 폴더.
 - **Browser**: 페이지만 주는 링크(OneDrive 등). 열면 창 안의 웹뷰가 다운로드 버튼을 눌러 받고, 받은 파일을
   라이브러리로 들입니다.
-- **Settings**: BMS 폴더, 난이도표 목록 (`<설정 폴더>/bmseeker/gui.json`).
+- **Settings**: BMS 폴더, 제3자 미러(`--third-party`), 난이도표 목록 (창을 닫으면 잊음).
 
 창은 CLI를 `--json`으로 띄워 레코드를 읽습니다. 품은 CLI는 처음 쓸 때 사용자 캐시 폴더에 풀어 씁니다
 (`$BMSEEKER_CLI`이 있으면 그것, 품지 않은 개발 빌드는 PATH의 `bmseeker`).

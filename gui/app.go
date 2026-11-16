@@ -58,7 +58,7 @@ type app struct {
 }
 
 func newApp(library string) *app {
-	a := &app{settings: loadSettings(), busy: map[string]bool{}}
+	a := &app{settings: defaultSettings(), busy: map[string]bool{}}
 	if library != "" {
 		a.settings.Library = library
 	}
@@ -354,16 +354,13 @@ func (a *app) settingsView(c *ui.Context) {
 				if err == nil && len(paths) > 0 {
 					a.update(func() {
 						a.settings.Library = paths[0]
-						a.saveSettings()
 					})
 				}
 			}()
 		}
 	})
 	ui.Text(c, "Downloads").Bold()
-	if ui.Checkbox(c, &a.settings.ThirdParty, "Third-party mirrors (darksabun.club, bms.hexlataia.xyz, the bms.kyouko.moe archive)").Changed() {
-		a.saveSettings()
-	}
+	ui.Checkbox(c, &a.settings.ThirdParty, "Third-party mirrors (darksabun.club, bms.hexlataia.xyz, the bms.kyouko.moe archive)")
 	ui.Text(c, "Other people's copies of dead sites and uploaders. What is found by name goes in only if it holds the chart (MD5).")
 	ui.Text(c, "Difficulty tables").Bold()
 	for i, t := range a.settings.Tables {
@@ -371,7 +368,6 @@ func (a *app) settingsView(c *ui.Context) {
 			ui.Text(c, t).Grow(1).SingleLine()
 			if ui.Button(c, "Remove").Clicked() {
 				a.settings.Tables = append(a.settings.Tables[:i:i], a.settings.Tables[i+1:]...)
-				a.saveSettings()
 			}
 		})
 	}
@@ -380,15 +376,8 @@ func (a *app) settingsView(c *ui.Context) {
 		if (ui.Button(c, "Add").Clicked() || add) && strings.HasPrefix(a.newTable, "http") {
 			a.settings.Tables = append(a.settings.Tables, strings.TrimSpace(a.newTable))
 			a.newTable = ""
-			a.saveSettings()
 		}
 	})
-}
-
-func (a *app) saveSettings() {
-	if err := a.settings.save(); err != nil {
-		a.log = append(a.log, "settings: "+err.Error())
-	}
 }
 
 func toF(v any) float64 {

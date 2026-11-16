@@ -218,6 +218,17 @@ pub fn link(
     out
 }
 
+/// Whether the archive `bytes` (zip, 7z, rar) holds the chart `md5`: what
+/// a source found by name brings, looked into in memory.
+pub fn archive_holds_chart(bytes: Vec<u8>, md5: &str) -> bool {
+    let md5 = md5.trim().to_ascii_lowercase();
+    let mut found = false;
+    let _ = crate::unpack::unpack_bytes(bytes, |rel, data| {
+        found = found || (crate::placement::is_chart(&rel) && md5_hex(&data) == md5);
+    });
+    found
+}
+
 /// A download found by name that does not hold the chart wanted.
 pub const NOT_THE_CHART: &str = "what it brought does not hold the chart";
 
@@ -349,6 +360,31 @@ pub fn links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn charts_in_an_archive() {
+        use std::io::Write;
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut out);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("Song/a.bme", o).unwrap();
+            z.write_all(b"#TITLE A").unwrap();
+            z.start_file("Song/b.txt", o).unwrap();
+            z.write_all(b"#TITLE B").unwrap();
+            z.finish().unwrap();
+        }
+        let zip = out.into_inner();
+        assert!(archive_holds_chart(
+            zip.clone(),
+            &md5_hex(b"#TITLE A").to_uppercase()
+        ));
+        assert!(!archive_holds_chart(zip.clone(), &md5_hex(b"#TITLE B")));
+        assert!(!archive_holds_chart(
+            b"not an archive".to_vec(),
+            &md5_hex(b"#TITLE A")
+        ));
+    }
 
     /// `BMSEEKER_SONG=URL BMSEEKER_DIFF=URL [BMSEEKER_TITLE=… BMSEEKER_ARTIST=…]
     /// cargo test -p bmseeker song_links -- --ignored`
