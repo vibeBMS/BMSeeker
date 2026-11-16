@@ -4,6 +4,7 @@
 
 use crate::fs::Fs;
 use crate::placement::{self, Located};
+use crate::unpack::Capped;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -53,7 +54,7 @@ fn write_entry(dest: &Path, rel: &Path, r: &mut dyn Read, budget: &mut u64) -> R
     if n > *budget {
         drop(f);
         let _ = std::fs::remove_file(&path);
-        return Err(format!("larger than {} MB unpacked", BUDGET >> 20));
+        return Err(crate::unpack::too_large(BUDGET));
     }
     *budget -= n;
     Ok(())
@@ -107,30 +108,6 @@ fn un7z(file: &Path, dest: &Path) -> Result<usize, String> {
     err.map_or(Ok(n), Err)
 }
 
-/// A writer that fails past `left` bytes (an archive member larger than it
-/// claims).
-struct Capped<W> {
-    w: W,
-    left: u64,
-}
-
-impl<W: std::io::Write> std::io::Write for Capped<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if buf.len() as u64 > self.left {
-            return Err(std::io::Error::other(format!(
-                "larger than {} MB unpacked",
-                BUDGET >> 20
-            )));
-        }
-        let n = self.w.write(buf)?;
-        self.left -= n as u64;
-        Ok(n)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.w.flush()
-    }
-}
-
 fn unrar(file: &Path, dest: &Path) -> Result<usize, String> {
     let f = std::fs::File::open(file).map_err(|e| e.to_string())?;
     let mut a = unrar_rs::RarArchive::open(f).map_err(|e| e.to_string())?;
@@ -154,6 +131,7 @@ fn unrar(file: &Path, dest: &Path) -> Result<usize, String> {
         let mut w = Capped {
             w: std::io::BufWriter::new(out),
             left: budget,
+            budget: BUDGET,
         };
         let r = a
             .by_index(i)
