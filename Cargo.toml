@@ -54,7 +54,7 @@ codegen-units = 1
 strip = true
 
 # unrar-rs 0.16.3 does not build for wasm32-unknown-unknown (its DOS time
-# conversion needs libc's mktime): the branch that fixes it, until upstream
-# releases it. Only this repository's own builds use it.
+# conversion needs libc's mktime): fixed upstream, not released yet. Only
+# this repository's own builds use it; drop it with the next release.
 [patch.crates-io]
-unrar-rs = { git = "https://github.com/eseiker/rarpar", branch = "unrar-wasm32-unknown" }
+unrar-rs = { git = "https://github.com/scryer-media/rarpar", rev = "be8e5aceff738bd618a540143def08b3e745aae1" }

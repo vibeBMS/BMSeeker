@@ -515,7 +515,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1055,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "reedsolomon-rs"
 version = "0.4.11"
-source = "git+https://github.com/eseiker/rarpar?branch=unrar-wasm32-unknown#486ec65fc4e0303183aa2eb527c55536f9d83f34"
+source = "git+https://github.com/scryer-media/rarpar?rev=be8e5aceff738bd618a540143def08b3e745aae1#be8e5aceff738bd618a540143def08b3e745aae1"
 dependencies = [
  "memmap2",
  "rayon",
@@ -1142,7 +1142,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1199,7 +1199,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1466,7 +1466,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1557,7 +1557,7 @@ dependencies = [
 [[package]]
 name = "unrar-rs"
 version = "0.16.4"
-source = "git+https://github.com/eseiker/rarpar?branch=unrar-wasm32-unknown#486ec65fc4e0303183aa2eb527c55536f9d83f34"
+source = "git+https://github.com/scryer-media/rarpar?rev=be8e5aceff738bd618a540143def08b3e745aae1#be8e5aceff738bd618a540143def08b3e745aae1"
 dependencies = [
  "aes",
  "blake2s_simd",
@@ -1778,7 +1778,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
