@@ -27,12 +27,13 @@ mod venues;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use download::retrying;
 #[cfg(not(target_arch = "wasm32"))]
-pub use download::{download_to, fetch, fetch_named, sniff};
+pub use download::{download, download_to, fetch, fetch_named, sniff};
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
 
 use crate::config::Config;
 use crate::net::{Answer, BoxTask, NetError, Next, Task};
+use crate::progress::{Progress, Stage};
 use std::sync::Arc;
 
 /// Why a link gave no file.
@@ -209,11 +210,13 @@ impl Hosts {
     }
 }
 
-/// What resolving runs with: the settings and the hosts.
+/// What resolving and downloading run with: the settings, the hosts, and
+/// the progress a download reports to (and is cancelled by).
 #[derive(Clone, Default)]
 pub struct Context {
     pub config: Arc<Config>,
     pub hosts: Arc<Hosts>,
+    pub progress: Option<Arc<Progress>>,
 }
 
 impl Context {
@@ -221,6 +224,33 @@ impl Context {
         Context {
             hosts: Arc::new(Hosts::from_config(&config)),
             config: Arc::new(config),
+            progress: None,
+        }
+    }
+
+    /// This context reporting to `p` (the settings and hosts shared).
+    pub fn with_progress(&self, p: Arc<Progress>) -> Context {
+        Context {
+            progress: Some(p),
+            ..self.clone()
+        }
+    }
+
+    /// The progress to report to: this context's, else the thread's
+    /// ([`crate::progress::scope`], kept for older callers).
+    pub fn progress(&self) -> Option<Arc<Progress>> {
+        self.progress.clone().or_else(crate::progress::current)
+    }
+
+    /// Whether the download was cancelled.
+    pub fn cancelled(&self) -> bool {
+        self.progress().is_some_and(|p| p.cancelled())
+    }
+
+    /// Set the progress' stage (if there is one).
+    pub fn stage(&self, s: Stage) {
+        if let Some(p) = self.progress() {
+            p.set_stage(s);
         }
     }
 }

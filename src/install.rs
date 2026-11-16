@@ -222,9 +222,9 @@ fn link_in(
     use crate::import::{self, Imported};
     let title = want.title.as_str();
     let file = if chart_link(link) {
-        crate::progress::stage(crate::progress::Stage::Finding);
+        cx.stage(crate::progress::Stage::Finding);
         let file = downloads.join(chart_name(link));
-        if let Err(e) = crate::hosts::download_to(link, &file) {
+        if let Err(e) = crate::hosts::download(link, &file, cx) {
             let _ = std::fs::remove_file(&file);
             return vec![Done::Failed(e.into())];
         }
@@ -260,7 +260,7 @@ fn link_in(
             }
         }
     };
-    crate::progress::stage(crate::progress::Stage::Unpacking);
+    cx.stage(crate::progress::Stage::Unpacking);
     if diff && !chart_link(link) {
         let dir = job.join("diff");
         let name = import::file_name(&file);
@@ -512,7 +512,7 @@ pub fn links(
     sources: &crate::sources::Sources,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
-    let cancelled = || crate::progress::current().is_some_and(|p| p.cancelled());
+    let cancelled = || cx.cancelled();
     let mut tries = Tries::default();
     let mut tried: Vec<String> = Vec::new();
     let md5 = q.md5.trim();
@@ -538,7 +538,7 @@ pub fn links(
     if let Some(done) = try_all(own.to_vec(), false, &mut tries) {
         return done;
     }
-    let http = crate::net::Client::new(&cx.config);
+    let http = crate::net::Client::in_context(cx);
     for source in sources.iter() {
         if cancelled() {
             break;

@@ -1,10 +1,11 @@
 //! Natively: a link resolved ([`super::Resolver`]) and its file streamed to
 //! disk, with no limit on the whole (an archive from a slow host can take
-//! an hour) but a limit on silence ([`STALL_MS`]) and the thread's
+//! an hour) but a limit on silence ([`STALL_MS`]) and the context's
 //! [`Progress`](crate::progress::Progress) able to cancel it.
 
 use super::{sniff_bytes, Context, Fetch, MegaCipher, Resolver, Want, STALL_MS};
 use crate::net::{percent_decode, run, Client, NetError};
+use crate::progress::{Progress, Stage};
 use crate::text::safe_file_name;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -25,14 +26,14 @@ pub fn fetch_named(
     any: bool,
     cx: &Context,
 ) -> Result<String, Fetch> {
-    crate::progress::stage(crate::progress::Stage::Finding);
-    let http = Client::new(&cx.config);
+    cx.stage(Stage::Finding);
+    let http = Client::in_context(cx);
     let mut r = Resolver::new(link, want.clone(), cx);
     let mut moves = 0;
     loop {
         let mut moved = None;
         let got = run(&mut r, &http).and_then(|t| get_target(t, out, any, cx, &mut moved));
-        let cancelled = crate::progress::current().is_some_and(|p| p.cancelled());
+        let cancelled = cx.cancelled();
         // a page reached through redirects (a short link) on a host that
         // knows its way to the file: from there
         let rehost = moved.filter(|u| {
@@ -45,9 +46,7 @@ pub fn fetch_named(
                 r = Resolver::new(&u, want.clone(), cx);
             }
             // a mirror the page named, when this file did not come
-            (Err(_), _) if !cancelled && r.try_next() => {
-                crate::progress::stage(crate::progress::Stage::Finding);
-            }
+            (Err(_), _) if !cancelled && r.try_next() => cx.stage(Stage::Finding),
             (got, _) => return got,
         }
     }
@@ -62,16 +61,17 @@ fn get_target(
     cx: &Context,
     moved: &mut Option<String>,
 ) -> Result<String, Fetch> {
-    let ua = &cx.config.user_agent;
+    let (ua, progress) = (&cx.config.user_agent, cx.progress());
+    let p = progress.as_deref();
     let served = match &t.mega_key {
         None => {
-            let s = retrying(|| download(&t.url, out, ua))?;
+            let s = retrying(p, || stream(&t.url, out, ua, p))?;
             *moved = s.at.filter(|u| u != &t.url);
             s.name
         }
         Some(key) => {
             let enc = out.with_extension("mega");
-            retrying(|| download(&t.url, &enc, ua))?;
+            retrying(p, || stream(&t.url, &enc, ua, p))?;
             let d = mega_decrypt(&enc, out, key);
             let _ = std::fs::remove_file(&enc);
             d.map_err(NetError::Other)?;
@@ -185,22 +185,32 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 
 const STALL: std::time::Duration = std::time::Duration::from_millis(STALL_MS);
 
-/// Stream `url` into `out`. No limit on the whole, but it ends when no data
-/// comes for [`STALL_MS`], or when the thread's progress is cancelled.
+/// Stream `url` into `out` with `cx`'s user agent, reporting to its
+/// progress. No limit on the whole, but it ends when no data comes for
+/// [`STALL_MS`], or when the progress is cancelled.
+pub fn download(url: &str, out: &Path, cx: &Context) -> Result<(), NetError> {
+    let progress = cx.progress();
+    let p = progress.as_deref();
+    retrying(p, || stream(url, out, &cx.config.user_agent, p)).map(|_| ())
+}
+
+/// [`download`] with the default settings.
 pub fn download_to(url: &str, out: &Path) -> Result<(), NetError> {
-    let ua = crate::config::Config::default().user_agent;
-    retrying(|| download(url, out, &ua)).map(|_| ())
+    download(url, out, &Context::default())
 }
 
 /// `f` again after a server's passing failure (busy, or a gateway's error:
 /// manbow answers 502 and 503 at times), twice at most, waiting longer each
-/// time.
-pub(crate) fn retrying<T>(mut f: impl FnMut() -> Result<T, NetError>) -> Result<T, NetError> {
+/// time (not once `progress` is cancelled).
+pub(crate) fn retrying<T>(
+    progress: Option<&Progress>,
+    mut f: impl FnMut() -> Result<T, NetError>,
+) -> Result<T, NetError> {
     let mut waits = [3u64, 10].into_iter();
     loop {
         match f() {
             Err(e) if e.passing() => match waits.next() {
-                Some(s) if !crate::progress::current().is_some_and(|p| p.cancelled()) => {
+                Some(s) if !progress.is_some_and(|p| p.cancelled()) => {
                     std::thread::sleep(std::time::Duration::from_secs(s));
                 }
                 _ => return Err(e),
@@ -218,8 +228,14 @@ struct Served {
     at: Option<String>,
 }
 
-/// [`download_to`], and what the server said of it.
-fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, NetError> {
+/// `url` into `out` once, reporting to `progress`: what the server said of
+/// it.
+fn stream(
+    url: &str,
+    out: &Path,
+    user_agent: &str,
+    progress: Option<&Progress>,
+) -> Result<Served, NetError> {
     use std::sync::mpsc::{channel, RecvTimeoutError};
     use std::time::{Duration, Instant};
     /// What the request's thread sends: the answer's head, its data, its
@@ -230,7 +246,6 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, NetError>
     }
     let file = std::fs::File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut w = std::io::BufWriter::new(file);
-    let progress = crate::progress::current();
     let mut req = ehttp::Request::get(url);
     req.timeout = None;
     // Dropbox answers a browser with its page instead of the file
@@ -278,14 +293,14 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, NetError>
         at: None,
     };
     loop {
-        if progress.as_ref().is_some_and(|p| p.cancelled()) {
+        if progress.is_some_and(|p| p.cancelled()) {
             return Err(NetError::Cancelled);
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Err(e)) => return Err(e),
             Ok(Ok(Part::Head(n, length, at))) => {
                 served = Served { name: n, at };
-                if let Some(p) = &progress {
+                if let Some(p) = progress {
                     p.start_file(length);
                 }
                 last = Instant::now();
@@ -294,7 +309,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, NetError>
                 return w.flush().map(|_| served).map_err(|e| e.to_string().into());
             }
             Ok(Ok(Part::Chunk(c))) => {
-                if let Some(p) = &progress {
+                if let Some(p) = progress {
                     p.add(c.len() as u64);
                 }
                 w.write_all(&c).map_err(|e| e.to_string())?;
@@ -382,7 +397,7 @@ mod tests {
             let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nPK");
             std::thread::sleep(std::time::Duration::from_secs(30));
         });
-        let p = crate::progress::Progress::new();
+        let p = Progress::new();
         let p2 = p.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(800));
@@ -390,9 +405,8 @@ mod tests {
         });
         let out = std::env::temp_dir().join(format!("bmseeker-stall-{}", std::process::id()));
         let t = std::time::Instant::now();
-        let r = crate::progress::scope(Some(p.clone()), || {
-            download_to(&format!("http://{addr}/a.zip"), &out)
-        });
+        let cx = Context::default().with_progress(p.clone());
+        let r = download(&format!("http://{addr}/a.zip"), &out, &cx);
         assert_eq!(r, Err(NetError::Cancelled));
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(p.bytes(), (2, Some(1_000_000)));

@@ -197,10 +197,12 @@ impl Http for Canned {
     }
 }
 
-/// Blocking requests (desktop): the user agent of the [`Config`](crate::config::Config).
+/// Blocking requests (desktop): the user agent of the [`Config`](crate::config::Config);
+/// retries stop once `progress` is cancelled.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Client {
     pub user_agent: String,
+    pub progress: Option<std::sync::Arc<crate::progress::Progress>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -208,6 +210,15 @@ impl Client {
     pub fn new(config: &crate::config::Config) -> Client {
         Client {
             user_agent: config.user_agent.clone(),
+            progress: None,
+        }
+    }
+
+    /// With `cx`'s settings and progress.
+    pub fn in_context(cx: &crate::hosts::Context) -> Client {
+        Client {
+            progress: cx.progress(),
+            ..Client::new(&cx.config)
         }
     }
 }
@@ -226,7 +237,7 @@ impl Http for Client {
         if !self.user_agent.is_empty() {
             req.headers.insert("User-Agent", &self.user_agent);
         }
-        crate::hosts::retrying(|| fetch(&req))
+        crate::hosts::retrying(self.progress.as_deref(), || fetch(&req))
     }
 }
 

@@ -132,7 +132,7 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
     }
     let file = tmp.join("download");
     let r = if crate::install::chart_link(link) {
-        crate::hosts::download_to(link, &file)
+        crate::hosts::download(link, &file, cx)
             .map_err(Fetch::Failed)
             .and_then(|_| {
                 let page =
