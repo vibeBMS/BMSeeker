@@ -1,0 +1,62 @@
+name: Release
+
+# On a tag (v*): the CLI and the window (with the CLI inside) for each
+# system, attached to the tag's release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64 }
+          - { os: windows-latest, name: windows-x86_64 }
+          - { os: macos-latest, name: macos-arm64 }
+          - { os: macos-13, name: macos-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gui/go.mod
+          cache-dependency-path: gui/go.sum
+      - name: Build
+        shell: bash
+        run: gui/build.sh
+      - name: Pack
+        shell: bash
+        run: |
+          mkdir -p dist
+          ext=""; [ "${{ runner.os }}" = Windows ] && ext=.exe
+          cp "target/release/bmseeker$ext" "dist/bmseeker-${{ matrix.name }}$ext"
+          cp "target/release/bmseeker-gui$ext" "dist/bmseeker-gui-${{ matrix.name }}$ext"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bmseeker-${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/* -R "$GITHUB_REPOSITORY" --clobber

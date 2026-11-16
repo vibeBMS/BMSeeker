@@ -58,10 +58,28 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
 
-## 창
+## 창 (`gui/`)
 
-CLI를 품는 Go([MyGo](https://github.com/egoist/mygo)) GUI를 `gui/`에 만듭니다 ([DESIGN.md](DESIGN.md)): 릴리즈는 CLI
-바이너리 하나와, CLI를 품어 CLI 명령을 주면 CLI로 동작하는 GUI 바이너리 하나.
+[MyGo](https://github.com/egoist/mygo)로 만든 네이티브 창입니다(Go). 릴리즈에는 `bmseeker`(CLI)와
+`bmseeker-gui` 두 바이너리가 있고, `bmseeker-gui`는 CLI를 품고 있습니다:
+
+```text
+bmseeker-gui                 창
+bmseeker-gui <BMS 폴더>       그 라이브러리로 창
+bmseeker-gui <CLI 명령>...    CLI 그대로 (link, song, table, library, event, --help ...)
+```
+
+- **Tables**: 난이도표를 골라 라이브러리에 없는 채보(레벨별), 하나 또는 보이는 것 전부 받기 (곡, 그다음 차분).
+- **Link**: 링크 하나를 라이브러리로.
+- **Waiting**: 곡보다 먼저 온 차분과 가장 그럴듯한 폴더.
+- **Browser**: 페이지만 주는 링크(OneDrive 등). 열면 창 안의 웹뷰가 다운로드 버튼을 눌러 받고, 받은 파일을
+  라이브러리로 들입니다.
+- **Settings**: BMS 폴더, 난이도표 목록 (`<설정 폴더>/bmseeker/gui.json`).
+
+창은 CLI를 `--json`으로 띄워 레코드를 읽습니다. 품은 CLI는 처음 쓸 때 사용자 캐시 폴더에 풀어 씁니다
+(`$BMSEEKER_CLI`이 있으면 그것, 품지 않은 개발 빌드는 PATH의 `bmseeker`).
+
+빌드: `gui/build.sh` (CLI를 `cargo build --release --features cli`로 만들어 `gui/bin/`에 넣고 `go build`; Go 1.27+).
 
 ## 모듈
 
