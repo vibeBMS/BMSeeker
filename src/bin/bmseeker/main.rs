@@ -1,7 +1,7 @@
 //! `bmseeker`: difficulty tables, downloads from where BMS authors link
 //! songs, a library's charts and BMS events, from a terminal or a script.
 //!
-//! `bmseeker [--json] [--config FILE] <noun> <verb> ...`. With `--json`
+//! `bmseeker [--json] [--config FILE] [--third-party] <noun> <verb> ...`. With `--json`
 //! every command writes JSON Lines (one record a line, as it goes); the
 //! `event` commands always do, and read records (JSON Lines, or a JSON
 //! array or object) from a file or `-` (stdin).
@@ -26,6 +26,12 @@ struct Cli {
     /// Settings (JSON; else $BMSEEKER_CONFIG, else <config folder>/bmseeker/config.json).
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
+    /// Also third parties' copies: other people's mirrors of dead sites and
+    /// uploaders (darksabun.club, bms.hexlataia.xyz), the community archive
+    /// (bms.kyouko.moe). What they bring is checked for the chart's MD5
+    /// where it was found by name.
+    #[arg(long, global = true)]
+    third_party: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -87,7 +93,10 @@ impl Run {
 fn main() {
     let cli = Cli::parse();
     let config = match Config::load(cli.config.as_deref()) {
-        Ok(c) => c,
+        Ok(c) => Config {
+            third_party: c.third_party || cli.third_party,
+            ..c
+        },
         Err(e) => {
             eprintln!("bmseeker: {e}");
             std::process::exit(2);

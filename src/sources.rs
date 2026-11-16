@@ -321,6 +321,9 @@ impl Sources {
     pub fn from_config(config: &Config, mut lists: Vec<(&'static str, Links)>) -> Sources {
         let mut out = Sources::default();
         for name in &config.sources {
+            if !config.uses(name) {
+                continue;
+            }
             if name == "bmssearch" {
                 out.push(Box::new(BmsSearch::new(config)));
             } else if name == "mirrors" {

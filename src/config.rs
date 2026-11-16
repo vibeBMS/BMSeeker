@@ -23,11 +23,16 @@ pub struct Config {
     /// Where else a song's links are looked for, in order: `table` (the
     /// difficulty tables given), `stella`, `tsv` (link lists given),
     /// `bmssearch`, `mirrors` (a separate chart in [`Config::chart_mirrors`]),
-    /// `bmslibrary` (the community archive's songs: [`Config::bms_library`];
-    /// not used unless named).
+    /// `bmslibrary` (the community archive's songs: [`Config::bms_library`]).
+    /// The last two only with [`Config::third_party`].
     pub sources: Vec<String>,
+    /// Whether third parties' copies are used: other people's mirrors of
+    /// dead sites and uploaders, and the community archive
+    /// ([`Config::uploaders`], the `mirrors` and `bmslibrary` sources). Not
+    /// the authors' own links, nor the event mirror of manbow works.
+    pub third_party: bool,
     /// Dead uploaders' files, numbered, kept elsewhere: a link to one goes
-    /// to its mirrors.
+    /// to its mirrors (with [`Config::third_party`]).
     pub uploaders: Vec<Uploader>,
     /// Folders where separate charts of dead sites are kept under their
     /// file names (BMS SEARCH knows a chart's): the `mirrors` source.
@@ -44,6 +49,9 @@ pub struct Config {
     /// (0..1).
     pub min_coverage: f32,
 }
+
+/// The [`Config::sources`] that are third parties' copies.
+pub const THIRD_PARTY_SOURCES: &[&str] = &["mirrors", "bmslibrary"];
 
 /// A dead uploader whose files are kept elsewhere by number.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -112,15 +120,25 @@ impl Default for Config {
             bmssearch_api: "https://api.bmssearch.net/v1".into(),
             stella_list: "https://stellabms.xyz/score_upload_full.json".into(),
             mega_api: "https://g.api.mega.co.nz/cs?id=0".into(),
-            sources: ["table", "stella", "tsv", "bmssearch", "mirrors"]
-                .map(String::from)
-                .to_vec(),
+            sources: [
+                "table",
+                "stella",
+                "tsv",
+                "bmssearch",
+                "mirrors",
+                "bmslibrary",
+            ]
+            .map(String::from)
+            .to_vec(),
+            third_party: false,
             uploaders: vec![Uploader {
                 site: "gnqg.rosx.net".into(),
                 digits: 5,
                 mirrors: [
                     "https://bms.hexlataia.xyz/mirror/gnqg-upload/{n}.zip",
                     "https://darksabun.club/mirror/gnqg-upload/{n}.zip",
+                    // the community archive
+                    "https://drive.google.com/drive/folders/1ASZJPUALe1-gxQ034wSUlFuAGWlVUULz#{h}xx/{n}.zip",
                 ]
                 .map(String::from)
                 .to_vec(),
@@ -147,9 +165,11 @@ impl Config {
         serde_json::from_str(text).map_err(|e| e.to_string())
     }
 
-    /// Whether `name` is one of the [`Config::sources`].
+    /// Whether `name` is one of the [`Config::sources`] (a third party's
+    /// only with [`Config::third_party`]).
     pub fn uses(&self, name: &str) -> bool {
-        self.sources.iter().any(|s| s == name)
+        (self.third_party || !THIRD_PARTY_SOURCES.contains(&name))
+            && self.sources.iter().any(|s| s == name)
     }
 
     /// The settings file: `path`, else `$BMSEEKER_CONFIG`, else
@@ -189,6 +209,14 @@ mod tests {
         let c = Config::from_json(r#"{"mirror_catalog": "", "sources": ["bmssearch"]}"#).unwrap();
         assert_eq!(c.mirror_catalog, "");
         assert!(c.uses("bmssearch") && !c.uses("stella"));
+        // third parties' only when allowed
+        let c = Config::default();
+        assert!(!c.uses("mirrors") && !c.uses("bmslibrary"));
+        let c = Config {
+            third_party: true,
+            ..c
+        };
+        assert!(c.uses("mirrors") && c.uses("bmslibrary"));
         assert_eq!(c.manbow, Config::default().manbow);
         assert!(Config::from_json("{").is_err());
     }

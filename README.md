@@ -50,27 +50,21 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","
 
 다른 링크를 찾는 곳(소스)은 설정의 `sources` 순서로 묻습니다: 난이도표(`table`, `--also`로 더), Stella 업로더
 목록(`stella`), TSV 목록(`tsv`, `--list`; `md5`, `url_diff`, `url`), [BMS SEARCH](https://bmssearch.net)(`bmssearch`,
-채보 → 작품 → 작가가 올린 다운로드 링크, 작품에 묶이지 않은 차분은 제목·아티스트로 검색), 죽은 사이트 차분의
-미러(`mirrors`, BMS SEARCH가 아는 채보 파일 이름으로 `chart_mirrors` 폴더에서: 기본 darksabun의 absolute 미러),
-커뮤니티 아카이브 "BMS Library"(`bmslibrary`, `Title (by Artist).rar`를 제목·아티스트로; 기본 꺼짐).
-이름으로 찾은 것(`mirrors`, `bmslibrary`)은 받아서 그 채보(MD5)가 들어 있을 때만 라이브러리에 넣습니다.
-`--own-links`: 자기 링크만.
+채보 → 작품 → 작가가 올린 다운로드 링크, 작품에 묶이지 않은 차분은 제목·아티스트로 검색).
+`--third-party`(설정 `"third_party": true`)를 주면 제3자 사본도 씁니다(기본 꺼짐): 죽은 사이트 차분의 미러(`mirrors`,
+BMS SEARCH가 아는 채보 파일 이름으로 `chart_mirrors` 폴더에서: darksabun의 absolute 미러), 커뮤니티 아카이브
+"BMS Library"(`bmslibrary`, bms.kyouko.moe의 `Title (by Artist).rar`를 제목·아티스트로), 죽은 업로더 링크의 번호별
+사본(`uploaders`). 이름으로 찾은 것(`mirrors`, `bmslibrary`)은 받아서 그 채보(MD5)가 들어 있을 때만 라이브러리에
+넣습니다. `--own-links`: 자기 링크만.
 
-죽은 업로더 링크는 번호로 미러에서 받습니다(`uploaders`): 기본은 gnqg(`gnqg.rosx.net/upload/upload.cgi?get=03691`)
-→ bms.hexlataia.xyz, darksabun.club의 `gnqg-upload/03691.zip`. 미러 주소의 `{n}`은 번호, `{h}`는 백의 자리(`36`),
-Google Drive 폴더 링크는 `#하위/폴더/파일`로 내려갑니다. 커뮤니티 아카이브의 gnqg 폴더도 쓰려면(기본 꺼짐):
-
-```json
-{"uploaders": [{"site": "gnqg.rosx.net", "digits": 5, "mirrors": [
-  "https://bms.hexlataia.xyz/mirror/gnqg-upload/{n}.zip",
-  "https://darksabun.club/mirror/gnqg-upload/{n}.zip",
-  "https://drive.google.com/drive/folders/1ASZJPUALe1-gxQ034wSUlFuAGWlVUULz#{h}xx/{n}.zip"]}],
- "sources": ["table", "stella", "tsv", "bmssearch", "mirrors", "bmslibrary"]}
-```
+죽은 업로더 링크(`--third-party`)는 번호로 사본에서 받습니다(`uploaders`): 기본은 gnqg
+(`gnqg.rosx.net/upload/upload.cgi?get=03691`) → bms.hexlataia.xyz, darksabun.club의 `gnqg-upload/03691.zip`, 커뮤니티
+아카이브의 gnqg 폴더 순. 사본 주소의 `{n}`은 번호, `{h}`는 백의 자리(`36`), Google Drive 폴더 링크는
+`#하위/폴더/파일`로 내려갑니다.
 
 설정(`--config`, `$BMSEEKER_CONFIG`, `<설정 폴더>/bmseeker/config.json`)은 JSON으로 기본값 위에 덮습니다:
 `user_agent`, `mirror_catalog`(BMS 이벤트 미러 목록, 비우면 안 씀), `manbow`, `bmssearch_api`, `stella_list`,
-`mega_api`, `sources`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`, `downloads`(라이브러리 안 대기 폴더),
+`mega_api`, `sources`, `third_party`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`, `downloads`(라이브러리 안 대기 폴더),
 `min_coverage`.
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`

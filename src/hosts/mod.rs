@@ -170,10 +170,10 @@ impl Default for Hosts {
 
 impl Hosts {
     /// The [`Hosts::default`] ones, with the settings' dead uploaders'
-    /// mirrors first.
+    /// mirrors first (third parties': with [`Config::third_party`]).
     pub fn from_config(config: &Config) -> Hosts {
         let mut hosts = Hosts::default();
-        if !config.uploaders.is_empty() {
+        if config.third_party && !config.uploaders.is_empty() {
             hosts.first(Box::new(uploader::Uploaders(config.uploaders.clone())));
         }
         hosts

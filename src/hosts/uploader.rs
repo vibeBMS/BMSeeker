@@ -36,7 +36,11 @@ mod tests {
 
     #[test]
     fn to_the_mirrors() {
-        let cx = Context::new(Config::default());
+        assert_ne!(Context::new(Config::default()).hosts.names()[0], "uploader");
+        let cx = Context::new(Config {
+            third_party: true,
+            ..Config::default()
+        });
         assert_eq!(cx.hosts.names()[0], "uploader");
         let http = Canned(vec![]);
         let mut r = crate::hosts::Resolver::new(
@@ -57,6 +61,7 @@ mod tests {
                 "https://darksabun.club/mirror/gnqg-upload/03691.zip"
             ))
         );
-        assert!(!r.try_next());
+        // then the community archive's folder
+        assert!(r.try_next());
     }
 }
