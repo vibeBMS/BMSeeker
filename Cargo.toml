@@ -37,7 +37,7 @@ ehttp = "0.7"
 # archives (.zip; .7z; .rar: Apache-2.0 with the UnRAR license restriction)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd"] }
-unrar-rs = { version = "0.16", default-features = false, features = ["crypto-rust"] }
+unrar-rs = { version = "0.16.4", default-features = false, features = ["crypto-rust"] }
 # MEGA files are AES-128-CTR encrypted
 aes = "0.9"
 # beatoraja table caches (.bmt) are gzip
@@ -52,9 +52,3 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-
-# unrar-rs 0.16.3 does not build for wasm32-unknown-unknown (its DOS time
-# conversion needs libc's mktime): fixed upstream, not released yet. Only
-# this repository's own builds use it; drop it with the next release.
-[patch.crates-io]
-unrar-rs = { git = "https://github.com/scryer-media/rarpar", rev = "be8e5aceff738bd618a540143def08b3e745aae1" }
