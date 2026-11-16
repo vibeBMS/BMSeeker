@@ -1,7 +1,8 @@
 //! A work's page on a BMS event venue names the author's download links:
-//! the one the event mirror would take is followed. A manbow work the
-//! event mirror holds (vibeBMS/BMS, [`Config::mirror_catalog`]) comes from
-//! the mirror.
+//! the one the event mirror would take is followed, its mirrors after it.
+//! For a manbow work the event index (vibeBMS/BMS,
+//! [`Config::mirror_catalog`]) knows first: the mirror's file, else the
+//! work's links as the index's checks order them (those gone left out).
 
 use super::{get_then, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
@@ -20,12 +21,12 @@ impl Host for Manbow {
     }
 
     fn open(&self, link: &Link, _: Option<&Want>, config: &Config) -> BoxTask<Resolved> {
-        let mirror = crate::manbow::work_page(&link.url)
+        let index = crate::manbow::work_page(&link.url)
             .filter(|_| link.hops == 0 && !config.mirror_catalog.is_empty());
         Box::new(ManbowWork {
             link: link.url.clone(),
             catalog: config.mirror_catalog.clone(),
-            state: match mirror {
+            state: match index {
                 Some((event, num)) => State::Catalog {
                     event: event.into(),
                     num: num.into(),
@@ -42,7 +43,7 @@ enum State {
         event: u64,
         num: u64,
     },
-    /// A mirrored event's index, for its work `num`.
+    /// An event's index, for its work `num`.
     Index {
         num: u64,
     },
@@ -88,8 +89,7 @@ impl Task for ManbowWork {
                     .into_iter()
                     .flatten()
                     .find_map(|e| {
-                        let mirrored = e.get("mirror").and_then(|m| m.as_bool()) == Some(true);
-                        (mirrored && e.get("venue").and_then(|n| n.as_u64()) == Some(event))
+                        (e.get("venue").and_then(|n| n.as_u64()) == Some(event))
                             .then(|| e.get("index")?.as_str())
                             .flatten()
                             .map(str::to_string)
@@ -121,17 +121,28 @@ impl Task for ManbowWork {
                             .is_some_and(|n| !n.contains('+'))
                     });
                 let s = |k: &str| main.and_then(|f| f.get(k)?.as_str()).map(str::to_string);
-                match s("url") {
-                    Some(url) => Next::Done(Resolved::File(Target::named(url, s("original")))),
-                    None => self.venue(),
+                if let Some(url) = s("url") {
+                    return Next::Done(Resolved::File(Target::named(url, s("original"))));
                 }
+                // not mirrored: its links as checked, the work's page last
+                let mut links: Vec<String> = work
+                    .and_then(|w| w.get("links")?.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|l| l.as_str().map(str::to_string))
+                    .collect();
+                if links.is_empty() {
+                    return self.venue();
+                }
+                links.push(self.link.clone());
+                Next::Done(Resolved::Follow(links))
             }
             State::Venue => Next::Done(match answer {
                 Ok(body) => {
                     let page = crate::text::decode_text(&body);
                     match pick(&venue_links(&page)) {
-                        Some(next) => Resolved::Follow(next),
-                        None => Resolved::Page,
+                        links if links.is_empty() => Resolved::Page,
+                        links => Resolved::Follow(links),
                     }
                 }
                 Err(e) => Resolved::Failed(e),
@@ -171,8 +182,8 @@ impl Host for BmsSearchVenue {
                 .filter(|(_, u)| u.starts_with("http"))
                 .collect();
             match pick(&links) {
-                Some(next) => Resolved::Follow(next),
-                None => Resolved::Page,
+                links if links.is_empty() => Resolved::Page,
+                links => Resolved::Follow(links),
             }
         })
     }
@@ -185,11 +196,11 @@ fn work_path(u: &str) -> Option<String> {
     (path.split('/').filter(|p| !p.is_empty()).count() >= 4).then(|| path.to_string())
 }
 
-/// (label, URL) of the download links on a manbow work page (its
-/// "Download" box).
+/// (label, URL) of the download links on a manbow work page: its
+/// "Download" box, or on an older event's page its "DownLoadAddress" cell.
 fn venue_links(page: &str) -> Vec<(String, String)> {
     let Some(at) = page.find("<h3>Download</h3>") else {
-        return Vec::new();
+        return old_venue_links(page);
     };
     let block = &page[at + "<h3>Download</h3>".len()..];
     // up to the box's footer (its size and date)
@@ -201,9 +212,27 @@ fn venue_links(page: &str) -> Vec<(String, String)> {
     crate::manbow::links_of(&block[..end])
 }
 
-/// The main archive among a work's links, as the event mirror picks it.
-fn pick(links: &[(String, String)]) -> Option<String> {
-    crate::manbow::pick(links).main.into_iter().next()
+/// An older event's page (2010 and before): a table row whose header cell
+/// says "DownLoadAddress", the links in the next cell.
+fn old_venue_links(page: &str) -> Vec<(String, String)> {
+    let lower = page.to_ascii_lowercase();
+    let Some(at) = lower.find("downloadaddress") else {
+        return Vec::new();
+    };
+    let cell = (|| {
+        let head_end = at + lower[at..].find("</td>")? + "</td>".len();
+        let open = head_end + lower[head_end..].find("<td")?;
+        let start = open + lower[open..].find('>')? + 1;
+        let end = start + lower[start..].find("</td>")?;
+        Some(&page[start..end])
+    })();
+    cell.map(crate::manbow::links_of).unwrap_or_default()
+}
+
+/// A work's links in the order to try: the main archive the event mirror
+/// would take, then its mirrors.
+fn pick(links: &[(String, String)]) -> Vec<String> {
+    crate::manbow::pick(links).main
 }
 
 #[cfg(test)]
@@ -222,7 +251,7 @@ mod tests {
         assert_eq!(links[0].0, "wav");
         assert_eq!(links[1].0, "wav ogg");
         assert_eq!(
-            pick(&links).as_deref(),
+            pick(&links).first().map(String::as_str),
             Some("https://drive.google.com/file/d/O/view")
         );
         // not mirrored: the venue page, then the ogg archive on Drive
@@ -258,6 +287,47 @@ mod tests {
             ],
         );
         assert!(t.unwrap().url.contains("id=O"));
+    }
+
+    #[test]
+    fn older_pages() {
+        let page = r#"<TD class="event" align="center"><font class="event" size=2><B>DownLoadAddress</B></td>
+<td class="eventback" colspan="3"><a href="http://dead.example/ERIS.zip">http://dead.example/ERIS.zip</A><BR><a href="http://up.example/ERIS.zip">http://up.example/ERIS.zip</A><BR>（下はミラーです）</td>"#;
+        let links = venue_links(page);
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            pick(&links),
+            ["http://dead.example/ERIS.zip", "http://up.example/ERIS.zip"]
+        );
+    }
+
+    #[test]
+    fn indexed_links_then_mirrors() {
+        use crate::hosts::{Context, Resolver};
+        use crate::net::{run, Canned};
+        // not mirrored: the index's checked links, the work's page last
+        let catalog: &[u8] =
+            br#"[{"venue":146,"mirror":false,"index":"https://raw.example/x/index.json"}]"#;
+        let index: &[u8] = br#"[{"num":94,"files":[],"links":["https://dead.example/a.zip","https://up.example/a.zip"]}]"#;
+        let http = Canned(vec![
+            (CATALOG.into(), Ok(catalog.to_vec())),
+            (
+                "https://raw.example/x/index.json".into(),
+                Ok(index.to_vec()),
+            ),
+        ]);
+        let mut r = Resolver::new(LINK, None, &Context::default());
+        assert_eq!(
+            run(&mut r, &http).unwrap().url,
+            "https://dead.example/a.zip"
+        );
+        // its file did not come: the next
+        assert!(r.try_next());
+        assert_eq!(run(&mut r, &http).unwrap().url, "https://up.example/a.zip");
+        // then the work's page, which gives nothing here
+        assert!(r.try_next());
+        assert!(run(&mut r, &http).is_err());
+        assert!(!r.try_next());
     }
 
     #[test]

@@ -25,22 +25,38 @@ pub fn fetch_named(
     cx: &Context,
 ) -> Result<String, Fetch> {
     crate::progress::stage(crate::progress::Stage::Finding);
-    let target = run(&mut Resolver::new(link, want, cx), &Client::new(&cx.config))?;
-    let served = match &target.mega_key {
-        None => download(&target.url, out, &cx.config.user_agent)?,
+    let http = Client::new(&cx.config);
+    let mut r = Resolver::new(link, want, cx);
+    loop {
+        let got = run(&mut r, &http).and_then(|t| get_target(t, out, any, cx));
+        // a mirror the page named, when this file did not come
+        let cancelled = crate::progress::current().is_some_and(|p| p.cancelled());
+        match got {
+            Err(_) if !cancelled && r.try_next() => {
+                crate::progress::stage(crate::progress::Stage::Finding);
+            }
+            got => return got,
+        }
+    }
+}
+
+/// `t`'s file into `out`: its name.
+fn get_target(t: super::Target, out: &Path, any: bool, cx: &Context) -> Result<String, Fetch> {
+    let served = match &t.mega_key {
+        None => download(&t.url, out, &cx.config.user_agent)?,
         Some(key) => {
             let enc = out.with_extension("mega");
-            download(&target.url, &enc, &cx.config.user_agent)?;
+            download(&t.url, &enc, &cx.config.user_agent)?;
             let d = mega_decrypt(&enc, out, key);
             let _ = std::fs::remove_file(&enc);
             d?;
             None
         }
     };
-    let name = target
+    let name = t
         .name
         .or(served)
-        .or_else(|| url_file_name(&target.url))
+        .or_else(|| url_file_name(&t.url))
         .unwrap_or_else(|| "download".into());
     let page = || {
         let mut head = [0u8; 512];

@@ -97,8 +97,10 @@ impl Target {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Resolved {
     File(Target),
-    /// Another link to go on with (a venue's work page: the author's link).
-    Follow(String),
+    /// Other links to go on with, the best first: a venue's work page names
+    /// the author's link and its mirrors. The next is tried when one gives
+    /// nothing ([`Resolver::try_next`] when its file does not download).
+    Follow(Vec<String>),
     /// A page for a person in a browser.
     Page,
     Failed(String),
@@ -228,6 +230,13 @@ pub struct Resolver {
     task: Option<BoxTask<Resolved>>,
     /// The host that answered last.
     host: &'static str,
+    /// The other links the last page named (mirrors), and their hop.
+    alts: Vec<String>,
+    alt_hops: u8,
+    /// [`Resolver::try_next`] was called: the next start goes on with it.
+    resume: bool,
+    /// A link that gave a page (a browser may still get its file).
+    paged: bool,
 }
 
 impl Resolver {
@@ -240,7 +249,36 @@ impl Resolver {
             hops: 0,
             task: None,
             host: "",
+            alts: Vec::new(),
+            alt_hops: 0,
+            resume: false,
+            paged: false,
         }
+    }
+
+    /// After the file the last run gave did not download: go on with the
+    /// next of the links the page named (a mirror), if there is one; then
+    /// run the resolver again.
+    pub fn try_next(&mut self) -> bool {
+        if self.alts.is_empty() {
+            return false;
+        }
+        self.link = self.alts.remove(0);
+        self.hops = self.alt_hops;
+        self.resume = true;
+        true
+    }
+
+    /// The next alternative after one gave `err`, else the end.
+    fn or_next(&mut self, err: Fetch) -> Next<Result<Target, Fetch>> {
+        self.paged |= err == Fetch::Page;
+        if self.alts.is_empty() {
+            // a page beats an error: a browser may still get the file
+            return Next::Done(Err(if self.paged { Fetch::Page } else { err }));
+        }
+        self.link = self.alts.remove(0);
+        self.hops = self.alt_hops;
+        self.open()
     }
 
     /// The host that opened the last link ("drive", "mega"...).
@@ -250,10 +288,10 @@ impl Resolver {
 
     fn open(&mut self) -> Next<Result<Target, Fetch>> {
         let Some(link) = Link::parse(&self.link, self.hops) else {
-            return Next::Done(Err(Fetch::Page));
+            return self.or_next(Fetch::Page);
         };
         let Some(host) = self.cx.hosts.find(&link) else {
-            return Next::Done(Err(Fetch::Page));
+            return self.or_next(Fetch::Page);
         };
         self.host = host.name();
         let mut task = host.open(&link, self.want.as_ref(), &self.cx.config);
@@ -266,13 +304,19 @@ impl Resolver {
         match next {
             Next::Ask(r) => Next::Ask(r),
             Next::Done(Resolved::File(t)) => Next::Done(Ok(t)),
-            Next::Done(Resolved::Follow(next)) if self.hops < MAX_HOPS => {
+            Next::Done(Resolved::Follow(mut links))
+                if self.hops < MAX_HOPS && !links.is_empty() =>
+            {
                 self.hops += 1;
-                self.link = next;
+                self.link = links.remove(0);
+                // the page's other links before those of an earlier page
+                links.append(&mut self.alts);
+                self.alts = links;
+                self.alt_hops = self.hops;
                 self.open()
             }
-            Next::Done(Resolved::Follow(_) | Resolved::Page) => Next::Done(Err(Fetch::Page)),
-            Next::Done(Resolved::Failed(e)) => Next::Done(Err(Fetch::Failed(e))),
+            Next::Done(Resolved::Follow(_) | Resolved::Page) => self.or_next(Fetch::Page),
+            Next::Done(Resolved::Failed(e)) => self.or_next(Fetch::Failed(e)),
         }
     }
 }
@@ -280,7 +324,12 @@ impl Resolver {
 impl Task for Resolver {
     type Output = Result<Target, Fetch>;
     fn start(&mut self) -> Next<Self::Output> {
+        if std::mem::take(&mut self.resume) {
+            return self.open();
+        }
         self.hops = 0;
+        self.alts.clear();
+        self.paged = false;
         self.open()
     }
     fn feed(&mut self, answer: Answer) -> Next<Self::Output> {
