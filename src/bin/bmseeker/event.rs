@@ -6,7 +6,8 @@
 //!         "links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
 //! check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
 //!         "size","charts","title"?,"error"?,"at",
-//!         "num"?,"source"?}   (a link a source found for work "num")
+//!         "num"?,"source"?,   (a link a source found for work "num")
+//!         "mirrored"?}        (a dead uploader's, checked through its mirrors)
 //! ```
 
 use crate::io::{read_text, records, s};
@@ -233,6 +234,19 @@ struct Checks<'a> {
 }
 
 impl Checks<'_> {
+    /// A link that failed, to a dead uploader with mirrors now (with
+    /// --third-party), not checked through them yet: checked again.
+    fn mirrored(&self, k: &Map<String, Value>) -> bool {
+        let config = self.r.config();
+        config.third_party
+            && !k.contains_key("mirrored")
+            && !matches!(s(k, "state").as_str(), "archive" | "chart")
+            && config
+                .uploaders
+                .iter()
+                .any(|u| u.number(&s(k, "url")).is_some())
+    }
+
     fn time_up(&self) -> bool {
         self.minutes.is_some_and(|m| now() - self.start > m * 60)
     }
@@ -253,7 +267,7 @@ impl Checks<'_> {
             } else {
                 self.days
             };
-            now().saturating_sub(at) < keep * 86_400
+            now().saturating_sub(at) < keep * 86_400 && !self.mirrored(k)
         });
         let time_up = self.time_up();
         if fresh || (time_up && before.is_some()) {
@@ -286,6 +300,10 @@ impl Checks<'_> {
             rec.extend(o);
         }
         rec.insert("at".into(), json!(now()));
+        let config = self.r.config();
+        if config.third_party && config.uploaders.iter().any(|u| u.number(url).is_some()) {
+            rec.insert("mirrored".into(), json!(true));
+        }
         if let Some((num, source)) = found {
             rec.insert("num".into(), json!(num));
             rec.insert("source".into(), json!(source));
