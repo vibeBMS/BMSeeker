@@ -110,6 +110,7 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
             }
             let mut rules = Rules {
                 min_coverage: r.config().min_coverage,
+                ..Default::default()
             };
             if let Some(m) = min {
                 rules.min_coverage = m / 100.0;

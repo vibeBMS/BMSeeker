@@ -86,19 +86,21 @@ pub fn classify(dir: &Path) -> (Kind, usize, String) {
     let mut charts: Vec<(f32, String)> = Vec::new();
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
-        let mut names = Vec::new();
         let mut here = Vec::new();
         for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
             let p = e.path();
             if p.is_dir() {
                 todo.push(p);
-            } else {
-                names.push(crate::import::file_name(&p));
-                if crate::placement::is_chart(&p) {
-                    here.push(p);
-                }
+            } else if crate::placement::is_chart(&p) {
+                here.push(p);
             }
         }
+        // the files below the charts' folder, by their path in it
+        let names = if here.is_empty() {
+            Vec::new()
+        } else {
+            crate::placement::files_below(&Disk, &d)
+        };
         // (a few charts per folder tell; a pack can hold hundreds)
         for c in here.iter().take(8) {
             if let Some(info) = crate::placement::chart_info(&Disk, c) {
