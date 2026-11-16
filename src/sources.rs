@@ -129,27 +129,28 @@ impl Source for ChartMirrors {
             return Ready::boxed(Vec::new());
         }
         let folders = self.folders.clone();
-        Box::new(Then::new(
-            format!("{}/patterns/{md5}", self.api),
-            move |body: Vec<u8>| {
-                let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                let name = v["file"]["name"].as_str().unwrap_or("");
-                // a file name, nothing of a path
-                if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
-                    return Vec::new();
-                }
-                folders
-                    .iter()
-                    .map(|f| {
-                        format!(
-                            "{}/{}",
-                            f.trim_end_matches('/'),
-                            crate::net::url_encode(name)
-                        )
-                    })
-                    .collect()
-            },
-        ))
+        crate::net::get_then(format!("{}/patterns/{md5}", self.api), move |answer| {
+            // (nothing when it fails)
+            let Ok(body) = answer else {
+                return Vec::new();
+            };
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let name = v["file"]["name"].as_str().unwrap_or("");
+            // a file name, nothing of a path
+            if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+                return Vec::new();
+            }
+            folders
+                .iter()
+                .map(|f| {
+                    format!(
+                        "{}/{}",
+                        f.trim_end_matches('/'),
+                        crate::net::url_encode(name)
+                    )
+                })
+                .collect()
+        })
     }
 }
 
@@ -361,36 +362,6 @@ impl Task for Library {
                 )
             }
         }
-    }
-}
-
-/// One GET, then what its answer gives (nothing when it fails).
-struct Then<F> {
-    url: String,
-    then: Option<F>,
-}
-
-impl<F> Then<F> {
-    fn new(url: String, then: F) -> Then<F> {
-        Then {
-            url,
-            then: Some(then),
-        }
-    }
-}
-
-impl<F: FnOnce(Vec<u8>) -> Vec<String> + Send> Task for Then<F> {
-    type Output = Vec<String>;
-
-    fn start(&mut self) -> Next<Vec<String>> {
-        Next::Ask(crate::net::Request::Get(self.url.clone()))
-    }
-
-    fn feed(&mut self, answer: Answer) -> Next<Vec<String>> {
-        Next::Done(match (answer, self.then.take()) {
-            (Ok(body), Some(f)) => f(body),
-            _ => Vec::new(),
-        })
     }
 }
 

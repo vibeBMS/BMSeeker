@@ -5,6 +5,7 @@
 
 use super::{sniff_bytes, Context, Fetch, MegaCipher, Resolver, Want, STALL_MS};
 use crate::net::{percent_decode, run, Client};
+use crate::text::safe_file_name;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -145,20 +146,6 @@ fn url_file_name(url: &str) -> Option<String> {
         return None; // just the host
     }
     safe_file_name(&percent_decode(last))
-}
-
-/// A name safe for a file: no path or reserved characters.
-fn safe_file_name(n: &str) -> Option<String> {
-    let n: String = n
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let n = n.trim().trim_matches('.').to_string();
-    (!n.is_empty()).then_some(n)
 }
 
 /// The archive format of a file from its first bytes.

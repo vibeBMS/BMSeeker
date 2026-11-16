@@ -32,7 +32,7 @@ pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
 
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, Next, Request, Task};
+use crate::net::{Answer, BoxTask, Next, Task};
 use std::sync::Arc;
 
 /// Why a link gave no file.
@@ -362,29 +362,9 @@ pub(crate) fn get_then<F>(url: String, then: F) -> BoxTask<Resolved>
 where
     F: FnOnce(Vec<u8>) -> Resolved + Send + 'static,
 {
-    struct Then<F> {
-        request: Option<Request>,
-        then: Option<F>,
-    }
-    impl<F: FnOnce(Vec<u8>) -> Resolved + Send> Task for Then<F> {
-        type Output = Resolved;
-        fn start(&mut self) -> Next<Resolved> {
-            match self.request.take() {
-                Some(r) => Next::Ask(r),
-                None => Next::Done(Resolved::Failed("asked twice".into())),
-            }
-        }
-        fn feed(&mut self, answer: Answer) -> Next<Resolved> {
-            Next::Done(match (answer, self.then.take()) {
-                (Ok(body), Some(f)) => f(body),
-                (Err(e), _) => Resolved::Failed(e),
-                (Ok(_), None) => Resolved::Failed("answered twice".into()),
-            })
-        }
-    }
-    Box::new(Then {
-        request: Some(Request::Get(url)),
-        then: Some(then),
+    crate::net::get_then(url, |answer| match answer {
+        Ok(body) => then(body),
+        Err(e) => Resolved::Failed(e),
     })
 }
 
@@ -481,12 +461,9 @@ fn between<'a>(s: &'a str, a: &str, b: &str) -> Option<&'a str> {
     Some(&s[i..j])
 }
 
+/// A link in a page (an attribute's value).
 fn unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&#39;", "'")
-        .replace("&quot;", "\"")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    crate::text::unescape_attr(s)
 }
 
 #[cfg(test)]

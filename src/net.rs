@@ -77,6 +77,35 @@ impl<T: Send> Task for Ready<T> {
     }
 }
 
+/// One GET, then what `then` makes of its answer.
+pub fn get_then<T, F>(url: String, then: F) -> BoxTask<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Answer) -> T + Send + 'static,
+{
+    struct Then<F> {
+        url: String,
+        then: Option<F>,
+    }
+    impl<T, F: FnOnce(Answer) -> T + Send> Task for Then<F> {
+        type Output = T;
+        fn start(&mut self) -> Next<T> {
+            Next::Ask(Request::Get(self.url.clone()))
+        }
+        fn feed(&mut self, answer: Answer) -> Next<T> {
+            match self.then.take() {
+                Some(f) => Next::Done(f(answer)),
+                // (fed twice: asks again, as at the start)
+                None => self.start(),
+            }
+        }
+    }
+    Box::new(Then {
+        url,
+        then: Some(then),
+    })
+}
+
 /// What answers requests.
 pub trait Http {
     fn send(&self, request: &Request) -> Answer;

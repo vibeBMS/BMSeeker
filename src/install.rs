@@ -39,45 +39,12 @@ pub fn chart_link(u: &str) -> bool {
 pub fn chart_name(u: &str) -> String {
     let path = u.split(['?', '#']).next().unwrap_or("");
     let name = path.rsplit('/').next().unwrap_or("chart.bms");
-    safe_name(&percent_decode(name))
+    safe_name(&crate::net::percent_decode(name))
 }
 
 /// `name` as one file name (no path, nothing a file system refuses).
 pub fn safe_name(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let s = s.trim().trim_matches('.').to_string();
-    if s.is_empty() {
-        "download".into()
-    } else {
-        s
-    }
-}
-
-/// `%28` and the like in a URL's file name.
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = |c: u8| (c as char).to_digit(16);
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
-                out.push((h * 16 + l) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::text::safe_file_name(name).unwrap_or_else(|| "download".into())
 }
 
 /// The charts in a separate chart's unpacked archive `dir` into their
@@ -572,7 +539,6 @@ mod tests {
             chart_name("https://x.org/a/b%20c%28M%29.bms?dl=1"),
             "b c(M).bms"
         );
-        assert_eq!(percent_decode("a%2"), "a%2");
         assert_eq!(safe_name("a/b: c?"), "a_b_ c_");
     }
 

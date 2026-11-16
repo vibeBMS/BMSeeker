@@ -4,7 +4,7 @@
 
 use crate::fs::Fs;
 use crate::placement::{self, Located};
-use crate::unpack::Capped;
+use crate::unpack::{safe_rel, Capped};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -32,16 +32,6 @@ fn ext(p: &Path) -> String {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default()
-}
-
-/// `name` from an archive as a relative path that cannot leave its folder.
-fn safe_rel(name: &str) -> Option<PathBuf> {
-    let rel: PathBuf = name
-        .split(['/', '\\'])
-        .filter(|c| !c.is_empty() && *c != "." && *c != "..")
-        .filter(|c| !c.contains(':'))
-        .collect();
-    (!rel.as_os_str().is_empty()).then_some(rel)
 }
 
 fn write_entry(dest: &Path, rel: &Path, r: &mut dyn Read, budget: &mut u64) -> Result<(), String> {
