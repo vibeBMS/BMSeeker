@@ -1,134 +1,151 @@
 # bmseeker
 
-BMS 라이브러리 도구: 난이도표를 읽고, 라이브러리에 없는 곡을 작가·난이도표가 걸어 둔
-링크에서 바로 받아 풀고, 차분(差分) 채보를 그 곡의 폴더에 넣습니다.
-[vibeBMS](https://github.com/vibeBMS/vibe)가 쓰는 라이브러리이자, 게임 없이 쓰는 명령줄 도구입니다.
+A BMS library tool: it reads difficulty tables, downloads the songs your library lacks from the links their authors
+and the tables give, unpacks them, and puts separate charts (差分) into their songs' folders.
+It is the library [vibeBMS](https://github.com/vibeBMS/vibe) uses, and a command-line tool that works without the game.
 
 ```sh
-cargo install --git https://github.com/vibeBMS/BMSeeker --features cli   # bmseeker 명령
+cargo install --git https://github.com/vibeBMS/BMSeeker --features cli   # the bmseeker command
 ```
 
-라이브러리로: `bmseeker = { git = "https://github.com/vibeBMS/BMSeeker" }` (명령줄 도구의 의존성 `clap`은
-`cli` 기능을 켤 때만 들어옵니다).
+As a library: `bmseeker = { git = "https://github.com/vibeBMS/BMSeeker" }` (the command-line tool's dependency,
+`clap`, comes in only with the `cli` feature).
 
 ```text
-bmseeker [--json] [--config 파일] <명사> <동사> ...
+bmseeker [--json] [--config FILE] [--third-party] <noun> <verb> ...
 
-link resolve <링크>... [-t 제목 -a 아티스트]           링크가 가리키는 것 (파일 URL·이름 / 브라우저가 필요한 페이지 / 오류), 받지 않음
-link get <링크>... [-o 폴더|파일] [-t -a --md5] [--search] [--any]
-                                                     링크를 차례로 시도해 받기 (폴더면 원래 파일 이름으로;
-                                                     --search: 다 실패하면 소스들(BMS SEARCH...)의 링크도;
-                                                     --any: 페이지가 아닌 단일 파일(채보, 동영상)도)
-song find [-t -a --md5] [--diff] [--table URL]... [--list 파일|URL]...
-                                                     소스들이 아는 그 곡(--diff: 차분)의 링크
-table show <URL>                                     난이도표와 레벨별 채보 수
-table missing <URL> -L 라이브러리 [-l 레벨] [--get] [--also URL]... [--list ...] [--own-links]
-                                                     라이브러리에 없는 채보 (--get: 받기)
-table export lr2|bmt <URL> <폴더>                     LR2 커스텀 폴더 / beatoraja 난이도표 캐시
-library import <파일> -L 라이브러리                   받아 둔 파일을 라이브러리에
-library place <채보> -L 라이브러리 [--to 폴더] [--min 퍼센트]
-                                                     차분이 들어갈 곡 폴더 후보 (또는 옮기기)
-library pending -L 라이브러리                          곡을 기다리는 차분
-library install <링크>... -L 라이브러리 [--diff] [-t -a --md5] [--own-links]
-                                                     곡(또는 차분)을: 링크를 차례로, 그다음 소스들의 링크
-event works <manbow 이벤트 번호> [--overrides 파일|-]  작품마다 링크와 어느 것이 본체/애드온/미러인지 (JSON Lines)
-event check [작품 파일|-] [--known 파일] [--days N] [--minutes M]
-                                                     작품 링크마다 받아 보고 무엇인지 (JSON Lines)
+link resolve <link>... [-t title -a artist]          what a link leads to (a file's URL and name / a page that
+                                                     needs a browser / an error), without downloading
+link get <link>... [-o folder|file] [-t -a --md5] [--search] [--any]
+                                                     download from the links in turn (into a folder: under the
+                                                     file's own name; --search: when all fail, the sources' links
+                                                     too (BMS SEARCH ...); --any: a single file that is not a page
+                                                     (a chart, a video) too)
+song find [-t -a --md5] [--diff] [--table URL]... [--list FILE|URL]...
+                                                     the links the sources know for the song (--diff: its separate
+                                                     chart)
+table show <URL>                                     a difficulty table and its charts per level
+table missing <URL> -L library [-l level] [--get] [--also URL]... [--list ...] [--own-links]
+                                                     the charts the library lacks (--get: download them)
+table export lr2|bmt <URL> <folder>                  an LR2 custom folder / a beatoraja table cache
+library import <file> -L library                     a downloaded file into the library
+library place <chart> -L library [--to folder] [--min percent]
+                                                     the song folders a separate chart may go into (or move it)
+library pending -L library                           separate charts waiting for their songs
+library install <link>... -L library [--diff] [-t -a --md5] [--own-links]
+                                                     a song (or its separate chart): its links in turn, then the
+                                                     sources' links
+event works <manbow event number> [--overrides FILE|-]
+                                                     each work's links and which is the main archive, an add-on, a
+                                                     mirror (JSON Lines)
+event check [works FILE|-] [--known FILE] [--days N] [--minutes M] [--search]
+                                                     each work's links downloaded and looked into (JSON Lines)
 ```
 
-`--json`이면 모든 명령이 JSON Lines(한 줄에 레코드 하나, 나오는 대로)를 씁니다. `event` 명령은 늘 그렇고,
-레코드를 파일이나 `-`(stdin)에서 읽습니다 (JSON Lines, 또는 JSON 배열, 또는 키별 객체). 사람을 위한 메모는
-stderr로만 나갑니다.
+With `--json`, every command writes JSON Lines (one record a line, as it goes). The `event` commands always do, and
+read records from a file or `-` (stdin): JSON Lines, a JSON array, or an object by key. Notes for people go to
+stderr only.
 
 ```text
 work   {"num","title","artist","team","kind","size_kb","page","links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
-check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","charts","title"?,"error"?,"at"}
+check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","charts","title"?,"error"?,"at",
+        "num"?,"source"?,"mirrored"?}
 ```
 
-예: `bmseeker event works 152 --overrides overrides.json > works.jsonl`,
+For example `bmseeker event works 152 --overrides overrides.json > works.jsonl`,
 `bmseeker event check works.jsonl --known links.jsonl --minutes 290 > links.new.jsonl`.
-`event check --search`: 자기 링크가 하나도 안 되는 작품은 소스가 제목·아티스트로 아는 링크(BMS SEARCH,
-`--third-party`면 커뮤니티 아카이브도)까지 확인해 `"num"`, `"source"`를 붙여 씁니다.
+`event check --search`: for a work none of whose links gives an archive, the links the sources know for it by title
+and artist (BMS SEARCH; with `--third-party`, the community archive too) are checked as well and written with the
+work's `"num"` and their `"source"`. With `--third-party`, a failed link that a dead uploader's mirrors cover is checked
+again through them (`"mirrored"`).
 
-다른 링크를 찾는 곳(소스)은 설정의 `sources` 순서로 묻습니다: 난이도표(`table`, `--also`로 더), Stella 업로더
-목록(`stella`), TSV 목록(`tsv`, `--list`; `md5`, `url_diff`, `url`), [BMS SEARCH](https://bmssearch.net)(`bmssearch`,
-채보 → 작품 → 작가가 올린 다운로드 링크, 작품에 묶이지 않은 차분은 제목·아티스트로 검색).
-`--third-party`(설정 `"third_party": true`)를 주면 제3자 사본도 씁니다(기본 꺼짐): 죽은 사이트 차분의 미러(`mirrors`,
-BMS SEARCH가 아는 채보 파일 이름으로 `chart_mirrors` 폴더에서: darksabun의 absolute 미러), 커뮤니티 아카이브
-"BMS Library"(`bmslibrary`, bms.kyouko.moe의 `Title (by Artist).rar`를 제목·아티스트로), 죽은 업로더 링크의 번호별
-사본(`uploaders`). 이름으로 찾은 것(`mirrors`, `bmslibrary`)은 받아서 그 채보(MD5)가 들어 있을 때만 라이브러리에
-넣습니다. `--own-links`: 자기 링크만.
+The places other links are looked for (sources) are asked in the order of the `sources` setting: difficulty tables
+(`table`; more with `--also`), the Stella uploader's list (`stella`), TSV lists (`tsv`, `--list`; columns `md5`,
+`url_diff`, `url`), and [BMS SEARCH](https://bmssearch.net) (`bmssearch`: chart → work → the download links its author
+gave; a separate chart not tied to a work is searched by title and artist).
+`--third-party` (setting `"third_party": true`; off by default) adds third parties' copies: mirrors of dead sites'
+separate charts (`mirrors`: by the chart's file name BMS SEARCH knows, in the `chart_mirrors` folders, by default
+darksabun's mirror of absolute), the community archive's "BMS Library" (`bmslibrary`: bms.kyouko.moe's
+`Title (by Artist).rar` by title and artist), and dead uploaders' files by number (`uploaders`). What is found by name
+(`mirrors`, `bmslibrary`) goes into the library only if it holds the chart (its MD5). `--own-links`: a song's own
+links only.
 
-죽은 업로더 링크(`--third-party`)는 번호로 사본에서 받습니다(`uploaders`): 기본은 gnqg
-(`gnqg.rosx.net/upload/upload.cgi?get=03691`) → bms.hexlataia.xyz, darksabun.club의 `gnqg-upload/03691.zip`, 커뮤니티
-아카이브의 gnqg 폴더 순. 사본 주소의 `{n}`은 번호, `{h}`는 백의 자리(`36`), Google Drive 폴더 링크는
-`#하위/폴더/파일`로 내려갑니다.
+Dead uploaders' links (with `--third-party`) are downloaded from copies by number (`uploaders`). By default: gnqg
+(`gnqg.rosx.net/upload/upload.cgi?get=03691`) → `gnqg-upload/03691.zip` on bms.hexlataia.xyz, then on darksabun.club,
+then the community archive's gnqg folder. In a copy's address `{n}` is the number and `{h}` its hundreds (`36`); a
+Google Drive folder link goes down `#sub/folder/file`.
 
-설정(`--config`, `$BMSEEKER_CONFIG`, `<설정 폴더>/bmseeker/config.json`)은 JSON으로 기본값 위에 덮습니다:
-`user_agent`, `mirror_catalog`(BMS 이벤트 미러 목록, 비우면 안 씀), `manbow`, `bmssearch_api`, `stella_list`,
-`mega_api`, `sources`, `third_party`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`, `downloads`(라이브러리 안 대기 폴더),
-`min_coverage`.
+Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`) are JSON over the defaults:
+`user_agent`, `mirror_catalog` (the BMS event mirror's list; empty: not used), `manbow`, `bmssearch_api`,
+`stella_list`, `mega_api`, `sources`, `third_party`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`,
+`downloads` (the folder in a library where downloads wait), `min_coverage`.
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
 
-## 창 (`gui/`)
+## Window (`gui/`)
 
-[MyGo](https://github.com/egoist/mygo)로 만든 네이티브 창입니다(Go). 릴리즈에는 `bmseeker`(CLI)와
-`bmseeker-gui` 두 바이너리가 있고, `bmseeker-gui`는 CLI를 품고 있습니다:
+A native window made with [MyGo](https://github.com/egoist/mygo) (Go). A release has two binaries, `bmseeker` (the
+CLI) and `bmseeker-gui`, which carries the CLI inside:
 
 ```text
-bmseeker-gui                 창
-bmseeker-gui <BMS 폴더>       그 라이브러리로 창
-bmseeker-gui <CLI 명령>...    CLI 그대로 (link, song, table, library, event, --help ...)
+bmseeker-gui                 the window
+bmseeker-gui <BMS folder>    the window, with that library
+bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, --help ...)
 ```
 
-- **Tables**: 난이도표를 골라 라이브러리에 없는 채보(레벨별), 하나 또는 보이는 것 전부 받기 (곡, 그다음 차분).
-- **Link**: 링크 하나를 라이브러리로.
-- **Waiting**: 곡보다 먼저 온 차분과 가장 그럴듯한 폴더.
-- **Browser**: 페이지만 주는 링크(OneDrive 등). 열면 창 안의 웹뷰가 다운로드 버튼을 눌러 받고, 받은 파일을
-  라이브러리로 들입니다.
-- **Settings**: BMS 폴더, 제3자 미러(`--third-party`), 난이도표 목록 (창을 닫으면 잊음).
+- **Tables**: choose a difficulty table to see the charts the library lacks (by level), and download one or all those
+  shown (the song, then the separate chart).
+- **Link**: one link into the library.
+- **Waiting**: separate charts that came before their songs, and the likeliest folder.
+- **Browser**: links that only give a page (OneDrive ...). Opening one shows it in a web view, which presses its
+  Download button; what it downloads goes into the library.
+- **Settings**: the BMS folder, third-party mirrors (`--third-party`), the difficulty tables (forgotten when the window
+  closes).
 
-창은 CLI를 `--json`으로 띄워 레코드를 읽습니다. 품은 CLI는 처음 쓸 때 사용자 캐시 폴더에 풀어 씁니다
-(`$BMSEEKER_CLI`이 있으면 그것, 품지 않은 개발 빌드는 PATH의 `bmseeker`).
+The window runs the CLI with `--json` and reads its records. The CLI it carries is unpacked into the user's cache
+folder on first use (`$BMSEEKER_CLI` if set; a development build without it uses `bmseeker` on the PATH).
 
-빌드: `gui/build.sh` (CLI를 `cargo build --release --features cli`로 만들어 `gui/bin/`에 넣고 `go build`; Go 1.27+).
+Build: `gui/build.sh` (builds the CLI with `cargo build --release --features cli` into `gui/bin/`, then `go build`;
+Go 1.27+).
 
-## 모듈
+## Modules
 
-| 모듈 | 하는 일 |
+| Module | What it does |
 | --- | --- |
-| `table` | bmstable 형식 난이도표 (HTML의 `<meta name="bmstable">` → header → data) |
-| `hosts` | 링크 → 아카이브: 직링크, Google Drive 파일·폴더, Dropbox, MediaFire, MEGA 파일·폴더(합본 안에서 제목·아티스트로 찾기), manbow·BMS SEARCH(venue.bmssearch.net) 이벤트 작품 페이지(manbow 작품은 [이벤트 미러](https://github.com/vibeBMS/BMS)에 있으면 미러에서). OneDrive는 브라우저에서 `PRESS_DOWNLOAD_JS`로 |
-| `unpack` / `import` | .zip / .7z / .rar 풀기 (Shift_JIS·EUC-KR 이름, 경로 탈출·압축 폭탄 방지) |
-| `placement` | 차분 채보가 어느 곡 폴더에 속하는지: 함께 온 파일까지 쳐서 쓰는 음원의 99% 이상 + 같은 곡(제목·아티스트), 아니면 후보 3개; 같은 이름 파일은 스마트 덮어쓰기 |
-| `install` | 난이도표의 곡 하나: 본체 링크와 차분 링크를 받아 라이브러리에 |
-| `links` | 채보 MD5로 다른 링크 찾기 (등록한 난이도표들, Stella 업로더 목록): 빈·죽은 링크 채우기, 안 받아지면 차례로 시도 |
-| `manbow` | manbow 이벤트: URL 목록·작품 목록에서 작품과 링크(라벨), 어느 링크가 본체(HQ > ogg > 파일, 최신 패키지)·애드온(추가 채보, BGA 단독)·미러인지 (BMS 이벤트 미러의 `works.json`, 작품 페이지에서 받을 링크) |
-| `bmssearch` | BMS SEARCH API로 채보의 작품과 그 다운로드 링크 찾기 (그래도 안 받아질 때) |
-| `probe` | 링크를 받아 풀어 보고 분류: 받아짐/페이지/없음(404·410)/오류, 본체(채보 음원의 90% 이상이 안에)·애드온(차분)·미디어(채보 없음) |
-| `export` | 난이도표를 LR2 커스텀 폴더(`.lr2folder`)나 beatoraja 캐시(`.bmt`)로 |
-| `fs` | 파일 접근 (`Disk`, 또는 플레이어가 라이브러리를 두는 곳) |
+| `table` | bmstable difficulty tables (the HTML's `<meta name="bmstable">` → header → data) |
+| `hosts` | link → archive: direct links, Google Drive files and folders, Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
+| `unpack` / `import` | unpacking .zip / .7z / .rar (Shift_JIS and EUC-KR names; no escaping the folder, no archive bombs) |
+| `placement` | which song folder a separate chart belongs in: 99% or more of the sounds it uses, counting the files that came with it, plus the same song (title and artist), else three candidates; files of the same name overwritten smartly |
+| `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart) |
+| `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, the community archive |
+| `links` | other links by a chart's MD5 (the tables given, the Stella uploader's list): filling empty or dead links, trying them in turn when one does not download |
+| `manbow` | manbow events: works and their links (with labels) from the URL list and work list, and which link is the main archive (HQ > ogg > file, the newest package), an add-on (extra charts, BGA alone) or a mirror (the BMS event mirror's `works.json`; the links to download from a work page) |
+| `bmssearch` | the BMS SEARCH API: a chart's work and its download links |
+| `probe` | a link downloaded, unpacked and sorted: downloaded / page / gone (404, 410) / error; main (90% or more of its charts' sounds inside), add-on (separate charts), media (no charts) |
+| `export` | a difficulty table as an LR2 custom folder (`.lr2folder`) or a beatoraja cache (`.bmt`) |
+| `fs` | file access (`Disk`, or wherever a player keeps its library) |
 
-네트워크를 읽는 것은 모두 `net::Task`(요청을 내놓고 응답을 받는 IO 없는 작업)입니다:
-`hosts::Resolver`(링크를 `Host` 전략들로), `table::TableLoader`, `bmssearch::Lookup`. 네이티브는
-`net::run`으로 블로킹, 브라우저(vibeBMS 웹 빌드)는 비동기로 같은 작업을 돌립니다. 읽는 곳(API, 미러,
-목록)과 사용자 에이전트는 모두 `config::Config`에 있습니다. 앞으로의 구조는 [DESIGN.md](DESIGN.md).
+Everything that reads the network is a `net::Task` (an IO-free job that hands out requests and takes their answers):
+`hosts::Resolver` (a link through the `Host` strategies), `table::TableLoader`, `bmssearch::Lookup`, the sources.
+Natively `net::run` runs one blocking; the browser (vibeBMS's web build) runs the same job asynchronously. Where it
+reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`. Where the design is going:
+[DESIGN.md](DESIGN.md).
 
-## 웹 (wasm32)
+## Web (wasm32)
 
-라이브러리는 wasm32에서도 빌드됩니다(네트워크는 `net::Task`라 브라우저가 요청을 대신). RAR을 푸는 `unrar-rs`는
-0.16.4부터 wasm32-unknown-unknown에서 빌드됩니다.
+The library builds for wasm32 too (the network is `net::Task`, so the browser makes the requests). `unrar-rs`, which
+unpacks RAR, builds for wasm32-unknown-unknown from 0.16.4.
 
-## 출처
+## Credits
 
-설치 폴더 추정·스마트 덮어쓰기·링크 보완·내보내기의 규칙은
-[BeMusicSeeker](https://github.com/Neeted/bemusicseeker-unofficial-fork)(rib_2_bit 원작, Neeted 비공식 포크, MIT)의
-동작을 따라 Rust로 새로 구현했습니다.
+The rules for guessing a chart's folder, smart overwriting, filling links and exporting follow the behaviour of
+[BeMusicSeeker](https://github.com/Neeted/bemusicseeker-unofficial-fork) (by rib_2_bit; Neeted's unofficial fork; MIT),
+written again in Rust.
 
-## 라이선스
+## License
 
-`MIT OR Apache-2.0`. `.rar`는 [unrar-rs](https://github.com/scryer-media/rarpar/tree/main/crates/unrar-rs)
-(Apache-2.0, UnRAR 라이선스 제한 포함)로 풉니다.
+`MIT OR Apache-2.0`. `.rar` files are unpacked with
+[unrar-rs](https://github.com/scryer-media/rarpar/tree/main/crates/unrar-rs) (Apache-2.0, with the UnRAR license
+restriction).
 
 > UnRAR source code may be used in any software to handle RAR archives without limitations free of charge, but cannot be used to develop RAR (WinRAR) compatible archiver and to re-create RAR compression algorithm, which is proprietary. Distribution of modified UnRAR source code in separate form or as a part of other software is permitted, provided that full text of this paragraph, starting from "UnRAR source code" words, is included in license, or in documentation if license is not available, and in source code comments of resulting package.
