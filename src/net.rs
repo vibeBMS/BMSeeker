@@ -23,8 +23,68 @@ impl Request {
     }
 }
 
-/// The body of a successful answer, or why there is none ("HTTP 404"...).
-pub type Answer = Result<Vec<u8>, String>;
+/// The body of a successful answer, or why there is none.
+pub type Answer = Result<Vec<u8>, NetError>;
+
+/// Why a request or a download gave nothing. Its text (`Display`) is what
+/// a person reads ("HTTP 404", "cancelled").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetError {
+    /// The server answered with this HTTP status.
+    Status(u16),
+    /// No data came for this many seconds.
+    Stalled(u64),
+    /// Its [`Progress`](crate::progress::Progress) was cancelled.
+    Cancelled,
+    /// A host says the file is no more (MEGA's -9 / -2): its words.
+    Gone(String),
+    /// Anything else (the connection, a host's own message), as said.
+    Other(String),
+}
+
+impl NetError {
+    /// The server busy (429, 503) or its gateway failing (502, 504): it
+    /// may pass.
+    pub fn passing(&self) -> bool {
+        matches!(self, NetError::Status(429 | 502 | 503 | 504))
+    }
+
+    /// The file is no more: 404 / 410, or a host's word for it.
+    pub fn gone(&self) -> bool {
+        matches!(self, NetError::Status(404 | 410) | NetError::Gone(_))
+    }
+}
+
+impl std::fmt::Display for NetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            NetError::Status(n) => write!(f, "HTTP {n}"),
+            NetError::Stalled(s) => write!(f, "no data for {s} s"),
+            NetError::Cancelled => f.write_str(crate::progress::CANCELLED),
+            NetError::Gone(e) | NetError::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl std::error::Error for NetError {}
+
+impl From<String> for NetError {
+    fn from(e: String) -> NetError {
+        NetError::Other(e)
+    }
+}
+
+impl From<&str> for NetError {
+    fn from(e: &str) -> NetError {
+        NetError::Other(e.into())
+    }
+}
+
+impl From<NetError> for String {
+    fn from(e: NetError) -> String {
+        e.to_string()
+    }
+}
 
 /// What a task needs next.
 #[derive(Debug, PartialEq, Eq)]
@@ -133,7 +193,7 @@ impl Http for Canned {
             .iter()
             .find(|(u, _)| u == r.url())
             .map(|(_, a)| a.clone())
-            .unwrap_or_else(|| Err(format!("no answer for {}", r.url())))
+            .unwrap_or_else(|| Err(format!("no answer for {}", r.url()).into()))
     }
 }
 
@@ -170,19 +230,13 @@ impl Http for Client {
     }
 }
 
-/// Whether a request's failure may pass: the server busy (429, 503) or its
-/// gateway failing (502, 504).
-pub fn passing(e: &str) -> bool {
-    ["HTTP 429", "HTTP 502", "HTTP 503", "HTTP 504"].contains(&e)
-}
-
 /// `req`'s answer, its headers not looked at (ehttp gives up on one that
 /// is not ASCII, as a file name in Japanese).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn fetch(req: &ehttp::Request) -> Answer {
     let mut r = req.fetch_raw_native(false).map_err(|e| e.to_string())?;
     if !r.status().is_success() {
-        return Err(format!("HTTP {}", r.status().as_u16()));
+        return Err(NetError::Status(r.status().as_u16()));
     }
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut r.body_mut().as_reader(), &mut bytes)
@@ -264,7 +318,7 @@ mod tests {
     fn runs() {
         let http = Canned(vec![
             ("a".into(), Ok(b"12".to_vec())),
-            ("b".into(), Err("x".into())),
+            ("b".into(), Err(NetError::Status(404))),
         ]);
         assert_eq!(run(&mut Two(Vec::new()), &http), [2, 0]);
         let mut boxed: BoxTask<Vec<usize>> = Box::new(Two(Vec::new()));
@@ -272,5 +326,17 @@ mod tests {
         assert_eq!(run(&mut Ready::boxed(7), &http), 7);
         assert_eq!(url_encode("a b/c"), "a%20b%2Fc");
         assert_eq!(percent_decode("%E6%9B%B2%2"), "曲%2");
+    }
+
+    #[test]
+    fn errors() {
+        // the text a person reads stays what it was
+        assert_eq!(NetError::Status(404).to_string(), "HTTP 404");
+        assert_eq!(NetError::Cancelled.to_string(), "cancelled");
+        assert_eq!(NetError::Stalled(60).to_string(), "no data for 60 s");
+        assert!(NetError::Status(503).passing() && !NetError::Status(500).passing());
+        assert!(!NetError::Other("HTTP 503".into()).passing());
+        assert!(NetError::Status(410).gone() && NetError::Gone("x".into()).gone());
+        assert!(!NetError::Status(403).gone());
     }
 }

@@ -32,30 +32,27 @@ pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
 
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, Next, Task};
+use crate::net::{Answer, BoxTask, NetError, Next, Task};
 use std::sync::Arc;
 
 /// Why a link gave no file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Fetch {
     /// The link is a page to use in a browser.
     Page,
     /// The download failed ("HTTP 404"...).
-    Failed(String),
+    Failed(NetError),
 }
 
-impl PartialEq for Fetch {
-    fn eq(&self, o: &Fetch) -> bool {
-        matches!(
-            (self, o),
-            (Fetch::Page, Fetch::Page) | (Fetch::Failed(_), Fetch::Failed(_))
-        )
+impl From<NetError> for Fetch {
+    fn from(e: NetError) -> Fetch {
+        Fetch::Failed(e)
     }
 }
 
 impl From<String> for Fetch {
     fn from(e: String) -> Fetch {
-        Fetch::Failed(e)
+        Fetch::Failed(e.into())
     }
 }
 
@@ -106,7 +103,7 @@ pub enum Resolved {
     Follow(Vec<String>),
     /// A page for a person in a browser.
     Page,
-    Failed(String),
+    Failed(NetError),
 }
 
 /// A link as hosts look at it.
@@ -520,10 +517,15 @@ mod tests {
         );
         assert_eq!(resolve("https://1drv.ms/u/c/x", &[]), Err(Fetch::Page));
         assert_eq!(resolve("not a link", &[]), Err(Fetch::Page));
+        // (no canned answer for its page)
+        let page = "https://www.mediafire.com/file/x/a.rar/file";
         assert_eq!(
-            resolve("https://www.mediafire.com/file/x/a.rar/file", &[]),
-            Err(Fetch::Failed(String::new()))
+            resolve(page, &[]),
+            Err(Fetch::Failed(NetError::Other(format!(
+                "no answer for {page}"
+            ))))
         );
+        assert_ne!(resolve(page, &[]), Err(Fetch::Failed("other".into())));
     }
 
     #[test]

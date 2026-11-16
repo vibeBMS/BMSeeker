@@ -9,6 +9,7 @@
 
 use crate::fs::Disk;
 use crate::hosts::{Fetch, Want};
+use crate::net::NetError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -148,8 +149,9 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
     let out = match r {
         Err(Fetch::Page) => Checked::state(State::Page, String::new()),
         Err(Fetch::Failed(e)) => {
-            let gone = ["HTTP 404", "HTTP 410"].iter().any(|g| e.contains(g));
-            Checked::state(if gone { State::Gone } else { State::Error }, e)
+            // (a host's word that it is gone counts here only as an error)
+            let gone = matches!(e, NetError::Status(404 | 410));
+            Checked::state(if gone { State::Gone } else { State::Error }, e.to_string())
         }
         Ok(()) => {
             let size = std::fs::metadata(&file).map_or(0, |m| m.len());

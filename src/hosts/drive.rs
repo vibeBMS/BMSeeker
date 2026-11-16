@@ -157,7 +157,9 @@ impl Task for Walk {
                 self.folder = e.id;
                 self.start()
             }
-            None => Next::Done(Resolved::Failed(format!("{name}: not in the folder"))),
+            None => Next::Done(Resolved::Failed(
+                format!("{name}: not in the folder").into(),
+            )),
         }
     }
 }

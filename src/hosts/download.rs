@@ -4,7 +4,7 @@
 //! [`Progress`](crate::progress::Progress) able to cancel it.
 
 use super::{sniff_bytes, Context, Fetch, MegaCipher, Resolver, Want, STALL_MS};
-use crate::net::{percent_decode, run, Client};
+use crate::net::{percent_decode, run, Client, NetError};
 use crate::text::safe_file_name;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -74,7 +74,7 @@ fn get_target(
             retrying(|| download(&t.url, &enc, ua))?;
             let d = mega_decrypt(&enc, out, key);
             let _ = std::fs::remove_file(&enc);
-            d?;
+            d.map_err(NetError::Other)?;
             None
         }
     };
@@ -94,7 +94,7 @@ fn get_target(
         let quota = drive_quota(out);
         let _ = std::fs::remove_file(out);
         return Err(match quota {
-            true => Fetch::Failed(DRIVE_QUOTA.into()),
+            true => Fetch::Failed(NetError::Other(DRIVE_QUOTA.into())),
             false => Fetch::Page,
         });
     }
@@ -187,7 +187,7 @@ const STALL: std::time::Duration = std::time::Duration::from_millis(STALL_MS);
 
 /// Stream `url` into `out`. No limit on the whole, but it ends when no data
 /// comes for [`STALL_MS`], or when the thread's progress is cancelled.
-pub fn download_to(url: &str, out: &Path) -> Result<(), String> {
+pub fn download_to(url: &str, out: &Path) -> Result<(), NetError> {
     let ua = crate::config::Config::default().user_agent;
     retrying(|| download(url, out, &ua)).map(|_| ())
 }
@@ -195,11 +195,11 @@ pub fn download_to(url: &str, out: &Path) -> Result<(), String> {
 /// `f` again after a server's passing failure (busy, or a gateway's error:
 /// manbow answers 502 and 503 at times), twice at most, waiting longer each
 /// time.
-pub(crate) fn retrying<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+pub(crate) fn retrying<T>(mut f: impl FnMut() -> Result<T, NetError>) -> Result<T, NetError> {
     let mut waits = [3u64, 10].into_iter();
     loop {
         match f() {
-            Err(e) if crate::net::passing(&e) => match waits.next() {
+            Err(e) if e.passing() => match waits.next() {
                 Some(s) if !crate::progress::current().is_some_and(|p| p.cancelled()) => {
                     std::thread::sleep(std::time::Duration::from_secs(s));
                 }
@@ -219,7 +219,7 @@ struct Served {
 }
 
 /// [`download_to`], and what the server said of it.
-fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
+fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, NetError> {
     use std::sync::mpsc::{channel, RecvTimeoutError};
     use std::time::{Duration, Instant};
     /// What the request's thread sends: the answer's head, its data, its
@@ -239,14 +239,14 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
     }
     // the request on its own thread; its parts come here. Once this returns
     // the channel is closed and it stops at its next part.
-    let (tx, rx) = channel::<Result<Part, String>>();
+    let (tx, rx) = channel::<Result<Part, NetError>>();
     std::thread::spawn(move || {
         let mut r = match req.fetch_raw_native(false) {
             Ok(r) => r,
-            Err(e) => return drop(tx.send(Err(e.to_string()))),
+            Err(e) => return drop(tx.send(Err(e.to_string().into()))),
         };
         if !r.status().is_success() {
-            return drop(tx.send(Err(format!("HTTP {}", r.status().as_u16()))));
+            return drop(tx.send(Err(NetError::Status(r.status().as_u16()))));
         }
         let at = ureq::ResponseExt::get_uri(&r).to_string();
         let header = |k: &str| {
@@ -268,7 +268,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
                         return;
                     }
                 }
-                Err(e) => return drop(tx.send(Err(e.to_string()))),
+                Err(e) => return drop(tx.send(Err(e.to_string().into()))),
             }
         }
     });
@@ -279,7 +279,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
     };
     loop {
         if progress.as_ref().is_some_and(|p| p.cancelled()) {
-            return Err(crate::progress::CANCELLED.into());
+            return Err(NetError::Cancelled);
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Err(e)) => return Err(e),
@@ -291,7 +291,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
                 last = Instant::now();
             }
             Ok(Ok(Part::Chunk(c))) if c.is_empty() => {
-                return w.flush().map(|_| served).map_err(|e| e.to_string());
+                return w.flush().map(|_| served).map_err(|e| e.to_string().into());
             }
             Ok(Ok(Part::Chunk(c))) => {
                 if let Some(p) = &progress {
@@ -301,7 +301,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
                 last = Instant::now();
             }
             Err(RecvTimeoutError::Timeout) if last.elapsed() > STALL => {
-                return Err(format!("no data for {} s", STALL.as_secs()));
+                return Err(NetError::Stalled(STALL.as_secs()));
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Err("the download ended early".into()),
@@ -393,7 +393,7 @@ mod tests {
         let r = crate::progress::scope(Some(p.clone()), || {
             download_to(&format!("http://{addr}/a.zip"), &out)
         });
-        assert_eq!(r, Err(crate::progress::CANCELLED.to_string()));
+        assert_eq!(r, Err(NetError::Cancelled));
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(p.bytes(), (2, Some(1_000_000)));
         let _ = std::fs::remove_file(out);

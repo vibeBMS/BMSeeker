@@ -17,7 +17,69 @@ pub enum Done {
     Waiting(PathBuf),
     /// A page to open in a browser.
     Page(String),
-    Failed(String),
+    Failed(Failure),
+}
+
+/// Why a link (or every link) brought nothing. Its text (`Display`) is
+/// what a person reads.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Failure {
+    /// The download (or a request on the way) failed; `Cancelled` too.
+    Net(crate::net::NetError),
+    /// What a link found by name brought does not hold the chart wanted
+    /// ([`NOT_THE_CHART`]).
+    NotTheChart,
+    /// The song is in the library and none of its chart's links works
+    /// ([`NO_CHART_LINK`]).
+    NoChartLink,
+    /// No link to try.
+    NoLink,
+    /// Anything else (unpacking, the disk), as said.
+    Other(String),
+}
+
+/// A download found by name that does not hold the chart wanted.
+pub const NOT_THE_CHART: &str = "what it brought does not hold the chart";
+
+/// What a chart's download comes to when its song is in the library
+/// already and none of the chart's links brought it (nor led to a page).
+pub const NO_CHART_LINK: &str = "the song is in the library; no link for this chart works";
+
+impl Failure {
+    /// The download was cancelled (nothing to tell: the person did it).
+    pub fn cancelled(&self) -> bool {
+        matches!(self, Failure::Net(crate::net::NetError::Cancelled))
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Failure::Net(e) => e.fmt(f),
+            Failure::NotTheChart => f.write_str(NOT_THE_CHART),
+            Failure::NoChartLink => f.write_str(NO_CHART_LINK),
+            Failure::NoLink => f.write_str("no link"),
+            Failure::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<crate::net::NetError> for Failure {
+    fn from(e: crate::net::NetError) -> Failure {
+        Failure::Net(e)
+    }
+}
+
+impl From<String> for Failure {
+    fn from(e: String) -> Failure {
+        Failure::Other(e)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(e: &str) -> Failure {
+        Failure::Other(e.into())
+    }
 }
 
 /// The MD5 of `bytes`, in hex.
@@ -119,14 +181,14 @@ pub fn link(
     use crate::import::{self, Imported};
     let title = want.title.as_str();
     if let Err(e) = std::fs::create_dir_all(downloads) {
-        return vec![Done::Failed(e.to_string())];
+        return vec![Done::Failed(e.to_string().into())];
     }
     let file = if chart_link(link) {
         crate::progress::stage(crate::progress::Stage::Finding);
         let file = downloads.join(chart_name(link));
         if let Err(e) = crate::hosts::download_to(link, &file) {
             let _ = std::fs::remove_file(&file);
-            return vec![Done::Failed(e)];
+            return vec![Done::Failed(e.into())];
         }
         // a page where a chart was expected
         let bytes = std::fs::read(&file).unwrap_or_default();
@@ -136,7 +198,7 @@ pub fn link(
         }
         if check.is_some_and(|m| !md5_hex(&bytes).eq_ignore_ascii_case(m.trim())) {
             let _ = std::fs::remove_file(&file);
-            return vec![Done::Failed(NOT_THE_CHART.into())];
+            return vec![Done::Failed(Failure::NotTheChart)];
         }
         file
     } else {
@@ -155,7 +217,7 @@ pub fn link(
             Err(crate::hosts::Fetch::Page) => return vec![Done::Page(link.to_string())],
             Err(crate::hosts::Fetch::Failed(e)) => {
                 let _ = std::fs::remove_file(&tmp);
-                return vec![Done::Failed(e)];
+                return vec![Done::Failed(e.into())];
             }
         }
     };
@@ -167,7 +229,7 @@ pub fn link(
         let _ = std::fs::remove_file(&file);
         let out = match r {
             Ok(_) => place_diff(&Disk, &dir, downloads, library, md5, check),
-            Err(e) => vec![Done::Failed(e)],
+            Err(e) => vec![Done::Failed(e.into())],
         };
         let _ = std::fs::remove_dir_all(&dir);
         return out;
@@ -181,15 +243,15 @@ pub fn link(
         let _ = std::fs::remove_dir_all(&dir);
         if !holds {
             let _ = std::fs::remove_file(&file);
-            return vec![Done::Failed(NOT_THE_CHART.into())];
+            return vec![Done::Failed(Failure::NotTheChart)];
         }
     }
     let mut out = vec![match import::import(&Disk, &file, library) {
         Ok(Imported::Unpacked(dir, n)) => Done::Added(dir, n),
         Ok(Imported::Placed(p)) => Done::Placed(p),
         Ok(Imported::Waiting(p)) | Ok(Imported::Ask(p, _)) => Done::Waiting(p),
-        Ok(Imported::Other(p)) => Done::Failed(format!("{} is not a song", p.display())),
-        Err(e) => Done::Failed(e),
+        Ok(Imported::Other(p)) => Done::Failed(format!("{} is not a song", p.display()).into()),
+        Err(e) => Done::Failed(e.into()),
     }];
     // charts that waited for this song
     if matches!(out[0], Done::Added(..)) {
@@ -216,7 +278,7 @@ pub fn place_diff(
     check: Option<&str>,
 ) -> Vec<Done> {
     if check.is_some_and(|m| !holds_chart(fs, dir, m)) {
-        return vec![Done::Failed(NOT_THE_CHART.into())];
+        return vec![Done::Failed(Failure::NotTheChart)];
     }
     keep_waiting(fs, place_charts(fs, dir, library), downloads, md5)
 }
@@ -224,7 +286,8 @@ pub fn place_diff(
 /// The charts of `done` that wait for their songs, out of the folder about
 /// to go and into `downloads` (where [`place_waiting`] finds them once a
 /// song comes): the chart `md5` only, when it is known. Nothing placed
-/// and nothing kept: [`NOT_THE_CHART`] (a pack of other songs' charts).
+/// and nothing kept: [`Failure::NotTheChart`] (a pack of other songs'
+/// charts).
 pub fn keep_waiting(fs: &dyn Fs, done: Vec<Done>, downloads: &Path, md5: &str) -> Vec<Done> {
     let md5 = md5.trim().to_ascii_lowercase();
     let kept = done
@@ -245,7 +308,7 @@ pub fn keep_waiting(fs: &dyn Fs, done: Vec<Done>, downloads: &Path, md5: &str) -
         })
         .collect::<Vec<_>>();
     if kept.is_empty() {
-        return vec![Done::Failed(NOT_THE_CHART.into())];
+        return vec![Done::Failed(Failure::NotTheChart)];
     }
     kept
 }
@@ -296,9 +359,6 @@ fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) -> bool {
         && same_name(&base_title(&c.title), &title)
         && same_artist(&c.artist, &want.artist)
 }
-
-/// A download found by name that does not hold the chart wanted.
-pub const NOT_THE_CHART: &str = "what it brought does not hold the chart";
 
 /// Whether the folder `dir` (a song just added) holds the chart `md5`
 /// already: its separate chart's links need no trying then (a table may
@@ -362,7 +422,7 @@ pub fn got(done: &[Done]) -> bool {
 #[derive(Default)]
 pub struct Tries {
     page: Option<String>,
-    failed: Option<String>,
+    failed: Option<Failure>,
 }
 
 impl Tries {
@@ -388,7 +448,7 @@ impl Tries {
         vec![match (self.page, self.failed) {
             (Some(p), _) => Done::Page(p),
             (None, Some(e)) => Done::Failed(e),
-            (None, None) => Done::Failed("no link".into()),
+            (None, None) => Done::Failed(Failure::NoLink),
         }]
     }
 }
@@ -413,7 +473,7 @@ pub fn links(
     let mut try_all = |links: Vec<String>, checked: bool, tries: &mut Tries| -> Option<Vec<Done>> {
         for l in links {
             if cancelled() {
-                return Some(vec![Done::Failed(crate::progress::CANCELLED.into())]);
+                return Some(vec![Done::Failed(crate::net::NetError::Cancelled.into())]);
             }
             if tried.contains(&l) {
                 continue;
@@ -447,6 +507,7 @@ pub fn links(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::NetError;
 
     #[test]
     fn charts_in_an_archive() {
@@ -600,7 +661,7 @@ mod tests {
             v.sort();
             v
         };
-        let not_the_chart = |d: &[Done]| matches!(d, [Done::Failed(e)] if e == NOT_THE_CHART);
+        let not_the_chart = |d: &[Done]| matches!(d, [Done::Failed(Failure::NotTheChart)]);
         let place = |md5: &str, check: Option<&str>| {
             place_diff(&Disk, &dir, &downloads, &library, md5, check)
         };
@@ -638,7 +699,9 @@ mod tests {
     #[test]
     fn tries_in_order() {
         let mut t = Tries::default();
-        assert!(t.record(vec![Done::Failed("404".into())]).is_none());
+        assert!(t
+            .record(vec![Done::Failed(NetError::Status(404).into())])
+            .is_none());
         assert!(t
             .record(vec![Done::Page("https://1drv.ms/x".into())])
             .is_none());
@@ -647,7 +710,22 @@ mod tests {
             .is_none());
         assert!(matches!(&t.end()[..], [Done::Page(p)] if p == "https://1drv.ms/x"));
         let mut t = Tries::default();
-        assert!(t.record(vec![Done::Failed("404".into())]).is_none());
+        assert!(t
+            .record(vec![Done::Failed(NetError::Status(404).into())])
+            .is_none());
         assert!(t.record(vec![Done::Added("a".into(), 3)]).is_some());
+        // nothing tried; the last failure; how each reads
+        assert!(matches!(
+            &Tries::default().end()[..],
+            [Done::Failed(Failure::NoLink)]
+        ));
+        let mut t = Tries::default();
+        t.record(vec![Done::Failed(NetError::Status(404).into())]);
+        t.record(vec![Done::Failed(Failure::NotTheChart)]);
+        assert!(matches!(&t.end()[..], [Done::Failed(Failure::NotTheChart)]));
+        assert_eq!(Failure::NotTheChart.to_string(), NOT_THE_CHART);
+        assert_eq!(Failure::from(NetError::Status(404)).to_string(), "HTTP 404");
+        assert!(Failure::from(NetError::Cancelled).cancelled());
+        assert!(!Failure::Other("cancelled".into()).cancelled());
     }
 }

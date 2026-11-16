@@ -68,7 +68,7 @@ pub fn link(r: &Run, c: Link) -> Result<(), String> {
                         "name": t.name, "encrypted": t.mega_key.is_some()}),
                     Err(Fetch::Page) => json!({"link": l, "state": "page", "host": host}),
                     Err(Fetch::Failed(e)) => {
-                        json!({"link": l, "state": state_of(e), "host": host, "error": e})
+                        json!({"link": l, "state": state_of(e), "host": host, "error": e.to_string()})
                     }
                 };
                 r.out.record(rec, || match got {
@@ -94,11 +94,8 @@ pub fn link(r: &Run, c: Link) -> Result<(), String> {
 }
 
 /// "gone" for a file that is no more (404 / 410, MEGA's -9), else "error".
-pub fn state_of(e: &str) -> &'static str {
-    if ["HTTP 404", "HTTP 410", "[-9]", "[-2]"]
-        .iter()
-        .any(|g| e.contains(g))
-    {
+pub fn state_of(e: &bmseeker::net::NetError) -> &'static str {
+    if e.gone() {
         "gone"
     } else {
         "error"
@@ -234,6 +231,7 @@ pub fn fetch_list(at: &str, r: &Run) -> Option<Vec<u8>> {
             &Client::new(r.config()),
             &bmseeker::net::Request::Get(at.into()),
         )
+        .map_err(|e| e.to_string())
     } else {
         std::fs::read(at).map_err(|e| e.to_string())
     };

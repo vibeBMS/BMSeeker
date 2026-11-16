@@ -261,7 +261,7 @@ mod tests {
             want("Beatrice [ANOTHER]", "xi"),
         );
         assert_eq!(
-            l.feed(Err("HTTP 404".into())),
+            l.feed(Err(crate::net::NetError::Status(404))),
             get(format!("{API}/bmses/search?title=Beatrice"))
         );
         assert_eq!(l.feed(Ok(b"[]".to_vec())), Next::Done(Vec::new()));

@@ -5,7 +5,7 @@
 
 use super::{archive_name, pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, Next, Ready, Request, Task};
+use crate::net::{Answer, BoxTask, NetError, Next, Ready, Request, Task};
 
 pub struct Mega;
 
@@ -216,14 +216,11 @@ struct MegaFile {
 
 /// The files of a MEGA folder (the API's `"a":"f"` answer), their keys
 /// and names decrypted with the folder's `key`.
-fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, String> {
+fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, NetError> {
     use aes::cipher::{BlockCipherDecrypt, KeyInit};
     let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("MEGA: {e}"))?;
     let Some(nodes) = v.get(0).and_then(|f| f.get("f")).and_then(|f| f.as_array()) else {
-        return Err(format!(
-            "MEGA refused ({})",
-            v.to_string().chars().take(80).collect::<String>()
-        ));
+        return Err(refused(&v.to_string().chars().take(80).collect::<String>()));
     };
     let ecb = |k: &[u8], data: &mut [u8]| {
         let Ok(aes) = aes::Aes128::new_from_slice(k) else {
@@ -389,13 +386,24 @@ pub fn mega_request(handle: &str) -> Vec<u8> {
 }
 
 /// The download URL in the MEGA API's answer.
-pub fn mega_answer(body: &[u8]) -> Result<String, String> {
+pub fn mega_answer(body: &[u8]) -> Result<String, NetError> {
     let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("MEGA: {e}"))?;
     v.get(0)
         .and_then(|f| f.get("g"))
         .and_then(|g| g.as_str())
         .map(str::to_string)
-        .ok_or_else(|| format!("MEGA refused ({v})"))
+        .ok_or_else(|| refused(&v.to_string()))
+}
+
+/// The API's refusal, `answer` its words: -9 (no such file) and -2 (a
+/// handle that is no more) say the file is gone.
+fn refused(answer: &str) -> NetError {
+    let e = format!("MEGA refused ({answer})");
+    if ["[-9]", "[-2]"].iter().any(|c| answer.contains(c)) {
+        NetError::Gone(e)
+    } else {
+        NetError::Other(e)
+    }
 }
 
 /// The name in a MEGA node's attributes (`attr`, encrypted with the
@@ -457,6 +465,15 @@ fn b64url(s: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::hosts::tests::resolve;
+
+    #[test]
+    fn refusals() {
+        let gone = mega_answer(b"[-9]").unwrap_err();
+        assert_eq!(gone.to_string(), "MEGA refused ([-9])");
+        assert!(gone.gone());
+        let other = mega_answer(b"[-3]").unwrap_err();
+        assert_eq!(other, NetError::Other("MEGA refused ([-3])".into()));
+    }
 
     #[test]
     fn file_links() {

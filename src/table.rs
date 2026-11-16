@@ -308,7 +308,7 @@ impl TableLoader {
         }
     }
 
-    fn step(&mut self, body: Result<Vec<u8>, String>) -> Result<Step, TableError> {
+    fn step(&mut self, body: Answer) -> Result<Step, TableError> {
         match self.advance(body) {
             Ok(s) => Ok(s),
             Err(e) => match MIRRORS
@@ -327,8 +327,8 @@ impl TableLoader {
         }
     }
 
-    fn advance(&mut self, body: Result<Vec<u8>, String>) -> Result<Step, TableError> {
-        let text = decode_body(&body.map_err(TableError::Http)?);
+    fn advance(&mut self, body: Answer) -> Result<Step, TableError> {
+        let text = decode_body(&body.map_err(|e| TableError::Http(e.to_string()))?);
         let json = |t: &str| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}'));
         match std::mem::replace(&mut self.stage, Stage::Page(String::new())) {
             Stage::Page(url) => {
@@ -448,7 +448,7 @@ mod tests {
             self.0
                 .get(url)
                 .map(|s| s.clone().into_bytes())
-                .ok_or_else(|| format!("404 {url}"))
+                .ok_or(crate::net::NetError::Status(404))
         }
     }
 
