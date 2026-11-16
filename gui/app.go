@@ -104,6 +104,9 @@ func (a *app) job(name string, f func() error) {
 
 // cli runs a command, noting what it says in the log.
 func (a *app) cli(args []string, onRecord func(Record)) error {
+	if a.settings.ThirdParty {
+		args = append([]string{"--third-party"}, args...)
+	}
 	return runCLI(args, onRecord, func(note string) { a.say("%s", note) })
 }
 
@@ -357,6 +360,11 @@ func (a *app) settingsView(c *ui.Context) {
 			}()
 		}
 	})
+	ui.Text(c, "Downloads").Bold()
+	if ui.Checkbox(c, &a.settings.ThirdParty, "Third-party mirrors (darksabun.club, bms.hexlataia.xyz, the bms.kyouko.moe archive)").Changed() {
+		a.saveSettings()
+	}
+	ui.Text(c, "Other people's copies of dead sites and uploaders. What is found by name goes in only if it holds the chart (MD5).")
 	ui.Text(c, "Difficulty tables").Bold()
 	for i, t := range a.settings.Tables {
 		ui.Row(c).Gap(8).Children(func() {

@@ -15,7 +15,9 @@ import (
 
 // fakeCLI answers as the CLI would: `table missing` lists two charts,
 // `library install` brings the first in and finds a page for the second.
+// It notes the arguments it was given.
 const fakeCLI = `#!/bin/sh
+echo "$*" >> "$(dirname "$0")/args"
 case "$*" in
   *"table missing"*)
     echo '{"level":"1","label":"★1","title":"Song A","artist":"x","md5":"a","url":"https://d/a.zip","url_diff":""}'
@@ -71,6 +73,16 @@ func TestTablesToBrowser(t *testing.T) {
 	joined := strings.Join(a.log, "\n")
 	if !strings.Contains(joined, "2 of 9 charts missing") || !strings.Contains(joined, "Song A: added") {
 		t.Fatalf("log %q", joined)
+	}
+	// the third-party setting goes to the CLI
+	a.settings.ThirdParty = true
+	if err := a.cli([]string{"library", "pending", "-L", "/lib"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := os.ReadFile(filepath.Join(dir, "args"))
+	if !strings.Contains(string(args), "--json --third-party library pending") ||
+		strings.Contains(strings.SplitN(string(args), "\n", 2)[0], "--third-party") {
+		t.Fatalf("args %q", args)
 	}
 	// every tab draws
 	for _, tab := range []string{"Link", "Waiting", "Settings", "Browser (1)"} {

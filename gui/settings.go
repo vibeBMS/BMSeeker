@@ -13,6 +13,10 @@ type Settings struct {
 	Library string `json:"library"`
 	// Difficulty tables to choose from.
 	Tables []string `json:"tables"`
+	// Downloads may use third parties' copies (the CLI's --third-party):
+	// other people's mirrors of dead sites and uploaders, the community
+	// archive.
+	ThirdParty bool `json:"third_party"`
 }
 
 var defaultTables = []string{
