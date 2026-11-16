@@ -46,7 +46,10 @@ flate2 = "1"
 # Desktop: trust the OS certificate store (corporate proxies, custom CAs).
 [target.'cfg(any(windows, target_os = "macos", target_os = "linux"))'.dependencies]
 ehttp = { version = "0.7", features = ["platform-verifier"] }
-# where a download's redirects ended (ehttp's own client)
+
+# Natively (desktop, iOS, Android): where a download's redirects ended
+# (ehttp's own client)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "3", default-features = false }
 
 [profile.release]
