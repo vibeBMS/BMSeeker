@@ -155,19 +155,33 @@ impl Source for ChartMirrors {
 
 /// The community archive's songs ([`Config::bms_library`]): a Google Drive
 /// folder of a folder per first letter, each of `Title (by Artist).rar`.
-/// Found by title and artist, so what one brings is checked for the chart.
+/// Found by the song's title (BMS SEARCH's for the chart's MD5, else the
+/// table's) and artist, so what one brings is checked for the chart.
 ///
 /// [`Config::bms_library`]: crate::config::Config::bms_library
 pub struct BmsLibrary {
     folder: String,
+    api: String,
 }
 
 impl BmsLibrary {
     pub fn new(config: &Config) -> BmsLibrary {
         BmsLibrary {
             folder: crate::hosts::drive::drive_id(&config.bms_library).unwrap_or_default(),
+            api: config.bmssearch_api.trim_end_matches('/').to_string(),
         }
     }
+}
+
+/// Whether the archive's title `t` is the song `want` (a chart's title,
+/// maybe with its chart's name after the song's: "AltMirrorBell Another").
+fn titled(t: &str, want: &str) -> bool {
+    use crate::placement::same_name;
+    if same_name(t, want) {
+        return true;
+    }
+    let (t, want) = (t.trim().to_lowercase(), want.trim().to_lowercase());
+    t.chars().count() >= 3 && want.starts_with(&format!("{t} "))
 }
 
 /// The archive's folder for titles starting with `c`.
@@ -213,70 +227,123 @@ impl Source for BmsLibrary {
 
     fn find(&self, q: &Query) -> BoxTask<Vec<String>> {
         let title = q.want.title.trim().to_string();
-        let Some(first) = title.chars().next() else {
-            return Ready::boxed(Vec::new());
-        };
-        if q.diff || self.folder.is_empty() {
+        let md5 = q.md5.trim().to_ascii_lowercase();
+        if q.diff || self.folder.is_empty() || (title.is_empty() && md5.len() != 32) {
             return Ready::boxed(Vec::new());
         }
-        let (artist, letter) = (q.want.artist.clone(), letter_folder(first));
         Box::new(Library {
             root: self.folder.clone(),
-            letter,
-            title,
-            artist,
-            at_root: true,
+            pattern: (md5.len() == 32).then(|| format!("{}/patterns/{md5}", self.api)),
+            table_title: title,
+            titles: Vec::new(),
+            artist: q.want.artist.clone(),
+            wait: Wait::Pattern,
         })
     }
 }
 
-/// The archive's root, then the letter's folder, then the song's archives.
+/// BMS SEARCH's title of the chart's song (when its MD5 is known), the
+/// archive's root, the letter's folder, then the song's archives.
 struct Library {
     root: String,
-    letter: &'static str,
-    title: String,
+    pattern: Option<String>,
+    table_title: String,
+    /// The titles looked for: BMS SEARCH's song's, the table's.
+    titles: Vec<String>,
     artist: String,
-    at_root: bool,
+    wait: Wait,
+}
+
+#[derive(Clone, Copy)]
+enum Wait {
+    Pattern,
+    Root,
+    Letter,
+}
+
+impl Library {
+    fn root(&mut self) -> Next<Vec<String>> {
+        self.titles.retain(|t| !t.trim().is_empty());
+        if self.titles.is_empty() {
+            return Next::Done(Vec::new());
+        }
+        self.wait = Wait::Root;
+        Next::Ask(crate::net::Request::Get(crate::hosts::drive::listing_url(
+            &self.root,
+        )))
+    }
 }
 
 impl Task for Library {
     type Output = Vec<String>;
 
     fn start(&mut self) -> Next<Vec<String>> {
-        self.at_root = true;
-        Next::Ask(crate::net::Request::Get(crate::hosts::drive::listing_url(
-            &self.root,
-        )))
+        self.titles = vec![self.table_title.clone()];
+        match self.pattern.clone() {
+            Some(url) => {
+                self.wait = Wait::Pattern;
+                Next::Ask(crate::net::Request::Get(url))
+            }
+            None => self.root(),
+        }
     }
 
     fn feed(&mut self, answer: Answer) -> Next<Vec<String>> {
-        let Ok(body) = answer else {
-            return Next::Done(Vec::new());
-        };
-        let entries = crate::hosts::drive::listing(&String::from_utf8_lossy(&body));
-        if std::mem::take(&mut self.at_root) {
-            return match entries.iter().find(|e| e.folder && e.name == self.letter) {
-                Some(e) => Next::Ask(crate::net::Request::Get(crate::hosts::drive::listing_url(
-                    &e.id,
-                ))),
-                None => Next::Done(Vec::new()),
-            };
+        match self.wait {
+            Wait::Pattern => {
+                // the song's title, the first to look for
+                let v: serde_json::Value = answer
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default();
+                if let Some(t) = v["bms"]["title"].as_str().filter(|t| !t.trim().is_empty()) {
+                    self.titles.insert(0, t.trim().to_string());
+                }
+                if self.artist.is_empty() {
+                    self.artist = v["artist"].as_str().unwrap_or("").to_string();
+                }
+                self.root()
+            }
+            Wait::Root => {
+                let Ok(body) = answer else {
+                    return Next::Done(Vec::new());
+                };
+                let entries = crate::hosts::drive::listing(&String::from_utf8_lossy(&body));
+                let first = self.titles[0].trim().chars().next().unwrap_or(' ');
+                let letter = letter_folder(first);
+                match entries.iter().find(|e| e.folder && e.name == letter) {
+                    Some(e) => {
+                        self.wait = Wait::Letter;
+                        Next::Ask(crate::net::Request::Get(crate::hosts::drive::listing_url(
+                            &e.id,
+                        )))
+                    }
+                    None => Next::Done(Vec::new()),
+                }
+            }
+            Wait::Letter => {
+                let Ok(body) = answer else {
+                    return Next::Done(Vec::new());
+                };
+                let entries = crate::hosts::drive::listing(&String::from_utf8_lossy(&body));
+                let mut want = self.titles.clone();
+                want.extend(self.titles.iter().map(|t| crate::bmssearch::base_title(t)));
+                use crate::placement::same_artist;
+                Next::Done(
+                    entries
+                        .iter()
+                        .filter(|e| !e.folder)
+                        .filter(|e| {
+                            by_artist(&e.name).is_some_and(|(t, a)| {
+                                want.iter().any(|w| titled(t, w))
+                                    && (self.artist.is_empty() || same_artist(a, &self.artist))
+                            })
+                        })
+                        .map(|e| crate::hosts::drive::file_link(&e.id))
+                        .collect(),
+                )
+            }
         }
-        let base = crate::bmssearch::base_title(&self.title);
-        use crate::placement::{same_artist, same_name};
-        Next::Done(
-            entries
-                .iter()
-                .filter(|e| !e.folder)
-                .filter(|e| {
-                    by_artist(&e.name).is_some_and(|(t, a)| {
-                        (same_name(t, &self.title) || same_name(t, &base))
-                            && (self.artist.is_empty() || same_artist(a, &self.artist))
-                    })
-                })
-                .map(|e| crate::hosts::drive::file_link(&e.id))
-                .collect(),
-        )
     }
 }
 
@@ -559,6 +626,43 @@ mod tests {
         assert_eq!(
             run(&mut lib.find(&q), &http),
             ["https://drive.google.com/file/d/X2/view"]
+        );
+        // a chart's title: the song's, then its chart's name
+        assert!(titled("AltMirrorBell", "AltMirrorBell Another"));
+        assert!(!titled("Air", "Airship"));
+        // by the chart's MD5: BMS SEARCH's title of its song
+        let md5 = "0d1a3240230a854d05877f0d523a1409";
+        let api = &config.bmssearch_api;
+        let b = entry(
+            "https://drive.google.com/file/d/B1/view",
+            "AltMirrorBell (by Grand thaw).rar",
+        );
+        let http = Canned(vec![
+            (
+                format!("{api}/patterns/{md5}"),
+                Ok(br#"{"bms":{"title":"AltMirrorBell"},"artist":"Grand thaw"}"#.to_vec()),
+            ),
+            (
+                "https://drive.google.com/embeddedfolderview?id=1mTcWY9jYMsnEzbVfvGkjfepBpN4Tj786"
+                    .into(),
+                Ok(entry("https://drive.google.com/drive/folders/FA", "A").into_bytes()),
+            ),
+            (
+                "https://drive.google.com/embeddedfolderview?id=FA".into(),
+                Ok(b.into_bytes()),
+            ),
+        ]);
+        let q = Query {
+            md5: md5.into(),
+            want: Want {
+                title: "AltMirrorBell Another".into(),
+                artist: "Grand thaw".into(),
+            },
+            diff: false,
+        };
+        assert_eq!(
+            run(&mut lib.find(&q), &http),
+            ["https://drive.google.com/file/d/B1/view"]
         );
         // not asked unless named
         assert!(!Sources::from_config(&config, vec![])
