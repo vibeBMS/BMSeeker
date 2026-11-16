@@ -787,40 +787,78 @@ pub fn song_folder(fs: &dyn Fs, library: &Path, stem: &str, charts: &[ChartInfo]
         .expect("a free name")
 }
 
-/// Move `file` into the folder `dir` (a chart, or a file it came with), as
-/// BeMusicSeeker's smart overwrite: a file of the same name there stays
-/// unless `file` is newer (by more than 2 seconds), and `file` goes; a
-/// chart of the same name never overwrites (it comes in as `name_.bms`;
-/// the same chart again just goes). Returns where it is now (None: it was
-/// not needed, or could not move).
+/// What to do with a file coming into a folder (BeMusicSeeker's smart
+/// overwrite), by the (modification time, size) of it and of the file of
+/// its name there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clash {
+    /// None there: it goes in.
+    Move,
+    /// It replaces the one there.
+    Overwrite,
+    /// The one there stays; it is not needed.
+    Keep,
+    /// A chart of the name there: it comes in under another name.
+    Rename,
+}
+
+/// [`Clash`] for a file (`new`: its time and size; `old`: the one there):
+/// a chart never replaces another; the same size within 2 seconds is the
+/// same file; else a newer one replaces the one there, an older one does
+/// not. Without file times to go by (`times` false: a web page's storage),
+/// the one there stays.
+pub fn clash(new: (i64, u64), old: Option<(i64, u64)>, is_chart: bool, times: bool) -> Clash {
+    let Some(old) = old else {
+        return Clash::Move;
+    };
+    if is_chart {
+        return Clash::Rename;
+    }
+    if !times || (new.1 == old.1 && (new.0 - old.0).abs() <= 2) {
+        return Clash::Keep;
+    }
+    if new.0 > old.0 {
+        Clash::Overwrite
+    } else {
+        Clash::Keep
+    }
+}
+
+/// Move `file` into the folder `dir` (a chart, or a file it came with), by
+/// [`clash`]: a chart of the same name there is not replaced (it comes in
+/// as `name_.bms`; the same chart again just goes); another file of the
+/// same name stays unless `file` is newer, and `file` goes. Returns where
+/// it is now (None: it was not needed, or could not move).
 pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> Option<PathBuf> {
     let name = file_name(file);
     let mut to = dir.join(&name);
-    if is_chart(file) {
+    let chart = is_chart(file);
+    if chart && fs.stamp(&to).is_some() {
         let same = |a: &Path, b: &Path| fs.read(a).ok().is_some_and(|x| fs.read(b).ok() == Some(x));
-        if fs.stamp(&to).is_some() && same(file, &to) {
+        if same(file, &to) {
             fs.remove(file);
             return Some(to);
         }
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((s, e)) => (s.to_string(), format!(".{e}")),
-            None => (name.clone(), String::new()),
-        };
-        let mut n = 1;
-        while fs.stamp(&to).is_some() {
-            to = dir.join(format!("{stem}{}{ext}", "_".repeat(n)));
-            n += 1;
-        }
-        return fs.rename(file, &to).then_some(to);
     }
-    match (fs.stamp(file), fs.stamp(&to)) {
-        (_, None) => fs.rename(file, &to).then_some(to),
-        (Some((new, _)), Some((old, _))) if new > old + 2 => {
-            (fs.remove(&to) && fs.rename(file, &to)).then_some(to)
-        }
-        _ => {
+    let new = fs.stamp(file).unwrap_or_default();
+    match clash(new, fs.stamp(&to), chart, fs.keeps_times()) {
+        Clash::Move => fs.rename(file, &to).then_some(to),
+        Clash::Overwrite => (fs.remove(&to) && fs.rename(file, &to)).then_some(to),
+        Clash::Keep => {
             fs.remove(file);
             None
+        }
+        Clash::Rename => {
+            let (stem, ext) = match name.rsplit_once('.') {
+                Some((s, e)) => (s.to_string(), format!(".{e}")),
+                None => (name.clone(), String::new()),
+            };
+            let mut n = 1;
+            while fs.stamp(&to).is_some() {
+                to = dir.join(format!("{stem}{}{ext}", "_".repeat(n)));
+                n += 1;
+            }
+            fs.rename(file, &to).then_some(to)
         }
     }
 }
@@ -1221,6 +1259,95 @@ mod tests {
         assert_eq!(s.list[s.at[&lib.join("New")]].1, ["c.bms", "c.ogg"]);
         assert!(s.by_sound["sound/z"].contains(&s.at[&lib.join("Pack/Song")]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_overwrite_rule() {
+        let t = 1_000_000;
+        assert_eq!(clash((t, 5), None, false, true), Clash::Move);
+        assert_eq!(clash((t, 5), None, true, true), Clash::Move);
+        assert_eq!(clash((t, 5), Some((t, 6)), true, true), Clash::Rename);
+        // the same size within 2 seconds: the same file
+        assert_eq!(clash((t + 2, 5), Some((t, 5)), false, true), Clash::Keep);
+        assert_eq!(clash((t - 2, 5), Some((t, 5)), false, true), Clash::Keep);
+        // newer: replaces; older or as old: stays
+        assert_eq!(
+            clash((t + 3, 5), Some((t, 5)), false, true),
+            Clash::Overwrite
+        );
+        assert_eq!(
+            clash((t + 1, 6), Some((t, 5)), false, true),
+            Clash::Overwrite
+        );
+        assert_eq!(clash((t, 6), Some((t, 5)), false, true), Clash::Keep);
+        assert_eq!(clash((t - 100, 6), Some((t, 5)), false, true), Clash::Keep);
+        // no times to go by: what is there stays
+        assert_eq!(clash((t + 100, 6), Some((t, 5)), false, false), Clash::Keep);
+        assert_eq!(clash((t, 5), None, false, false), Clash::Move);
+    }
+
+    /// The audit's defect 4: a 差分 package's sounds, unpacked with their
+    /// (older) archive times, do not replace the song's own.
+    #[test]
+    fn a_package_unpacked_with_its_times() {
+        use crate::fs::Mem;
+        use crate::unpack::{unpack, Blob, BUDGET};
+        let mem = Mem::default();
+        let now = 1_700_000_000;
+        mem.put(Path::new("bms/Song/01.ogg"), b"song's", now);
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut out);
+            let at = zip::DateTime::from_date_and_time(2015, 6, 1, 0, 0, 0).unwrap();
+            let o = zip::write::SimpleFileOptions::default().last_modified_time(at);
+            for (n, b) in [("01.ogg", b"pack's".as_slice()), ("02.ogg", b"new")] {
+                z.start_file(n, o).unwrap();
+                std::io::Write::write_all(&mut z, b).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        let pkg = Path::new("dl/pkg");
+        unpack(Blob::Bytes(out.into_inner()), &mem, pkg, BUDGET).unwrap();
+        let song = Path::new("bms/Song");
+        assert_eq!(bring(&mem, &pkg.join("01.ogg"), song), None);
+        assert_eq!(
+            bring(&mem, &pkg.join("02.ogg"), song),
+            Some(song.join("02.ogg"))
+        );
+        assert_eq!(mem.get(&song.join("01.ogg")).unwrap().0, b"song's");
+        assert!(mem.get(&pkg.join("01.ogg")).is_none());
+    }
+
+    /// Where files keep no times (a web page's storage), what is there
+    /// stays.
+    #[test]
+    fn no_times_no_overwrite() {
+        struct NoTimes(crate::fs::Mem);
+        impl Fs for NoTimes {
+            fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+                self.0.read(p)
+            }
+            fn read_dir(&self, p: &Path) -> std::io::Result<Vec<crate::fs::Entry>> {
+                self.0.read_dir(p)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> bool {
+                self.0.rename(from, to)
+            }
+            fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
+                self.0.stamp(p)
+            }
+            fn remove(&self, p: &Path) -> bool {
+                self.0.remove(p)
+            }
+            fn keeps_times(&self) -> bool {
+                false
+            }
+        }
+        let fs = NoTimes(Default::default());
+        fs.0.put(Path::new("s/a.ogg"), b"old", 0);
+        fs.0.put(Path::new("p/a.ogg"), b"newer", 100);
+        assert_eq!(bring(&fs, Path::new("p/a.ogg"), Path::new("s")), None);
+        assert_eq!(fs.0.get(Path::new("s/a.ogg")).unwrap().0, b"old");
     }
 
     #[test]

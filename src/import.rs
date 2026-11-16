@@ -1,11 +1,10 @@
-//! Downloaded songs: archives (.zip, .7z, .rar) are unpacked into the
+//! Downloaded songs: archives (.zip, .7z, .rar, .lzh) are unpacked into the
 //! library, a chart on its own goes into its song's folder (see
-//! `placement`).
+//! `placement`). On any [`Store`] (a disk, a player's files).
 
-use crate::fs::Fs;
+use crate::fs::{Disk, Store};
 use crate::placement::{self, Located};
-use crate::unpack::{safe_rel, Capped};
-use std::io::Read;
+use crate::unpack::{safe_rel, unpack, Blob, BUDGET};
 use std::path::{Path, PathBuf};
 
 /// What became of a downloaded file.
@@ -24,9 +23,6 @@ pub enum Imported {
     Other(PathBuf),
 }
 
-/// What a pack may unpack to (a zip can claim, or expand to, anything).
-const BUDGET: u64 = 4 << 30;
-
 fn ext(p: &Path) -> String {
     p.extension()
         .and_then(|e| e.to_str())
@@ -34,155 +30,49 @@ fn ext(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn write_entry(dest: &Path, rel: &Path, r: &mut dyn Read, budget: &mut u64) -> Result<(), String> {
-    let path = dest.join(rel);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let mut f = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let n = std::io::copy(&mut r.take(*budget + 1), &mut f).map_err(|e| e.to_string())?;
-    if n > *budget {
-        drop(f);
-        let _ = std::fs::remove_file(&path);
-        return Err(crate::unpack::too_large(BUDGET));
-    }
-    *budget -= n;
-    Ok(())
-}
-
-fn unzip(file: &Path, dest: &Path) -> Result<usize, String> {
-    let f = std::fs::File::open(file).map_err(|e| e.to_string())?;
-    let mut z = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let mut budget = BUDGET;
-    let mut n = 0;
-    for i in 0..z.len() {
-        let mut entry = z.by_index(i).map_err(|e| e.to_string())?;
-        if entry.is_dir() {
-            continue;
-        }
-        // names in Shift_JIS / EUC-KR as BMS packs often have
-        let Some(rel) = safe_rel(&crate::decode_name(entry.name_raw())) else {
-            continue;
-        };
-        write_entry(dest, &rel, &mut entry, &mut budget)?;
-        n += 1;
-    }
-    Ok(n)
-}
-
-fn un7z(file: &Path, dest: &Path) -> Result<usize, String> {
-    let mut a = sevenz_rust2::ArchiveReader::open(file, sevenz_rust2::Password::new(""))
-        .map_err(|e| e.to_string())?;
-    let mut budget = BUDGET;
-    let mut n = 0;
-    let mut err = None;
-    a.for_each_entries(|entry, r| {
-        if entry.is_directory() {
-            return Ok(true);
-        }
-        let Some(rel) = safe_rel(entry.name()) else {
-            return Ok(true);
-        };
-        match write_entry(dest, &rel, r, &mut budget) {
-            Ok(()) => {
-                n += 1;
-                Ok(true)
-            }
-            Err(e) => {
-                err = Some(e);
-                Ok(false)
-            }
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    err.map_or(Ok(n), Err)
-}
-
-fn unrar(file: &Path, dest: &Path) -> Result<usize, String> {
-    let f = std::fs::File::open(file).map_err(|e| e.to_string())?;
-    let mut a = unrar_rs::RarArchive::open(f).map_err(|e| e.to_string())?;
-    let mut budget = BUDGET;
-    let mut n = 0;
-    for i in 0..a.len() {
-        let Some(info) = a.member_info(i) else {
-            continue;
-        };
-        if info.is_directory {
-            continue;
-        }
-        // the name as stored (made safe here, as for the other formats)
-        let name = info.raw_name.clone();
-        let Some(rel) = safe_rel(&name) else { continue };
-        let path = dest.join(&rel);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        let out = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut w = Capped {
-            w: std::io::BufWriter::new(out),
-            left: budget,
-            budget: BUDGET,
-        };
-        let r = a
-            .by_index(i)
-            .and_then(|e| e.copy_to(&mut w))
-            .map_err(|e| format!("{name}: {e}"));
-        match r {
-            Ok(k) => budget -= k,
-            Err(e) => {
-                drop(w);
-                let _ = std::fs::remove_file(&path);
-                return Err(e);
-            }
-        }
-        n += 1;
-    }
-    Ok(n)
+fn is_archive(p: &Path) -> bool {
+    matches!(ext(p).as_str(), "zip" | "7z" | "rar" | "lzh" | "lha")
 }
 
 /// Bring a downloaded `file` into `library` (`<root>/bms`). Archives are
 /// unpacked into a folder named after them (when one of that name holds
 /// another song: `name (2)`...) and removed.
-pub fn import(fs: &dyn Fs, file: &Path, library: &Path) -> Result<Imported, String> {
-    let e = ext(file);
-    if e == "zip" || e == "7z" || e == "rar" {
+pub fn import(fs: &dyn Store, file: &Path, library: &Path) -> Result<Imported, String> {
+    if is_archive(file) {
         let stem = file
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "download".into());
-        let unpack = |dest: &Path| -> Result<usize, String> {
-            std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-            let n = match e.as_str() {
-                "zip" => unzip(file, dest)?,
-                "7z" => un7z(file, dest)?,
-                _ => unrar(file, dest)?,
-            };
-            Ok(n + unpack_nested(dest)?)
+        let unpack_to = |dest: &Path| -> Result<usize, String> {
+            unpack(Blob::File(file.to_path_buf()), fs, dest, BUDGET)
+                .map(|m| m.len())
+                .inspect_err(|_| fs.remove_dir(dest))
         };
         let first = library.join(&stem);
         if fs.read_dir(&first).is_err() {
-            let n = unpack(&first)?;
-            let _ = std::fs::remove_file(file);
+            let n = unpack_to(&first)?;
+            fs.remove(file);
             return Ok(Imported::Unpacked(first, n));
         }
         // a folder of that name: unpacked beside the file first, then into
         // it (the same song again) or a free name (another song)
         let tmp = file.with_file_name(format!(".unpack-{}", crate::install::unique()));
-        let n = unpack(&tmp).inspect_err(|_| {
-            let _ = std::fs::remove_dir_all(&tmp);
-        })?;
-        let _ = std::fs::remove_file(file);
-        let dest = placement::song_folder(fs, library, &stem, &placement::charts_below(fs, &tmp));
-        let moved = move_tree(&tmp, &dest);
-        let _ = std::fs::remove_dir_all(&tmp);
+        let n = unpack_to(&tmp)?;
+        fs.remove(file);
+        let read = fs.as_fs();
+        let dest =
+            placement::song_folder(read, library, &stem, &placement::charts_below(read, &tmp));
+        let moved = move_tree(fs, &tmp, &dest);
+        fs.remove_dir(&tmp);
         moved?;
         return Ok(Imported::Unpacked(dest, n));
     }
     if !placement::is_chart(file) {
         return Ok(Imported::Other(file.to_path_buf()));
     }
-    Ok(match placement::locate_loose(fs, file, library) {
-        Some(Located::Move(dir)) => match placement::bring(fs, file, &dir) {
+    let read = fs.as_fs();
+    Ok(match placement::locate_loose(read, file, library) {
+        Some(Located::Move(dir)) => match placement::bring(read, file, &dir) {
             Some(to) => Imported::Placed(to),
             None => Imported::Waiting(file.to_path_buf()),
         },
@@ -193,79 +83,62 @@ pub fn import(fs: &dyn Fs, file: &Path, library: &Path) -> Result<Imported, Stri
 
 /// Move everything below `from` into `to` (a file of the same name there
 /// replaced).
-fn move_tree(from: &Path, to: &Path) -> Result<(), String> {
-    if !to.exists() && std::fs::rename(from, to).is_ok() {
+fn move_tree(fs: &dyn Store, from: &Path, to: &Path) -> Result<(), String> {
+    if fs.read_dir(to).is_err() && fs.rename(from, to) {
         return Ok(());
     }
     let mut todo = vec![from.to_path_buf()];
     while let Some(d) = todo.pop() {
-        for e in std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                todo.push(p);
+        for e in fs.read_dir(&d).map_err(|e| e.to_string())? {
+            if e.is_dir {
+                todo.push(e.path);
                 continue;
             }
-            let rel = p.strip_prefix(from).map_err(|e| e.to_string())?;
+            let rel = e.path.strip_prefix(from).map_err(|e| e.to_string())?;
             let at = to.join(rel);
-            if let Some(dir) = at.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            }
-            let _ = std::fs::remove_file(&at);
-            if std::fs::rename(&p, &at).is_err() {
-                std::fs::copy(&p, &at).map_err(|e| format!("{}: {e}", at.display()))?;
+            fs.remove(&at);
+            if !fs.rename(&e.path, &at) {
+                // (a folder not there yet) copied, with its time
+                copy(fs, &e.path, &at).map_err(|err| format!("{}: {err}", at.display()))?;
             }
         }
     }
     Ok(())
 }
 
-/// Archives inside an unpacked archive that holds no chart of its own (a
-/// shared folder downloaded as a zip of the song's archives): each unpacked
-/// into a folder of its name beside it, then removed. Returns the number of
-/// files written.
-fn unpack_nested(dest: &Path) -> Result<usize, String> {
-    let mut archives = Vec::new();
-    let mut todo = vec![dest.to_path_buf()];
-    while let Some(d) = todo.pop() {
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                todo.push(p);
-            } else if placement::is_chart(&p) {
-                return Ok(0);
-            } else if matches!(ext(&p).as_str(), "zip" | "7z" | "rar") {
-                archives.push(p);
-            }
-        }
-    }
-    let mut n = 0;
-    for a in archives {
-        let stem = a
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "download".into());
-        let into = a.with_file_name(stem);
-        n += unpack_into(&a, &file_name(&a), &into)?;
-        let _ = std::fs::remove_file(&a);
-    }
-    Ok(n)
+/// Copy the file `from` to `to` in `fs` (its folders made), keeping its time.
+fn copy(fs: &dyn Store, from: &Path, to: &Path) -> std::io::Result<()> {
+    let bytes = fs.read(from)?;
+    let mtime = fs.stamp(from).map(|(t, _)| t);
+    let mut w = fs.create(to, mtime)?;
+    w.write_all(&bytes)?;
+    w.flush()
 }
 
-/// Put `file` (published as `name`) into folder `dest`: an archive is
-/// unpacked there, anything else (an add-on chart or movie) is moved in.
-/// Returns the number of files written.
+use std::io::Write;
+
+/// Put `file` (published as `name`) into folder `dest` on the disk: an
+/// archive is unpacked there (with the archives in it, if it holds no
+/// chart), anything else (an add-on chart or movie) is copied in. Returns
+/// the number of files written.
 pub fn unpack_into(file: &Path, name: &str, dest: &Path) -> Result<usize, String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-    match ext(Path::new(name)).as_str() {
-        "zip" => unzip(file, dest),
-        "7z" => un7z(file, dest),
-        "rar" => unrar(file, dest),
-        _ => {
-            let to = dest.join(safe_rel(name).unwrap_or_else(|| PathBuf::from("download")));
-            std::fs::copy(file, &to).map_err(|e| format!("{}: {e}", to.display()))?;
-            Ok(1)
-        }
+    unpack_into_store(&Disk, file, name, dest)
+}
+
+/// [`unpack_into`] on any store.
+pub fn unpack_into_store(
+    fs: &dyn Store,
+    file: &Path,
+    name: &str,
+    dest: &Path,
+) -> Result<usize, String> {
+    if is_archive(Path::new(name)) {
+        return unpack(Blob::File(file.to_path_buf()), fs, dest, BUDGET).map(|m| m.len());
     }
+    let to = dest.join(safe_rel(name).unwrap_or_else(|| PathBuf::from("download")));
+    copy(fs, file, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    Ok(1)
 }
 
 pub fn file_name(p: &Path) -> String {
@@ -370,6 +243,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The same on a store that is no disk, the song's archive times kept.
+    #[test]
+    fn into_a_store_of_another_kind() {
+        use crate::fs::Mem;
+        let mem = Mem::default();
+        let library = Path::new("bms");
+        let pack = |artist: &str| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            let mut z = zip::ZipWriter::new(&mut out);
+            let at = zip::DateTime::from_date_and_time(2019, 1, 1, 0, 0, 0).unwrap();
+            let opts = zip::write::SimpleFileOptions::default().last_modified_time(at);
+            let chart = format!("#TITLE Aurora\n#ARTIST {artist}\n#WAV01 01.wav\n");
+            for (name, data) in [("a.bms", chart.as_bytes()), ("sub/01.ogg", b"x")] {
+                z.start_file(name, opts).unwrap();
+                z.write_all(data).unwrap();
+            }
+            z.finish().unwrap();
+            mem.put(Path::new("dl/Aurora.zip"), &out.into_inner(), 0);
+            Path::new("dl/Aurora.zip")
+        };
+        let got = import(&mem, pack("alpha"), library).unwrap();
+        assert_eq!(got, Imported::Unpacked(library.join("Aurora"), 2));
+        assert_eq!(
+            mem.get(Path::new("bms/Aurora/sub/01.ogg")).unwrap().1,
+            1_546_300_800
+        );
+        assert!(mem.get(Path::new("dl/Aurora.zip")).is_none());
+        let got = import(&mem, pack("beta"), library).unwrap();
+        assert_eq!(got, Imported::Unpacked(library.join("Aurora (2)"), 2));
+        assert!(mem.get(Path::new("bms/Aurora (2)/sub/01.ogg")).is_some());
+        // nothing left of the folder it went through
+        let left: Vec<PathBuf> = mem.0.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left.len(), 4, "{left:?}");
+    }
+
     #[test]
     fn unpacks_archives_in_an_archive() {
         let root = tmp("nested");
@@ -397,7 +305,7 @@ mod tests {
         let dest = library.join("Folder");
         assert_eq!(
             import(&Disk, &pack, &library).unwrap(),
-            Imported::Unpacked(dest.clone(), 4)
+            Imported::Unpacked(dest.clone(), 3)
         );
         assert!(dest.join("Song_ogg/Song/song.bms").is_file());
         assert!(!dest.join("Song_ogg.zip").exists());

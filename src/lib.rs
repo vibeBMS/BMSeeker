@@ -4,7 +4,8 @@
 //! - [`table`]: difficulty tables (bmstable: 発狂BMS, Satellite, Stella, ...);
 //! - [`hosts`]: from the link an author or a table gives to the archive
 //!   (Google Drive, Dropbox, MediaFire, MEGA, event venues, ...);
-//! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar) into the library;
+//! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar) into the library
+//!   (a [`fs::Store`]), with their files' times;
 //! - [`placement`]: which song's folder a chart of its own (差分) belongs in;
 //! - [`install`]: a table's song from its links into the library;
 //! - [`links`]: links for a table's songs whose own are missing or dead;
@@ -26,8 +27,6 @@ pub mod config;
 pub mod export;
 pub mod fs;
 pub mod hosts;
-// archives from a disk (a web page has none)
-#[cfg(not(target_arch = "wasm32"))]
 pub mod import;
 pub mod install;
 pub mod links;

@@ -1,7 +1,8 @@
 //! The files the library tools read and move: a disk ([`Disk`]) or whatever
-//! a player keeps its library in.
+//! a player keeps its library in. [`Fs`] reads and moves; a [`Store`] also
+//! writes (what an archive unpacks to).
 
-use std::io;
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 /// A directory entry.
@@ -20,6 +21,50 @@ pub trait Fs: Sync {
     fn stamp(&self, p: &Path) -> Option<(i64, u64)>;
     /// Delete a file; false when it could not be.
     fn remove(&self, p: &Path) -> bool;
+    /// Whether files keep the times they are written with ([`Store::create`])
+    /// and those [`Fs::stamp`] gives can be compared (not so in a web
+    /// page's storage).
+    fn keeps_times(&self) -> bool {
+        true
+    }
+}
+
+/// What an archive is read through.
+pub trait ReadSeek: Read + Seek {}
+
+impl<T: Read + Seek> ReadSeek for T {}
+
+/// A store as files to read (`&dyn Store` as `&dyn Fs`).
+pub trait AsFs {
+    fn as_fs(&self) -> &dyn Fs;
+}
+
+impl<T: Fs> AsFs for T {
+    fn as_fs(&self) -> &dyn Fs {
+        self
+    }
+}
+
+/// Files written as well as read: where archives are unpacked.
+pub trait Store: Fs + AsFs {
+    /// A new file `p` (its folders made, a file there replaced), written
+    /// through what this gives; once that is dropped, its modification
+    /// time is `mtime` (seconds) if the store can keep it (a failure to is
+    /// no error).
+    fn create(&self, p: &Path, mtime: Option<i64>) -> io::Result<Box<dyn Write + '_>>;
+    /// Remove the folder `p` and everything below it.
+    fn remove_dir(&self, p: &Path);
+    /// The file `p` to read from (an archive in the store): all of it in
+    /// memory, unless the store can do better.
+    fn open(&self, p: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
+        Ok(Box::new(io::Cursor::new(self.read(p)?)))
+    }
+}
+
+/// `mtime` (seconds since 1970) as a time (None: before it).
+pub fn system_time(mtime: i64) -> Option<std::time::SystemTime> {
+    let secs = u64::try_from(mtime).ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
 }
 
 /// `std::fs`.
@@ -60,5 +105,160 @@ impl Fs for Disk {
 
     fn remove(&self, p: &Path) -> bool {
         std::fs::remove_file(p).is_ok()
+    }
+}
+
+/// A file on a disk being written; its time set once it is done.
+struct Timed {
+    w: io::BufWriter<std::fs::File>,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.w.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.w.flush()
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        // (the archive's time if it can be kept; else the time of writing)
+        if self.w.flush().is_ok() {
+            if let Some(t) = self.mtime {
+                let _ = self.w.get_ref().set_modified(t);
+            }
+        }
+    }
+}
+
+impl Store for Disk {
+    fn create(&self, p: &Path, mtime: Option<i64>) -> io::Result<Box<dyn Write + '_>> {
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let f = std::fs::File::create(p)?;
+        Ok(Box::new(Timed {
+            w: io::BufWriter::new(f),
+            mtime: mtime.and_then(system_time),
+        }))
+    }
+
+    fn remove_dir(&self, p: &Path) {
+        let _ = std::fs::remove_dir_all(p);
+    }
+
+    fn open(&self, p: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
+        Ok(Box::new(std::fs::File::open(p)?))
+    }
+}
+
+/// A store in memory, for tests: (bytes, time) by path.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Mem(pub std::sync::Mutex<std::collections::BTreeMap<PathBuf, (Vec<u8>, i64)>>);
+
+#[cfg(test)]
+impl Mem {
+    pub fn put(&self, p: &Path, data: &[u8], mtime: i64) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(p.to_path_buf(), (data.to_vec(), mtime));
+    }
+    pub fn get(&self, p: &Path) -> Option<(Vec<u8>, i64)> {
+        self.0.lock().unwrap().get(p).cloned()
+    }
+}
+
+#[cfg(test)]
+impl Fs for Mem {
+    fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+        self.get(p)
+            .map(|f| f.0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+    }
+    fn read_dir(&self, p: &Path) -> io::Result<Vec<Entry>> {
+        let files = self.0.lock().unwrap();
+        let mut out: Vec<Entry> = Vec::new();
+        for k in files.keys() {
+            let Ok(rest) = k.strip_prefix(p) else {
+                continue;
+            };
+            let mut c = rest.components();
+            let Some(first) = c.next() else { continue };
+            let path = p.join(first);
+            if !out.iter().any(|e| e.path == path) {
+                out.push(Entry {
+                    path,
+                    is_dir: c.next().is_some(),
+                });
+            }
+        }
+        if out.is_empty() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        Ok(out)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> bool {
+        let mut files = self.0.lock().unwrap();
+        if files.contains_key(to) {
+            return false;
+        }
+        match files.remove(from) {
+            Some(f) => {
+                files.insert(to.to_path_buf(), f);
+                true
+            }
+            None => false,
+        }
+    }
+    fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
+        self.get(p).map(|(b, t)| (t, b.len() as u64))
+    }
+    fn remove(&self, p: &Path) -> bool {
+        self.0.lock().unwrap().remove(p).is_some()
+    }
+}
+
+#[cfg(test)]
+struct MemFile<'a> {
+    mem: &'a Mem,
+    p: PathBuf,
+    buf: Vec<u8>,
+    mtime: i64,
+}
+
+#[cfg(test)]
+impl Write for MemFile<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buf.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for MemFile<'_> {
+    fn drop(&mut self) {
+        self.mem.put(&self.p, &self.buf, self.mtime);
+    }
+}
+
+#[cfg(test)]
+impl Store for Mem {
+    fn create(&self, p: &Path, mtime: Option<i64>) -> io::Result<Box<dyn Write + '_>> {
+        Ok(Box::new(MemFile {
+            mem: self,
+            p: p.to_path_buf(),
+            buf: Vec::new(),
+            mtime: mtime.unwrap_or(0),
+        }))
+    }
+    fn remove_dir(&self, p: &Path) {
+        self.0.lock().unwrap().retain(|k, _| !k.starts_with(p));
     }
 }

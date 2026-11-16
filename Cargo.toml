@@ -34,10 +34,12 @@ sha2 = "0.10"
 url = "2"
 web-time = "1"
 ehttp = "0.7"
-# archives (.zip; .7z; .rar: Apache-2.0 with the UnRAR license restriction)
+# archives (.zip; .7z; .rar: Apache-2.0 with the UnRAR license restriction;
+# .lzh: 0.6, 0.7 and later need a newer Rust)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd"] }
 unrar-rs = { version = "0.16.4", default-features = false, features = ["crypto-rust"] }
+delharc = "0.6.2"
 # MEGA files are AES-128-CTR encrypted
 aes = "0.9"
 # beatoraja table caches (.bmt) are gzip

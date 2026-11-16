@@ -192,16 +192,18 @@ pub fn link(
     out
 }
 
-/// A name no other download of this process or another has.
-#[cfg(not(target_arch = "wasm32"))]
+/// A name no other download of this process or another has (a web
+/// page: of this page).
 pub(crate) fn unique() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    )
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    if cfg!(target_arch = "wasm32") {
+        // (no process ids there)
+        format!("w-{n}")
+    } else {
+        format!("{}-{n}", std::process::id())
+    }
 }
 
 /// [`link`], what passes through in `job`.
@@ -637,7 +639,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn unique_names() {
         assert_ne!(unique(), unique());

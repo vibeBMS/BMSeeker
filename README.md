@@ -123,8 +123,8 @@ Go 1.27+).
 | --- | --- |
 | `table` | bmstable difficulty tables (the HTML's `<meta name="bmstable">` → header → data) |
 | `hosts` | link → archive: direct links, Google Drive files and folders, Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
-| `unpack` / `import` | unpacking .zip / .7z / .rar (Shift_JIS and EUC-KR names; no escaping the folder, no archive bombs) |
-| `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly |
+| `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder, no archive bombs; the archive's file times kept; archives inside one holding no chart unpacked too) |
+| `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not; where file times mean nothing, as in a web page's storage, the one there stays) |
 | `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart) |
 | `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, the community archive |
 | `links` | other links by a chart's MD5 (the tables given, the Stella uploader's list): filling empty or dead links, trying them in turn when one does not download |
@@ -142,8 +142,9 @@ reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`
 
 ## Web (wasm32)
 
-The library builds for wasm32 too (the network is `net::Task`, so the browser makes the requests). `unrar-rs`, which
-unpacks RAR, builds for wasm32-unknown-unknown from 0.16.4.
+The library builds for wasm32 too (the network is `net::Task`, so the browser makes the requests; `import` and
+`unpack` work on whatever `fs::Store` the page keeps its files in). `unrar-rs`, which unpacks RAR, builds for
+wasm32-unknown-unknown from 0.16.4; `delharc` (LHA) builds for it as it is.
 
 ## Credits
 

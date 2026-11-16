@@ -430,6 +430,9 @@ pub fn sniff_bytes(h: &[u8]) -> Option<&'static str> {
         Some("rar")
     } else if h.starts_with(b"7z\xbc\xaf\x27\x1c") {
         Some("7z")
+    } else if h.len() >= 7 && h[2] == b'-' && h[6] == b'-' && matches!(&h[3..5], b"lh" | b"lz") {
+        // an LHA header: `-lh5-` (its method) after its size and checksum
+        Some("lzh")
     } else {
         None
     }
@@ -440,7 +443,9 @@ pub use crate::net::url_encode;
 /// Whether a file name is an archive's.
 fn archive_name(n: &str) -> bool {
     let n = n.to_ascii_lowercase();
-    [".zip", ".rar", ".7z"].iter().any(|e| n.ends_with(e))
+    [".zip", ".rar", ".7z", ".lzh"]
+        .iter()
+        .any(|e| n.ends_with(e))
 }
 
 /// The best of (name, item) among a folder's archives: ogg over wav, full
