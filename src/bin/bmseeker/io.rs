@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 use std::io::Write;
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct Out {
     pub json: bool,
 }

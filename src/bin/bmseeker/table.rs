@@ -30,6 +30,10 @@ pub enum Table {
         /// Download them (each song, then its separate chart).
         #[arg(long)]
         get: bool,
+        /// A download whose charts the library has: its files again, newer
+        /// ones over those there (else only those its folder lacks).
+        #[arg(long, requires = "get")]
+        reinstall: bool,
         #[command(flatten)]
         links: LinkArgs,
     },
@@ -87,8 +91,16 @@ pub fn table(r: &Run, c: Table) -> Result<(), String> {
             library,
             level,
             get,
+            reinstall,
             links,
-        } => missing(r, &url, &library, level.as_deref(), get, &links),
+        } => missing(
+            &crate::library::reinstalling(r, reinstall),
+            &url,
+            &library,
+            level.as_deref(),
+            get,
+            &links,
+        ),
         Table::Export {
             to,
             url,

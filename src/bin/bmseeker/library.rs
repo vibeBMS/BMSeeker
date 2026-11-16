@@ -18,6 +18,8 @@ pub enum Library {
         file: PathBuf,
         #[arg(short = 'L', long)]
         library: PathBuf,
+        #[command(flatten)]
+        again: Reinstall,
     },
     /// Which song's folder a chart of its own (差分) belongs in; --to moves
     /// it there.
@@ -51,13 +53,50 @@ pub enum Library {
         /// The given links only.
         #[arg(long)]
         own_links: bool,
+        #[command(flatten)]
+        again: Reinstall,
     },
+}
+
+/// What becomes of a song whose charts the library has.
+#[derive(clap::Args, Clone, Copy, Default)]
+pub struct Reinstall {
+    /// Bring its files in again, newer ones over those there (else only
+    /// those its folder lacks).
+    #[arg(long)]
+    reinstall: bool,
+}
+
+/// `r`, songs whose charts the library has brought in again with
+/// `reinstall` (else as the settings say).
+pub fn reinstalling(r: &Run, reinstall: bool) -> Run {
+    let mut cx = r.cx.clone();
+    if reinstall {
+        let config = bmseeker::config::Config {
+            reinstall: true,
+            ..(*cx.config).clone()
+        };
+        cx.config = std::sync::Arc::new(config);
+    }
+    Run {
+        out: r.out.clone(),
+        cx,
+    }
 }
 
 pub fn library(r: &Run, c: Library) -> Result<(), String> {
     match c {
-        Library::Import { file, library } => {
-            let got = bmseeker::import::import(&Disk, &file, &library)?;
+        Library::Import {
+            file,
+            library,
+            again,
+        } => {
+            let req = bmseeker::install::Request {
+                reinstall: again.reinstall || r.config().reinstall,
+                ..Default::default()
+            };
+            let lib = &mut scan(&library, &r.config().downloads);
+            let got = bmseeker::import::import_as(&Disk, &file, lib, &req)?;
             let (v, text) = match &got {
                 Imported::Unpacked(d, n) => (
                     json!({"state": "added", "path": d, "files": n}),
@@ -173,7 +212,9 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
             diff,
             song,
             own_links,
+            again,
         } => {
+            let r = &reinstalling(r, again.reinstall);
             let sources = if own_links {
                 Sources::default()
             } else {

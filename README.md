@@ -25,14 +25,14 @@ song find [-t -a --md5] [--diff] [--table URL]... [--list FILE|URL]...
                                                      the links the sources know for the song (--diff: its separate
                                                      chart)
 table show <URL>                                     a difficulty table and its charts per level
-table missing <URL> -L library [-l level] [--get] [--also URL]... [--list ...] [--own-links]
+table missing <URL> -L library [-l level] [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
                                                      the charts the library lacks (--get: download them)
 table export lr2|bmt <URL> <folder>                  an LR2 custom folder / a beatoraja table cache
-library import <file> -L library                     a downloaded file into the library
+library import <file> -L library [--reinstall]       a downloaded file into the library
 library place <chart> -L library [--to folder] [--min percent]
                                                      the song folders a separate chart may go into (or move it)
 library pending -L library                           separate charts waiting for their songs
-library install <link>... -L library [--diff] [-t -a --md5] [--own-links]
+library install <link>... -L library [--diff] [-t -a --md5] [--own-links] [--reinstall]
                                                      a song (or its separate chart): its links in turn, then the
                                                      sources' links
 event works <manbow event number> [--overrides FILE|-]
@@ -71,8 +71,19 @@ dead uploaders' files by number (`uploaders`). What is found by name (`mirrors`,
 only if it holds the chart (its MD5); a song's archive also when its charts are the song's (title and artist), the
 chart wanted being a separate one. `--own-links`: a song's own links only.
 
-A separate chart whose song is not in the library yet waits in the downloads folder (of a pack of many, only the
-chart wanted) and goes into the song's folder when the song comes. A short link (`db.tt`, `bit.ly`) whose redirects
+What a download holds is sorted before anything goes into the library: an archive may hold several songs' folders
+and charts of their own (packages, by the BeMusicSeeker fork's rules: a folder whose charts' files are there is one,
+with the folders below; a folder of one chart or one song's charts is one; other charts are each one), and where those
+rules are not sure, the whole archive is one, as before. Each package is a song new to the library (a folder of its
+own, named after the song's title or the archive, `name (2)` beside another song of that name), the library's
+already (state `owned`: nothing is downloaded into a second folder; only the files its folder lacks come in, or with
+`--reinstall` / `"reinstall": true` newer ones over those there too), or charts for a song's folder there (state
+`placed`). Such a package goes into its song's folder as it is laid out (its `sound/` folder there too); which folder
+is decided first by its own charts the library has (each votes for its folder; two folders with as many votes, as
+when the library holds a chart twice, are never picked between: the chart waits), then by the song's own charts a
+table names (`org_md5`), then by the files the charts use and their title and artist. What a song's link brings is a
+folder of its own unless where it goes is sure. A separate chart whose song is not in the library yet waits in the
+downloads folder (of a pack of many, only the chart wanted) and goes into the song's folder when the song comes. A short link (`db.tt`, `bit.ly`) whose redirects
 end at a host bmseeker knows (Dropbox, Google Drive...) is opened from there. A server's passing failure (HTTP 429,
 502, 503, 504) is tried again twice. Google Drive's "Quota exceeded" (a file downloaded too often lately) is reported
 as such: it passes within a day.
@@ -87,7 +98,7 @@ down `#sub/folder/file`.
 Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`) are JSON over the defaults:
 `user_agent`, `mirror_catalog` (the BMS event mirror's list; empty: not used), `manbow`, `bmssearch_api`,
 `stella_list`, `mega_api`, `sources`, `third_party`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`,
-`downloads` (the folder in a library where downloads wait), `min_coverage`.
+`downloads` (the folder in a library where downloads wait), `min_coverage`, `reinstall`.
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
 
@@ -126,7 +137,8 @@ Go 1.27+).
 | `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder, no archive bombs; the archive's file times kept; archives inside one holding no chart unpacked too) |
 | `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not; where file times mean nothing, as in a web page's storage, the one there stays) |
 | `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists, and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan`), folder by folder when first needed (`new`), or given by a player's own records of its charts (`from_catalog`: a web page cannot read its library's charts when it likes); what comes in is added to it (`add`, `add_folder`). The `*_in` functions of `install`, `import` and `placement` work in one |
-| `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart) |
+| `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
+| `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart); what arrives goes through `take` (on any `fs::Store`): unpacked into a folder of its own, planned without touching a file (`plan`), carried out (`apply`) |
 | `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, the community archive |
 | `links` | other links by a chart's MD5 (the tables given, the Stella uploader's list): filling empty or dead links, trying them in turn when one does not download |
 | `manbow` | manbow events: works and their links (with labels) from the URL list and work list, and which link is the main archive (HQ > ogg > file, the newest package), an add-on (extra charts, BGA alone) or a mirror (the BMS event mirror's `works.json`; the links to download from a work page) |
@@ -143,8 +155,8 @@ reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`
 
 ## Web (wasm32)
 
-The library builds for wasm32 too (the network is `net::Task`, so the browser makes the requests; `import` and
-`unpack` work on whatever `fs::Store` the page keeps its files in). `unrar-rs`, which unpacks RAR, builds for
+The library builds for wasm32 too (the network is `net::Task`, so the browser makes the requests; `import`,
+`install::take` and `unpack` work on whatever `fs::Store` the page keeps its files in). `unrar-rs`, which unpacks RAR, builds for
 wasm32-unknown-unknown from 0.16.4; `delharc` (LHA) builds for it as it is.
 
 ## Credits
