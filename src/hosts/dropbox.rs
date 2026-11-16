@@ -1,4 +1,6 @@
-//! Dropbox: files and folders download with `dl=1` (a folder as a zip).
+//! Dropbox: files and folders download with `dl=1` (a folder as a zip). Its
+//! short links (`db.tt`) come here from where their redirects end
+//! ([`super::fetch`]).
 
 use super::{Host, Link, Resolved, Target, Want};
 use crate::config::Config;

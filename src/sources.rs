@@ -177,11 +177,26 @@ impl BmsLibrary {
 /// maybe with its chart's name after the song's: "AltMirrorBell Another").
 fn titled(t: &str, want: &str) -> bool {
     use crate::placement::same_name;
+    let (t, want) = (&plain(t), &plain(want));
     if same_name(t, want) {
         return true;
     }
     let (t, want) = (t.trim().to_lowercase(), want.trim().to_lowercase());
     t.chars().count() >= 3 && want.starts_with(&format!("{t} "))
+}
+
+/// `s` as the archive names files: full-width letters as ASCII ones, and
+/// without what a Windows file name cannot hold (`Re: X` is `Re： X`
+/// there).
+fn plain(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            c => c,
+        })
+        .filter(|c| !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect()
 }
 
 /// The archive's folder for titles starting with `c`.
@@ -228,7 +243,8 @@ impl Source for BmsLibrary {
     fn find(&self, q: &Query) -> BoxTask<Vec<String>> {
         let title = q.want.title.trim().to_string();
         let md5 = q.md5.trim().to_ascii_lowercase();
-        if q.diff || self.folder.is_empty() || (title.is_empty() && md5.len() != 32) {
+        // a separate chart too: a song's archive there may hold it (checked)
+        if self.folder.is_empty() || (title.is_empty() && md5.len() != 32) {
             return Ready::boxed(Vec::new());
         }
         Box::new(Library {
@@ -309,7 +325,7 @@ impl Task for Library {
                     return Next::Done(Vec::new());
                 };
                 let entries = crate::hosts::drive::listing(&String::from_utf8_lossy(&body));
-                let first = self.titles[0].trim().chars().next().unwrap_or(' ');
+                let first = plain(&self.titles[0]).trim().chars().next().unwrap_or(' ');
                 let letter = letter_folder(first);
                 match entries.iter().find(|e| e.folder && e.name == letter) {
                     Some(e) => {
@@ -336,7 +352,8 @@ impl Task for Library {
                         .filter(|e| {
                             by_artist(&e.name).is_some_and(|(t, a)| {
                                 want.iter().any(|w| titled(t, w))
-                                    && (self.artist.is_empty() || same_artist(a, &self.artist))
+                                    && (self.artist.is_empty()
+                                        || same_artist(&plain(a), &plain(&self.artist)))
                             })
                         })
                         .map(|e| crate::hosts::drive::file_link(&e.id))
@@ -630,6 +647,7 @@ mod tests {
         // a chart's title: the song's, then its chart's name
         assert!(titled("AltMirrorBell", "AltMirrorBell Another"));
         assert!(!titled("Air", "Airship"));
+        assert!(titled("Re： Shinin' Queen", "Re: Shinin' Queen"));
         // by the chart's MD5: BMS SEARCH's title of its song
         let md5 = "0d1a3240230a854d05877f0d523a1409";
         let api = &config.bmssearch_api;

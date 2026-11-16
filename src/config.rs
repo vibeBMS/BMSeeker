@@ -63,7 +63,9 @@ pub struct Uploader {
     /// The number's width, zeros before.
     pub digits: usize,
     /// Where its files are, tried in order: `{n}` is the number, `{h}` its
-    /// hundreds (`03691`: `36`), both with their zeros. A Google Drive
+    /// hundreds (`03691`: `36`), both with their zeros; `{f}` the link's
+    /// file name (`up0650.zip`), `{d}` its first folder (`uploader` of
+    /// `/uploader/src/up0650.zip`: an uploader of several boards). A Google Drive
     /// folder link may end in `#sub/folder/file` names, followed from it.
     pub mirrors: Vec<String>,
 }
@@ -104,9 +106,26 @@ impl Uploader {
         let w = self.digits;
         let num = format!("{n:0w$}");
         let hundreds = format!("{:0h$}", n / 100, h = w.saturating_sub(3).max(1));
+        let path = url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .splitn(4, '/')
+            .nth(3)
+            .unwrap_or("");
+        let folder = path.split('/').next().unwrap_or("");
+        let file = path.rsplit('/').next().unwrap_or("");
         self.mirrors
             .iter()
-            .map(|m| m.replace("{n}", &num).replace("{h}", &hundreds))
+            .filter(|m| {
+                !(m.contains("{f}") && file.is_empty() || m.contains("{d}") && folder.is_empty())
+            })
+            .map(|m| {
+                m.replace("{n}", &num)
+                    .replace("{h}", &hundreds)
+                    .replace("{f}", file)
+                    .replace("{d}", folder)
+            })
             .collect()
     }
 }
@@ -131,7 +150,8 @@ impl Default for Config {
             .map(String::from)
             .to_vec(),
             third_party: false,
-            uploaders: vec![Uploader {
+            uploaders: vec![
+                Uploader {
                 site: "gnqg.rosx.net".into(),
                 digits: 5,
                 mirrors: [
@@ -142,7 +162,14 @@ impl Default for Config {
                 ]
                 .map(String::from)
                 .to_vec(),
-            }],
+            },
+                // its boards' files (/uploader/src/up0650.zip, /bof/src/...)
+                Uploader {
+                    site: "absolute.pv.land.to".into(),
+                    digits: 4,
+                    mirrors: vec!["https://darksabun.club/mirror/absolute/{d}/{f}".into()],
+                },
+            ],
             chart_mirrors: vec!["https://darksabun.club/mirror/absolute/bms/".into()],
             bms_library:
                 "https://drive.google.com/drive/folders/1mTcWY9jYMsnEzbVfvGkjfepBpN4Tj786".into(),
@@ -240,6 +267,12 @@ mod tests {
             Some(12)
         );
         assert_eq!(u.number("http://gnqg.rosx.net/upload/"), None);
+        // by its board and file name
+        let a = &Config::default().uploaders[1];
+        assert_eq!(
+            a.mirrored("http://absolute.pv.land.to/uploader/src/up3833.rar"),
+            ["https://darksabun.club/mirror/absolute/uploader/up3833.rar"]
+        );
         assert_eq!(u.number("http://example.com/upload.cgi?get=03691"), None);
     }
 }

@@ -71,6 +71,14 @@ pub fn same_title(a: &str, b: &str) -> bool {
     short.chars().count() >= 3 && long.starts_with(&short)
 }
 
+/// Titles of one song's charts: [`same_title`], or the same once the
+/// chart's name is gone ("CG901B -7EX-[Short Ver.]" and "CG901B -5-").
+pub fn same_song_title(a: &str, b: &str) -> bool {
+    use crate::bmssearch::base_title;
+    let (x, y) = (base_title(a), base_title(b));
+    same_title(a, b) || (x.chars().count() >= 2 && same_name(&x, &y))
+}
+
 /// The same title, but for its brackets ("Song [ANOTHER]" is "Song").
 pub fn same_name(a: &str, b: &str) -> bool {
     let a = strip_brackets(a);
@@ -166,7 +174,7 @@ pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Ve
                 coverage: all as f32 / sounds.len() as f32,
                 own,
                 same_song: f.charts.iter().any(|c| {
-                    same_title(&c.title, &chart.title) && same_artist(&c.artist, &chart.artist)
+                    same_song_title(&c.title, &chart.title) && same_artist(&c.artist, &chart.artist)
                 }),
             })
         })
@@ -431,6 +439,13 @@ mod tests {
         assert!(same_title("Mirage Garden [ANOTHER]", "Mirage Garden"));
         assert!(!same_title("X (虎のANOTHER)", "X [7KEYS]")); // too short to tell
         assert!(!same_title("Love Story", "Lovely Day"));
+        // one song's charts, each named after the title
+        assert!(same_song_title(
+            "CG901B -7EX-[Short Ver.]BGA+",
+            "CG901B -7light-[Short Ver.] BGA+"
+        ));
+        assert!(!same_song_title("X (虎のANOTHER)", "X [7KEYS]"));
+        assert!(!same_song_title("Love Story -A-", "Lovely Day -A-"));
         assert!(same_artist(
             "ねこみみ魔法使い / obj:秘密",
             "ねこみみ魔法使い"

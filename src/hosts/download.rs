@@ -26,27 +26,51 @@ pub fn fetch_named(
 ) -> Result<String, Fetch> {
     crate::progress::stage(crate::progress::Stage::Finding);
     let http = Client::new(&cx.config);
-    let mut r = Resolver::new(link, want, cx);
+    let mut r = Resolver::new(link, want.clone(), cx);
+    let mut moves = 0;
     loop {
-        let got = run(&mut r, &http).and_then(|t| get_target(t, out, any, cx));
-        // a mirror the page named, when this file did not come
+        let mut moved = None;
+        let got = run(&mut r, &http).and_then(|t| get_target(t, out, any, cx, &mut moved));
         let cancelled = crate::progress::current().is_some_and(|p| p.cancelled());
-        match got {
-            Err(_) if !cancelled && r.try_next() => {
+        // a page reached through redirects (a short link) on a host that
+        // knows its way to the file: from there
+        let rehost = moved.filter(|u| {
+            let host = super::Link::parse(u, 0).and_then(|l| cx.hosts.find(&l).map(|h| h.name()));
+            host.is_some_and(|h| h != "direct" && h != r.host())
+        });
+        match (got, rehost) {
+            (Err(Fetch::Page), Some(u)) if !cancelled && moves < 2 => {
+                moves += 1;
+                r = Resolver::new(&u, want.clone(), cx);
+            }
+            // a mirror the page named, when this file did not come
+            (Err(_), _) if !cancelled && r.try_next() => {
                 crate::progress::stage(crate::progress::Stage::Finding);
             }
-            got => return got,
+            (got, _) => return got,
         }
     }
 }
 
-/// `t`'s file into `out`: its name.
-fn get_target(t: super::Target, out: &Path, any: bool, cx: &Context) -> Result<String, Fetch> {
+/// `t`'s file into `out`: its name. A page that redirects led to elsewhere:
+/// that place in `moved`.
+fn get_target(
+    t: super::Target,
+    out: &Path,
+    any: bool,
+    cx: &Context,
+    moved: &mut Option<String>,
+) -> Result<String, Fetch> {
+    let ua = &cx.config.user_agent;
     let served = match &t.mega_key {
-        None => download(&t.url, out, &cx.config.user_agent)?,
+        None => {
+            let s = retrying(|| download(&t.url, out, ua))?;
+            *moved = s.at.filter(|u| u != &t.url);
+            s.name
+        }
         Some(key) => {
             let enc = out.with_extension("mega");
-            download(&t.url, &enc, &cx.config.user_agent)?;
+            retrying(|| download(&t.url, &enc, ua))?;
             let d = mega_decrypt(&enc, out, key);
             let _ = std::fs::remove_file(&enc);
             d?;
@@ -66,10 +90,28 @@ fn get_target(t: super::Target, out: &Path, any: bool, cx: &Context) -> Result<S
         n == 0 || head[..n].trim_ascii_start().starts_with(b"<")
     };
     if sniff(out).is_none() && !(any && !page()) {
+        let quota = drive_quota(out);
         let _ = std::fs::remove_file(out);
-        return Err(Fetch::Page);
+        return Err(match quota {
+            true => Fetch::Failed(DRIVE_QUOTA.into()),
+            false => Fetch::Page,
+        });
     }
     Ok(name)
+}
+
+/// Google Drive's answer for a file downloaded too often lately.
+pub const DRIVE_QUOTA: &str =
+    "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
+
+/// Whether the page in `p` is Google Drive's "Quota exceeded".
+fn drive_quota(p: &Path) -> bool {
+    let mut head = vec![0u8; 4096];
+    let n = std::fs::File::open(p)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    let head = String::from_utf8_lossy(&head[..n]);
+    head.contains("<title>Google Drive") && head.contains("Quota exceeded")
 }
 
 /// The file name in a `Content-Disposition` header (`filename*=UTF-8''…`
@@ -159,18 +201,44 @@ const STALL: std::time::Duration = std::time::Duration::from_millis(STALL_MS);
 /// Stream `url` into `out`. No limit on the whole, but it ends when no data
 /// comes for [`STALL_MS`], or when the thread's progress is cancelled.
 pub fn download_to(url: &str, out: &Path) -> Result<(), String> {
-    download(url, out, &crate::config::Config::default().user_agent).map(|_| ())
+    let ua = crate::config::Config::default().user_agent;
+    retrying(|| download(url, out, &ua)).map(|_| ())
 }
 
-/// [`download_to`], and the file name the server gives
-/// (`Content-Disposition`), if any.
-fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, String> {
+/// `f` again after a server's passing failure (busy, or a gateway's error:
+/// manbow answers 502 and 503 at times), twice at most, waiting longer each
+/// time.
+pub(crate) fn retrying<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut waits = [3u64, 10].into_iter();
+    loop {
+        match f() {
+            Err(e) if crate::net::passing(&e) => match waits.next() {
+                Some(s) if !crate::progress::current().is_some_and(|p| p.cancelled()) => {
+                    std::thread::sleep(std::time::Duration::from_secs(s));
+                }
+                _ => return Err(e),
+            },
+            r => return r,
+        }
+    }
+}
+
+/// What a download got from the server.
+struct Served {
+    /// The file name it gave (`Content-Disposition`).
+    name: Option<String>,
+    /// Where its redirects ended.
+    at: Option<String>,
+}
+
+/// [`download_to`], and what the server said of it.
+fn download(url: &str, out: &Path, user_agent: &str) -> Result<Served, String> {
     use std::sync::mpsc::{channel, RecvTimeoutError};
     use std::time::{Duration, Instant};
     /// What the request's thread sends: the answer's head, its data, its
     /// end (an empty chunk), or what went wrong.
     enum Part {
-        Head(Option<String>, Option<u64>),
+        Head(Option<String>, Option<u64>, Option<String>),
         Chunk(Vec<u8>),
     }
     let file = std::fs::File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -193,6 +261,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, S
         if !r.status().is_success() {
             return drop(tx.send(Err(format!("HTTP {}", r.status().as_u16()))));
         }
+        let at = ureq::ResponseExt::get_uri(&r).to_string();
         let header = |k: &str| {
             r.headers()
                 .get(k)
@@ -200,7 +269,7 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, S
         };
         let name = header("content-disposition").and_then(|d| disposition_name(&d));
         let length = header("content-length").and_then(|l| l.trim().parse().ok());
-        if tx.send(Ok(Part::Head(name, length))).is_err() {
+        if tx.send(Ok(Part::Head(name, length, Some(at)))).is_err() {
             return;
         }
         let mut body = r.body_mut().as_reader();
@@ -217,22 +286,25 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, S
         }
     });
     let mut last = Instant::now();
-    let mut name = None;
+    let mut served = Served {
+        name: None,
+        at: None,
+    };
     loop {
         if progress.as_ref().is_some_and(|p| p.cancelled()) {
             return Err(crate::progress::CANCELLED.into());
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Err(e)) => return Err(e),
-            Ok(Ok(Part::Head(n, length))) => {
-                name = n;
+            Ok(Ok(Part::Head(n, length, at))) => {
+                served = Served { name: n, at };
                 if let Some(p) = &progress {
                     p.start_file(length);
                 }
                 last = Instant::now();
             }
             Ok(Ok(Part::Chunk(c))) if c.is_empty() => {
-                return w.flush().map(|_| name).map_err(|e| e.to_string());
+                return w.flush().map(|_| served).map_err(|e| e.to_string());
             }
             Ok(Ok(Part::Chunk(c))) => {
                 if let Some(p) = &progress {

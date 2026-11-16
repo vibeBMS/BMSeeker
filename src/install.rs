@@ -96,11 +96,24 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
             .collect();
         let mut song_dir = None;
         for chart in files.iter().filter(|p| crate::placement::is_chart(p)) {
-            match crate::placement::locate(fs, chart, library) {
-                Some(crate::placement::Located::Move(to)) => {
+            use crate::placement::{locate, locate_loose, Located};
+            let here = locate(fs, chart, library);
+            // a song's whole archive (a chart of it found there): its folder
+            // in the library, by what that holds itself; the song's own
+            // files are there already
+            let whole = here == Some(Located::Here);
+            let at = if whole {
+                locate_loose(fs, chart, library)
+            } else {
+                here
+            };
+            match at {
+                Some(Located::Move(to)) => {
                     if let Some(at) = crate::placement::bring(fs, chart, &to) {
                         out.push(Done::Placed(at));
-                        song_dir = Some(to);
+                        if !whole {
+                            song_dir = Some(to);
+                        }
                     }
                 }
                 _ => out.push(Done::Waiting((*chart).clone())),
@@ -120,13 +133,18 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
 /// `downloads`, then into `library` (an archive unpacked, a chart into its
 /// song's folder; a separate chart's archive into its song's folder too).
 /// With `check` (a chart's MD5), only if what it brings holds that chart.
+/// A separate chart whose song is not here yet waits in `downloads` (only
+/// `md5`, the chart wanted, when it is known: a pack of many songs' charts
+/// keeps no others).
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 pub fn link(
     downloads: &Path,
     library: &Path,
     want: &crate::hosts::Want,
     link: &str,
     diff: bool,
+    md5: &str,
     check: Option<&str>,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
@@ -140,6 +158,7 @@ pub fn link(
         crate::progress::stage(crate::progress::Stage::Finding);
         let file = downloads.join(chart_name(link));
         if let Err(e) = crate::hosts::download_to(link, &file) {
+            let _ = std::fs::remove_file(&file);
             return vec![Done::Failed(e)];
         }
         // a page where a chart was expected
@@ -183,7 +202,7 @@ pub fn link(
             Ok(_) if check.is_some_and(|m| !holds_chart(&Disk, &dir, m)) => {
                 vec![Done::Failed(NOT_THE_CHART.into())]
             }
-            Ok(_) => place_charts(&Disk, &dir, library),
+            Ok(_) => keep_waiting(place_charts(&Disk, &dir, library), downloads, md5),
             Err(e) => vec![Done::Failed(e)],
         };
         let _ = std::fs::remove_dir_all(&dir);
@@ -193,7 +212,8 @@ pub fn link(
     if let Some(m) = check.filter(|_| !chart_link(link)) {
         let dir = downloads.join(format!(".check-{}", safe_name(title)));
         let name = import::file_name(&file);
-        let holds = import::unpack_into(&file, &name, &dir).is_ok() && holds_chart(&Disk, &dir, m);
+        let holds = import::unpack_into(&file, &name, &dir).is_ok()
+            && (holds_chart(&Disk, &dir, m) || holds_song(&Disk, &dir, want));
         let _ = std::fs::remove_dir_all(&dir);
         if !holds {
             let _ = std::fs::remove_file(&file);
@@ -218,15 +238,65 @@ pub fn link(
     out
 }
 
+/// The charts of `done` that wait for their songs, out of the folder about
+/// to go and into `downloads` (where [`import::place_waiting`] finds them
+/// once a song comes): the chart `md5` only, when it is known.
+///
+/// [`import::place_waiting`]: crate::import::place_waiting
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_waiting(done: Vec<Done>, downloads: &Path, md5: &str) -> Vec<Done> {
+    let md5 = md5.trim().to_ascii_lowercase();
+    let kept = done
+        .into_iter()
+        .filter_map(|d| match d {
+            Done::Waiting(p) => {
+                let bytes = std::fs::read(&p).ok()?;
+                if md5.len() == 32 && md5_hex(&bytes) != md5 {
+                    return None;
+                }
+                let to = downloads.join(p.file_name()?);
+                std::fs::write(&to, &bytes).ok()?;
+                Some(Done::Waiting(to))
+            }
+            d => Some(d),
+        })
+        .collect::<Vec<_>>();
+    if kept.is_empty() {
+        return vec![Done::Failed(NOT_THE_CHART.into())];
+    }
+    kept
+}
+
 /// Whether the archive `bytes` (zip, 7z, rar) holds the chart `md5`: what
-/// a source found by name brings, looked into in memory.
-pub fn archive_holds_chart(bytes: Vec<u8>, md5: &str) -> bool {
+/// a source found by name brings, looked into in memory. With `song` (a
+/// song's own archive, not a separate chart's): or a chart of that song
+/// ([`holds_song`]).
+pub fn archive_holds_chart(bytes: Vec<u8>, md5: &str, song: Option<&crate::hosts::Want>) -> bool {
     let md5 = md5.trim().to_ascii_lowercase();
     let mut found = false;
+    let mut same = false;
     let _ = crate::unpack::unpack_bytes(bytes, |rel, data| {
-        found = found || (crate::placement::is_chart(&rel) && md5_hex(&data) == md5);
+        if found || !crate::placement::is_chart(&rel) {
+            return;
+        }
+        found = md5_hex(&data) == md5;
+        same = same
+            || song
+                .is_some_and(|w| crate::chart::info(&rel, &data).is_some_and(|c| is_song(&c, w)));
     });
-    found
+    found || same
+}
+
+/// Whether the chart `c` is of the song `want`: its title but for the
+/// chart's name, and its artist.
+fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) -> bool {
+    use crate::bmssearch::base_title;
+    use crate::placement::{same_artist, same_name};
+    let title = base_title(&want.title);
+    title.chars().count() >= 2
+        && !want.artist.trim().is_empty()
+        && same_name(&base_title(&c.title), &title)
+        && same_artist(&c.artist, &want.artist)
 }
 
 /// A download found by name that does not hold the chart wanted.
@@ -247,6 +317,25 @@ pub fn holds_chart(fs: &dyn Fs, dir: &Path, md5: &str) -> bool {
                 todo.push(e.path);
             } else if crate::placement::is_chart(&e.path)
                 && fs.read(&e.path).is_ok_and(|b| md5_hex(&b) == md5)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether the folder `dir` holds a chart of the song `want` (its title but
+/// for the chart's name, and its artist): a song found by name whose chart
+/// is a separate one (差分), to come after it.
+pub fn holds_song(fs: &dyn Fs, dir: &Path, want: &crate::hosts::Want) -> bool {
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in fs.read_dir(&d).unwrap_or_default() {
+            if e.is_dir {
+                todo.push(e.path);
+            } else if crate::placement::is_chart(&e.path)
+                && crate::placement::chart_info(fs, &e.path).is_some_and(|c| is_song(&c, want))
             {
                 return true;
             }
@@ -333,9 +422,9 @@ pub fn links(
             }
             tried.push(l.clone());
             let check = check.filter(|_| checked);
-            if let Some(done) =
-                tries.record(link(downloads, library, &q.want, &l, q.diff, check, cx))
-            {
+            if let Some(done) = tries.record(link(
+                downloads, library, &q.want, &l, q.diff, md5, check, cx,
+            )) {
                 return Some(done);
             }
         }
@@ -372,17 +461,44 @@ mod tests {
             z.write_all(b"#TITLE A").unwrap();
             z.start_file("Song/b.txt", o).unwrap();
             z.write_all(b"#TITLE B").unwrap();
+            z.start_file("Song/c.bms", o).unwrap();
+            z.write_all(b"#TITLE Caelumize [SPA]\n#ARTIST void\n")
+                .unwrap();
             z.finish().unwrap();
         }
         let zip = out.into_inner();
         assert!(archive_holds_chart(
             zip.clone(),
-            &md5_hex(b"#TITLE A").to_uppercase()
+            &md5_hex(b"#TITLE A").to_uppercase(),
+            None
         ));
-        assert!(!archive_holds_chart(zip.clone(), &md5_hex(b"#TITLE B")));
+        assert!(!archive_holds_chart(
+            zip.clone(),
+            &md5_hex(b"#TITLE B"),
+            None
+        ));
         assert!(!archive_holds_chart(
             b"not an archive".to_vec(),
-            &md5_hex(b"#TITLE A")
+            &md5_hex(b"#TITLE A"),
+            None
+        ));
+        // a song whose chart is a separate one: its own charts are the song's
+        let want = |title: &str, artist: &str| crate::hosts::Want {
+            title: title.into(),
+            artist: artist.into(),
+        };
+        let other = md5_hex(b"#TITLE X");
+        let song = want("Caelumize [SP Cloudy]", "void obj.Cloudy Boy");
+        assert!(archive_holds_chart(zip.clone(), &other, Some(&song)));
+        assert!(!archive_holds_chart(
+            zip.clone(),
+            &other,
+            Some(&want("Caelum", "void"))
+        ));
+        assert!(!archive_holds_chart(
+            zip,
+            &other,
+            Some(&want("Caelumize", "someone"))
         ));
     }
 
@@ -406,6 +522,7 @@ mod tests {
                     &want,
                     &l,
                     var == "BMSEEKER_DIFF",
+                    "",
                     None,
                     &crate::hosts::Context::default(),
                 );
@@ -426,6 +543,40 @@ mod tests {
         );
         assert_eq!(percent_decode("a%2"), "a%2");
         assert_eq!(safe_name("a/b: c?"), "a_b_ c_");
+    }
+
+    /// A separate chart found in its song's whole archive goes into the
+    /// song's folder in the library (not left waiting: its sounds are
+    /// beside it in the archive).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_chart_from_a_whole_song_archive() {
+        use crate::fs::Disk;
+        let root = std::env::temp_dir().join(format!("bmseeker-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (library, unpacked) = (root.join("bms"), root.join("dl").join("song"));
+        let chart = |title: &str| {
+            let mut c = format!("#TITLE {title}\n#ARTIST Yamajet\n");
+            for i in 1..=20 {
+                c += &format!("#WAV{i:02} s{i}.wav\n");
+            }
+            c
+        };
+        for dir in [library.join("Song"), unpacked.clone()] {
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 1..=20 {
+                std::fs::write(dir.join(format!("s{i}.wav")), b"x").unwrap();
+            }
+            std::fs::write(dir.join("hard.bms"), chart("Song [HARD]")).unwrap();
+        }
+        std::fs::write(unpacked.join("kei.bms"), chart("Song (kei-another 7)")).unwrap();
+        let done = place_charts(&Disk, &unpacked, &library);
+        assert!(library.join("Song").join("kei.bms").exists(), "{done:?}");
+        assert!(
+            done.iter().all(|d| matches!(d, Done::Placed(_))),
+            "{done:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

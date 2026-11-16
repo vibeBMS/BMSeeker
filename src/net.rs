@@ -137,8 +137,14 @@ impl Http for Client {
         if !self.user_agent.is_empty() {
             req.headers.insert("User-Agent", &self.user_agent);
         }
-        fetch(&req)
+        crate::hosts::retrying(|| fetch(&req))
     }
+}
+
+/// Whether a request's failure may pass: the server busy (429, 503) or its
+/// gateway failing (502, 504).
+pub fn passing(e: &str) -> bool {
+    ["HTTP 429", "HTTP 502", "HTTP 503", "HTTP 504"].contains(&e)
 }
 
 /// `req`'s answer, its headers not looked at (ehttp gives up on one that

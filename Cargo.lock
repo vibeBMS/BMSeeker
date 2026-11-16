@@ -167,6 +167,7 @@ dependencies = [
  "sevenz-rust2",
  "sha2 0.10.9",
  "unrar-rs",
+ "ureq",
  "url",
  "web-time",
  "zip",

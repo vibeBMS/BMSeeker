@@ -66,14 +66,23 @@ gave; a separate chart not tied to a work is searched by title and artist).
 `--third-party` (setting `"third_party": true`; off by default) adds third parties' copies: mirrors of dead sites'
 separate charts (`mirrors`: by the chart's file name BMS SEARCH knows, in the `chart_mirrors` folders, by default
 darksabun's mirror of absolute), the community archive's "BMS Library" (`bmslibrary`: bms.kyouko.moe's
-`Title (by Artist).rar` by title and artist), and dead uploaders' files by number (`uploaders`). What is found by name
-(`mirrors`, `bmslibrary`) goes into the library only if it holds the chart (its MD5). `--own-links`: a song's own
-links only.
+`Title (by Artist).rar` by title and artist; asked for separate charts too, as a song's archive often holds them), and
+dead uploaders' files by number (`uploaders`). What is found by name (`mirrors`, `bmslibrary`) goes into the library
+only if it holds the chart (its MD5); a song's archive also when its charts are the song's (title and artist), the
+chart wanted being a separate one. `--own-links`: a song's own links only.
+
+A separate chart whose song is not in the library yet waits in the downloads folder (of a pack of many, only the
+chart wanted) and goes into the song's folder when the song comes. A short link (`db.tt`, `bit.ly`) whose redirects
+end at a host bmseeker knows (Dropbox, Google Drive...) is opened from there. A server's passing failure (HTTP 429,
+502, 503, 504) is tried again twice. Google Drive's "Quota exceeded" (a file downloaded too often lately) is reported
+as such: it passes within a day.
 
 Dead uploaders' links (with `--third-party`) are downloaded from copies by number (`uploaders`). By default: gnqg
 (`gnqg.rosx.net/upload/upload.cgi?get=03691`) → `gnqg-upload/03691.zip` on bms.hexlataia.xyz, then on darksabun.club,
-then the community archive's gnqg folder. In a copy's address `{n}` is the number and `{h}` its hundreds (`36`); a
-Google Drive folder link goes down `#sub/folder/file`.
+then the community archive's gnqg folder; absolute (`absolute.pv.land.to/uploader/src/up0650.zip`, its other boards
+too) → darksabun.club's `mirror/absolute/uploader/up0650.zip`. In a copy's address `{n}` is the number, `{h}` its
+hundreds (`36`), `{f}` the link's file name and `{d}` its first folder (the board); a Google Drive folder link goes
+down `#sub/folder/file`.
 
 Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`) are JSON over the defaults:
 `user_agent`, `mirror_catalog` (the BMS event mirror's list; empty: not used), `manbow`, `bmssearch_api`,
