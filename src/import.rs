@@ -141,7 +141,8 @@ fn unrar(file: &Path, dest: &Path) -> Result<usize, String> {
 }
 
 /// Bring a downloaded `file` into `library` (`<root>/bms`). Archives are
-/// unpacked into a folder named after them and removed.
+/// unpacked into a folder named after them (when one of that name holds
+/// another song: `name (2)`...) and removed.
 pub fn import(fs: &dyn Fs, file: &Path, library: &Path) -> Result<Imported, String> {
     let e = ext(file);
     if e == "zip" || e == "7z" || e == "rar" {
@@ -149,15 +150,32 @@ pub fn import(fs: &dyn Fs, file: &Path, library: &Path) -> Result<Imported, Stri
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "download".into());
-        let dest = library.join(stem);
-        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-        let n = match e.as_str() {
-            "zip" => unzip(file, &dest)?,
-            "7z" => un7z(file, &dest)?,
-            _ => unrar(file, &dest)?,
+        let unpack = |dest: &Path| -> Result<usize, String> {
+            std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+            let n = match e.as_str() {
+                "zip" => unzip(file, dest)?,
+                "7z" => un7z(file, dest)?,
+                _ => unrar(file, dest)?,
+            };
+            Ok(n + unpack_nested(dest)?)
         };
+        let first = library.join(&stem);
+        if fs.read_dir(&first).is_err() {
+            let n = unpack(&first)?;
+            let _ = std::fs::remove_file(file);
+            return Ok(Imported::Unpacked(first, n));
+        }
+        // a folder of that name: unpacked beside the file first, then into
+        // it (the same song again) or a free name (another song)
+        let tmp = file.with_file_name(format!(".unpack-{}", crate::install::unique()));
+        let n = unpack(&tmp).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&tmp);
+        })?;
         let _ = std::fs::remove_file(file);
-        let n = n + unpack_nested(&dest)?;
+        let dest = placement::song_folder(fs, library, &stem, &placement::charts_below(fs, &tmp));
+        let moved = move_tree(&tmp, &dest);
+        let _ = std::fs::remove_dir_all(&tmp);
+        moved?;
         return Ok(Imported::Unpacked(dest, n));
     }
     if !placement::is_chart(file) {
@@ -171,6 +189,34 @@ pub fn import(fs: &dyn Fs, file: &Path, library: &Path) -> Result<Imported, Stri
         Some(Located::Ask(c)) => Imported::Ask(file.to_path_buf(), c),
         _ => Imported::Waiting(file.to_path_buf()),
     })
+}
+
+/// Move everything below `from` into `to` (a file of the same name there
+/// replaced).
+fn move_tree(from: &Path, to: &Path) -> Result<(), String> {
+    if !to.exists() && std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    let mut todo = vec![from.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+                continue;
+            }
+            let rel = p.strip_prefix(from).map_err(|e| e.to_string())?;
+            let at = to.join(rel);
+            if let Some(dir) = at.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            let _ = std::fs::remove_file(&at);
+            if std::fs::rename(&p, &at).is_err() {
+                std::fs::copy(&p, &at).map_err(|e| format!("{}: {e}", at.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Archives inside an unpacked archive that holds no chart of its own (a
@@ -283,6 +329,44 @@ mod tests {
             place_waiting(&Disk, &downloads, &library),
             vec![dest.join("Song/song_insane.bme")]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two songs of one title: the second gets a folder of its own; the
+    /// same song again goes into its folder.
+    #[test]
+    fn same_title_other_song() {
+        let root = tmp("same-title");
+        let library = root.join("bms");
+        std::fs::create_dir_all(&library).unwrap();
+        let pack = |artist: &str, sound: &[u8]| {
+            let p = root.join("Aurora.zip");
+            let mut z = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            let chart = format!("#TITLE Aurora\n#ARTIST {artist}\n#WAV01 01.wav\n");
+            for (name, data) in [("a.bms", chart.as_bytes()), ("01.ogg", sound)] {
+                z.start_file(name, opts).unwrap();
+                z.write_all(data).unwrap();
+            }
+            z.finish().unwrap();
+            p
+        };
+        let first = library.join("Aurora");
+        let second = library.join("Aurora (2)");
+        let got = import(&Disk, &pack("alpha", b"one"), &library).unwrap();
+        assert_eq!(got, Imported::Unpacked(first.clone(), 2));
+        let got = import(&Disk, &pack("beta", b"two"), &library).unwrap();
+        assert_eq!(got, Imported::Unpacked(second.clone(), 2));
+        assert_eq!(std::fs::read(first.join("01.ogg")).unwrap(), b"one");
+        assert_eq!(std::fs::read(second.join("01.ogg")).unwrap(), b"two");
+        // alpha's again (a newer copy): over its own folder
+        let got = import(&Disk, &pack("alpha", b"new"), &library).unwrap();
+        assert_eq!(got, Imported::Unpacked(first.clone(), 2));
+        assert_eq!(std::fs::read(first.join("01.ogg")).unwrap(), b"new");
+        assert_eq!(std::fs::read(second.join("01.ogg")).unwrap(), b"two");
+        // nothing left beside the downloads
+        let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().collect();
+        assert_eq!(left.len(), 1, "{left:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

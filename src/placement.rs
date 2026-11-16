@@ -375,6 +375,41 @@ pub fn locate_with(
     Some((located, listed))
 }
 
+/// The charts below `dir` (a few levels), read.
+pub fn charts_below(fs: &dyn Fs, dir: &Path) -> Vec<ChartInfo> {
+    let mut out = Vec::new();
+    let mut todo = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = todo.pop() {
+        for e in fs.read_dir(&d).unwrap_or_default() {
+            if e.is_dir && depth < 8 {
+                todo.push((e.path, depth + 1));
+            } else if !e.is_dir && is_chart(&e.path) {
+                out.extend(chart_info(fs, &e.path));
+            }
+        }
+    }
+    out
+}
+
+/// The folder below `library` for a song's archive named `stem` whose
+/// charts are `charts`: `stem` when it is free or holds the same song (a
+/// chart of the same title and artist), else `stem (2)`, `stem (3)`...
+/// (another song of that title).
+pub fn song_folder(fs: &dyn Fs, library: &Path, stem: &str, charts: &[ChartInfo]) -> PathBuf {
+    let same = |c: &ChartInfo| {
+        charts
+            .iter()
+            .any(|n| same_song_title(&c.title, &n.title) && same_artist(&c.artist, &n.artist))
+    };
+    (1..)
+        .map(|n| match n {
+            1 => library.join(stem),
+            n => library.join(format!("{stem} ({n})")),
+        })
+        .find(|d| fs.read_dir(d).is_err() || charts_below(fs, d).iter().any(same))
+        .expect("a free name")
+}
+
 /// Move `file` into the folder `dir` (a chart, or a file it came with), as
 /// BeMusicSeeker's smart overwrite: a file of the same name there stays
 /// unless `file` is newer (by more than 2 seconds), and `file` goes; a

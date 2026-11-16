@@ -177,12 +177,46 @@ pub fn link(
     check: Option<&str>,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
+    // this download's own folder for what passes through (two songs of
+    // one title, or two downloads at once, do not meet)
+    let job = downloads.join(format!(".job-{}", unique()));
+    if let Err(e) = std::fs::create_dir_all(&job) {
+        return vec![Done::Failed(e.to_string().into())];
+    }
+    let out = link_in(&job, downloads, library, want, link, diff, md5, check, cx);
+    let _ = std::fs::remove_dir_all(&job);
+    out
+}
+
+/// A name no other download of this process or another has.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn unique() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// [`link`], what passes through in `job`.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn link_in(
+    job: &Path,
+    downloads: &Path,
+    library: &Path,
+    want: &crate::hosts::Want,
+    link: &str,
+    diff: bool,
+    md5: &str,
+    check: Option<&str>,
+    cx: &crate::hosts::Context,
+) -> Vec<Done> {
     use crate::fs::Disk;
     use crate::import::{self, Imported};
     let title = want.title.as_str();
-    if let Err(e) = std::fs::create_dir_all(downloads) {
-        return vec![Done::Failed(e.to_string().into())];
-    }
     let file = if chart_link(link) {
         crate::progress::stage(crate::progress::Stage::Finding);
         let file = downloads.join(chart_name(link));
@@ -202,13 +236,14 @@ pub fn link(
         }
         file
     } else {
-        let tmp = downloads.join(format!(".song-{}", safe_name(title)));
+        let tmp = job.join("song");
         // the song's own link may be a pack of many songs: its archive
         let want = (!diff).then(|| want.clone());
         match crate::hosts::fetch(link, want, &tmp, cx) {
             Ok(()) => {
                 let ext = crate::hosts::sniff(&tmp).unwrap_or("zip");
-                let file = downloads.join(format!("{}.{ext}", safe_name(title)));
+                // (the library folder is named after it)
+                let file = job.join(format!("{}.{ext}", safe_name(title)));
                 if std::fs::rename(&tmp, &file).is_err() {
                     return vec![Done::Failed("could not keep the download".into())];
                 }
@@ -223,7 +258,7 @@ pub fn link(
     };
     crate::progress::stage(crate::progress::Stage::Unpacking);
     if diff && !chart_link(link) {
-        let dir = downloads.join(format!(".diff-{}", safe_name(title)));
+        let dir = job.join("diff");
         let name = import::file_name(&file);
         let r = import::unpack_into(&file, &name, &dir);
         let _ = std::fs::remove_file(&file);
@@ -236,7 +271,7 @@ pub fn link(
     }
     // found by name: looked into before it goes into the library
     if let Some(m) = check.filter(|_| !chart_link(link)) {
-        let dir = downloads.join(format!(".check-{}", safe_name(title)));
+        let dir = job.join("check");
         let name = import::file_name(&file);
         let holds = import::unpack_into(&file, &name, &dir).is_ok()
             && (holds_chart(&Disk, &dir, m) || holds_song(&Disk, &dir, want));
@@ -588,6 +623,12 @@ mod tests {
                 println!("{var}: {done:?}");
             }
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unique_names() {
+        assert_ne!(unique(), unique());
     }
 
     #[test]
