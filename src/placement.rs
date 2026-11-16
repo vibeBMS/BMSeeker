@@ -8,7 +8,7 @@
 //! the user picks among the best candidates.
 
 use crate::fs::Fs;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use crate::chart::ChartInfo;
@@ -291,12 +291,148 @@ pub fn locate_loose(fs: &dyn Fs, chart: &Path, library: &Path) -> Option<Located
     locate_with(fs, chart, library, false, Rules::default()).map(|(l, _)| l)
 }
 
+/// The library's folders and their file names, read once for many
+/// charts (a pack's, the charts waiting) and only when one needs them; the
+/// folders by the sounds they hold; their charts as they are read.
+pub struct LibraryIndex {
+    library: PathBuf,
+    read: std::cell::OnceCell<Folders>,
+    /// Charts read, by folder.
+    charts: std::cell::RefCell<HashMap<PathBuf, Vec<ChartInfo>>>,
+}
+
+#[derive(Default)]
+struct Folders {
+    /// (folder, its file names), by path.
+    list: Vec<(PathBuf, Vec<String>)>,
+    /// A file's [`stem`]: the folders (in `list`) holding one of it.
+    by_stem: HashMap<String, Vec<usize>>,
+    /// A folder's place in `list`.
+    at: HashMap<PathBuf, usize>,
+}
+
+impl Folders {
+    fn index(&mut self, i: usize, name: &str) {
+        let at = self.by_stem.entry(stem(name)).or_default();
+        if !at.contains(&i) {
+            at.push(i);
+        }
+    }
+}
+
+impl LibraryIndex {
+    pub fn new(library: &Path) -> LibraryIndex {
+        LibraryIndex {
+            library: library.to_path_buf(),
+            read: Default::default(),
+            charts: Default::default(),
+        }
+    }
+
+    pub fn library(&self) -> &Path {
+        &self.library
+    }
+
+    fn folders(&self, fs: &dyn Fs) -> &Folders {
+        self.read.get_or_init(|| {
+            let mut f = Folders {
+                list: folders(fs, &self.library).into_iter().collect(),
+                ..Default::default()
+            };
+            for i in 0..f.list.len() {
+                f.at.insert(f.list[i].0.clone(), i);
+                for n in std::mem::take(&mut f.list[i].1) {
+                    f.index(i, &n);
+                    f.list[i].1.push(n);
+                }
+            }
+            f
+        })
+    }
+
+    /// The folders other than `except` holding a file named as one of
+    /// `sounds` (stems), by path.
+    fn near(&self, fs: &dyn Fs, sounds: &HashSet<String>, except: &Path) -> Vec<FolderInfo> {
+        let f = self.folders(fs);
+        let mut at: Vec<usize> = sounds
+            .iter()
+            .filter_map(|s| f.by_stem.get(s))
+            .flatten()
+            .copied()
+            .collect();
+        at.sort_unstable();
+        at.dedup();
+        at.into_iter()
+            .map(|i| &f.list[i])
+            .filter(|(d, _)| d != except)
+            .map(|(dir, files)| FolderInfo {
+                dir: dir.clone(),
+                files: files.clone(),
+                charts: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// The charts of the folder `f`.
+    fn charts(&self, fs: &dyn Fs, f: &FolderInfo) -> Vec<ChartInfo> {
+        let mut known = self.charts.borrow_mut();
+        known
+            .entry(f.dir.clone())
+            .or_insert_with(|| {
+                f.files
+                    .iter()
+                    .map(|n| f.dir.join(n))
+                    .filter(|p| is_chart(p))
+                    .filter_map(|p| chart_info(fs, &p))
+                    .collect()
+            })
+            .clone()
+    }
+
+    /// `file` is in the library now (moved there): its folder holds it.
+    pub fn add(&mut self, file: &Path) {
+        let (Some(dir), name) = (file.parent(), file_name(file)) else {
+            return;
+        };
+        self.charts.get_mut().remove(dir);
+        let Some(f) = self.read.get_mut() else {
+            return;
+        };
+        let i = match f.at.get(dir) {
+            Some(i) => *i,
+            None if !dir.starts_with(&self.library) => return,
+            None => {
+                // a new folder: last (the order matters only among equals)
+                f.list.push((dir.to_path_buf(), Vec::new()));
+                f.at.insert(dir.to_path_buf(), f.list.len() - 1);
+                f.list.len() - 1
+            }
+        };
+        if !f.list[i].1.contains(&name) {
+            f.list[i].1.push(name.clone());
+        }
+        f.index(i, &name);
+    }
+}
+
 /// [`locate`] (`siblings`: the files beside the chart came with it) by
 /// `rules`, with the candidates (for a person to look at).
 pub fn locate_with(
     fs: &dyn Fs,
     chart: &Path,
     library: &Path,
+    siblings: bool,
+    rules: Rules,
+) -> Option<(Located, Vec<(Candidate, String)>)> {
+    locate_in(fs, chart, &LibraryIndex::new(library), siblings, rules)
+}
+
+/// [`locate_with`] among the folders of `index` (read once for many
+/// charts).
+pub fn locate_in(
+    fs: &dyn Fs,
+    chart: &Path,
+    index: &LibraryIndex,
     siblings: bool,
     rules: Rules,
 ) -> Option<(Located, Vec<(Candidate, String)>)> {
@@ -317,15 +453,7 @@ pub fn locate_with(
     }
     // the folders with any of its sounds; their charts read for the best
     let sounds: HashSet<String> = info.sounds.iter().map(|s| stem(s)).collect();
-    let near: Vec<FolderInfo> = folders(fs, library)
-        .into_iter()
-        .filter(|(d, files)| *d != here && files.iter().any(|f| sounds.contains(&stem(f))))
-        .map(|(dir, files)| FolderInfo {
-            dir,
-            files,
-            charts: Vec::new(),
-        })
-        .collect();
+    let near = index.near(fs, &sounds, &here);
     let rough = rank(&info, &bundled, &near);
     let keep: Vec<FolderInfo> = rough
         .iter()
@@ -333,13 +461,7 @@ pub fn locate_with(
         .filter(|(i, c)| c.coverage >= rules.min_coverage || *i < 3)
         .filter_map(|(_, c)| near.iter().find(|f| f.dir == c.dir))
         .map(|f| FolderInfo {
-            charts: f
-                .files
-                .iter()
-                .map(|n| f.dir.join(n))
-                .filter(|p| is_chart(p))
-                .filter_map(|p| chart_info(fs, &p))
-                .collect(),
+            charts: index.charts(fs, f),
             ..f.clone()
         })
         .collect();
@@ -559,6 +681,93 @@ mod tests {
             decide(&r, Rules { min_coverage: 0.6 }),
             Placement::Move("B".into())
         );
+    }
+
+    /// An Fs that counts the folders read.
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    impl Fs for Counting {
+        fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+            crate::fs::Disk.read(p)
+        }
+        fn read_dir(&self, p: &Path) -> std::io::Result<Vec<crate::fs::Entry>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::fs::Disk.read_dir(p)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> bool {
+            crate::fs::Disk.rename(from, to)
+        }
+        fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
+            crate::fs::Disk.stamp(p)
+        }
+        fn remove(&self, p: &Path) -> bool {
+            crate::fs::Disk.remove(p)
+        }
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bmseeker-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn put(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// Charts waiting for their songs are placed with the library read
+    /// once, not once per chart.
+    #[test]
+    fn the_library_read_once() {
+        let root = temp("index");
+        let (library, downloads) = (root.join("bms"), root.join("downloads"));
+        for i in 0..10 {
+            let song = library.join(format!("Song{i}"));
+            put(&song.join("a.bms"), &format!("#TITLE Song{i}\n#ARTIST x\n"));
+            put(&song.join(format!("s{i}.ogg")), "x");
+        }
+        for i in 0..5 {
+            put(
+                &downloads.join(format!("c{i}.bms")),
+                &format!("#TITLE Song{i} [X]\n#ARTIST x\n#WAV01 s{i}.wav\n"),
+            );
+        }
+        let fs = Counting(Default::default());
+        let placed = crate::install::place_waiting(&fs, &downloads, &library);
+        assert_eq!(placed.len(), 5, "{placed:?}");
+        assert!(library.join("Song4/c4.bms").is_file());
+        // the downloads, the library and its 10 folders: once each
+        let reads = fs.0.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(reads <= 12, "{reads} folders read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file moved into the library after the index was read counts.
+    #[test]
+    fn the_index_follows_what_comes_in() {
+        let root = temp("index-add");
+        let library = root.join("bms");
+        let song = library.join("Song");
+        put(
+            &song.join("a.bms"),
+            "#TITLE Song\n#ARTIST x\n#WAV01 01.wav\n",
+        );
+        put(&song.join("01.ogg"), "x");
+        let chart = root.join("dl/c.bms");
+        put(
+            &chart,
+            "#TITLE Song [X]\n#ARTIST x\n#WAV01 01.wav\n#WAV02 02.wav\n",
+        );
+        let mut index = LibraryIndex::new(&library);
+        let at = |index: &LibraryIndex| {
+            locate_in(&crate::fs::Disk, &chart, index, false, Rules::default()).map(|(l, _)| l)
+        };
+        assert_eq!(at(&index), Some(Located::NoSong));
+        put(&song.join("02.ogg"), "x");
+        index.add(&song.join("02.ogg"));
+        assert_eq!(at(&index), Some(Located::Move(song.clone())));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

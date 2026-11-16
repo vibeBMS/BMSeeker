@@ -138,9 +138,11 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 .map(|e| e.path())
                 .filter(|p| placement::is_chart(p))
                 .collect();
+            // the library read once for all of them
+            let index = placement::LibraryIndex::new(&library);
             for c in &charts {
                 let (located, best) =
-                    placement::locate_with(&Disk, c, &library, false, Rules::default())
+                    placement::locate_in(&Disk, c, &index, false, Rules::default())
                         .unwrap_or((Located::NoSong, Vec::new()));
                 let mut v = located_record(c, &located);
                 if let Some((b, l)) = best.first() {

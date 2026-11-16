@@ -113,6 +113,9 @@ pub fn safe_name(name: &str) -> String {
 /// songs' folders, each with the files beside it there (extra sounds, a
 /// BGA; one the song has already stays unless this one is newer).
 pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
+    use crate::placement::{locate_in, LibraryIndex, Rules};
+    // the library read once for all of them
+    let mut index = LibraryIndex::new(library);
     let mut out = Vec::new();
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
@@ -125,20 +128,19 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
             .collect();
         let mut song_dir = None;
         for chart in files.iter().filter(|p| crate::placement::is_chart(p)) {
-            use crate::placement::{locate, locate_loose, Located};
-            let here = locate(fs, chart, library);
+            use crate::placement::Located;
+            let locate =
+                |siblings| locate_in(fs, chart, &index, siblings, Rules::default()).map(|(l, _)| l);
+            let here = locate(true);
             // a song's whole archive (a chart of it found there): its folder
             // in the library, by what that holds itself; the song's own
             // files are there already
             let whole = here == Some(Located::Here);
-            let at = if whole {
-                locate_loose(fs, chart, library)
-            } else {
-                here
-            };
+            let at = if whole { locate(false) } else { here };
             match at {
                 Some(Located::Move(to)) => {
                     if let Some(at) = crate::placement::bring(fs, chart, &to) {
+                        index.add(&at);
                         out.push(Done::Placed(at));
                         if !whole {
                             song_dir = Some(to);
@@ -151,7 +153,9 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
         // the files it came with (smart overwrite)
         if let Some(to) = song_dir {
             for f in files.iter().filter(|p| !crate::placement::is_chart(p)) {
-                crate::placement::bring(fs, f, &to);
+                if let Some(at) = crate::placement::bring(fs, f, &to) {
+                    index.add(&at);
+                }
             }
         }
     }
@@ -351,16 +355,24 @@ pub fn keep_waiting(fs: &dyn Fs, done: Vec<Done>, downloads: &Path, md5: &str) -
 /// Charts waiting in `downloads` (their song came later): place those that
 /// now have a folder.
 pub fn place_waiting(fs: &dyn Fs, downloads: &Path, library: &Path) -> Vec<PathBuf> {
-    use crate::placement::{bring, is_chart, locate_loose, Located};
-    fs.read_dir(downloads)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| !e.is_dir && is_chart(&e.path))
-        .filter_map(|e| match locate_loose(fs, &e.path, library) {
-            Some(Located::Move(dir)) => bring(fs, &e.path, &dir),
+    use crate::placement::{bring, is_chart, locate_in, LibraryIndex, Located, Rules};
+    // the library read once for all of them
+    let mut index = LibraryIndex::new(library);
+    let mut out = Vec::new();
+    for e in fs.read_dir(downloads).unwrap_or_default() {
+        if e.is_dir || !is_chart(&e.path) {
+            continue;
+        }
+        let at = match locate_in(fs, &e.path, &index, false, Rules::default()) {
+            Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir),
             _ => None,
-        })
-        .collect()
+        };
+        if let Some(at) = at {
+            index.add(&at);
+            out.push(at);
+        }
+    }
+    out
 }
 
 /// Whether the archive `bytes` (zip, 7z, rar) holds the chart `md5`: what
