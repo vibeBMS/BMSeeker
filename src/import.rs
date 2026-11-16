@@ -3,6 +3,7 @@
 //! `placement`). On any [`Store`] (a disk, a player's files).
 
 use crate::fs::{Disk, Store};
+use crate::library::Library;
 use crate::placement::{self, Located};
 use crate::unpack::{safe_rel, unpack, Blob, BUDGET};
 use std::path::{Path, PathBuf};
@@ -38,6 +39,13 @@ fn is_archive(p: &Path) -> bool {
 /// unpacked into a folder named after them (when one of that name holds
 /// another song: `name (2)`...) and removed.
 pub fn import(fs: &dyn Store, file: &Path, library: &Path) -> Result<Imported, String> {
+    import_in(fs, file, &mut Library::new(library))
+}
+
+/// [`import`] into the library `lib` (what comes in added to it).
+pub fn import_in(fs: &dyn Store, file: &Path, lib: &mut Library) -> Result<Imported, String> {
+    let read = fs.as_fs();
+    let library = lib.root().to_path_buf();
     if is_archive(file) {
         let stem = file
             .file_stem()
@@ -52,6 +60,7 @@ pub fn import(fs: &dyn Store, file: &Path, library: &Path) -> Result<Imported, S
         if fs.read_dir(&first).is_err() {
             let n = unpack_to(&first)?;
             fs.remove(file);
+            lib.add_folder(read, &first);
             return Ok(Imported::Unpacked(first, n));
         }
         // a folder of that name: unpacked beside the file first, then into
@@ -59,21 +68,25 @@ pub fn import(fs: &dyn Store, file: &Path, library: &Path) -> Result<Imported, S
         let tmp = file.with_file_name(format!(".unpack-{}", crate::install::unique()));
         let n = unpack_to(&tmp)?;
         fs.remove(file);
-        let read = fs.as_fs();
-        let dest =
-            placement::song_folder(read, library, &stem, &placement::charts_below(read, &tmp));
+        let charts = placement::charts_below(read, &tmp);
+        let dest = placement::song_folder_in(read, lib, &stem, &charts);
         let moved = move_tree(fs, &tmp, &dest);
         fs.remove_dir(&tmp);
         moved?;
+        lib.add_folder(read, &dest);
         return Ok(Imported::Unpacked(dest, n));
     }
     if !placement::is_chart(file) {
         return Ok(Imported::Other(file.to_path_buf()));
     }
-    let read = fs.as_fs();
-    Ok(match placement::locate_loose(read, file, library) {
+    let located = placement::locate_in(read, file, lib, false, placement::Rules::default());
+    Ok(match located.map(|(l, _)| l) {
         Some(Located::Move(dir)) => match placement::bring(read, file, &dir) {
-            Some(to) => Imported::Placed(to),
+            Some(to) => {
+                let md5 = read.read(&to).ok().map(|b| crate::install::md5_hex(&b));
+                lib.add(&to, md5.as_deref());
+                Imported::Placed(to)
+            }
             None => Imported::Waiting(file.to_path_buf()),
         },
         Some(Located::Ask(c)) => Imported::Ask(file.to_path_buf(), c),
@@ -276,6 +289,42 @@ mod tests {
         // nothing left of the folder it went through
         let left: Vec<PathBuf> = mem.0.lock().unwrap().keys().cloned().collect();
         assert_eq!(left.len(), 4, "{left:?}");
+    }
+
+    /// One library for a run: a song imported into it is there for the
+    /// charts that wait, and owned, without reading the library again.
+    #[test]
+    fn one_library_for_a_run() {
+        use crate::fs::Mem;
+        let mem = Mem::default();
+        let put = |p: &str, b: &[u8]| mem.put(Path::new(p), b, 0);
+        put("bms/Old/o.bms", b"#TITLE Old\n#WAV01 o.wav\n");
+        put("bms/Old/o.ogg", b"x");
+        let diff = "#TITLE Song [X]\n#ARTIST someone\n#WAV01 01.wav\n";
+        put("dl/song_x.bms", diff.as_bytes());
+        let mut lib = Library::new(Path::new("bms"));
+        // read before the song comes
+        assert!(lib.files(&mem, Path::new("bms/Old")).is_some());
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut out);
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, data) in [("song.bms", CHART.as_bytes()), ("01.ogg", b"ogg")] {
+                z.start_file(name, o).unwrap();
+                z.write_all(data).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        put("dl/Song.zip", &out.into_inner());
+        let got = import_in(&mem, Path::new("dl/Song.zip"), &mut lib).unwrap();
+        assert_eq!(got, Imported::Unpacked("bms/Song".into(), 2));
+        assert!(lib.owns(&crate::install::md5_hex(CHART.as_bytes())));
+        let placed = crate::install::place_waiting_in(&mem, Path::new("dl"), &mut lib);
+        assert_eq!(placed, [PathBuf::from("bms/Song/song_x.bms")]);
+        assert_eq!(
+            lib.folders_of(&crate::install::md5_hex(diff.as_bytes())),
+            [PathBuf::from("bms/Song")]
+        );
     }
 
     #[test]

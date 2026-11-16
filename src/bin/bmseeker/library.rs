@@ -8,7 +8,6 @@ use bmseeker::placement::{self, Located, Rules};
 use bmseeker::sources::{Query, Sources};
 use clap::Subcommand;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
@@ -226,26 +225,8 @@ pub fn done_text(title: &str, d: &Done) -> String {
     }
 }
 
-/// The MD5 and SHA-256 (hex) of every chart below `dir` (not those waiting
-/// in its `downloads` folder).
-pub fn scan(dir: &Path, downloads: &str) -> HashSet<String> {
-    use md5::Digest;
-    let mut out = HashSet::new();
-    let mut todo = vec![dir.to_path_buf()];
-    while let Some(d) = todo.pop() {
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() && !p.ends_with(downloads) {
-                todo.push(p);
-            } else if p.is_file() && placement::is_chart(&p) {
-                if let Ok(b) = std::fs::read(&p) {
-                    let hex = |h: &[u8]| h.iter().map(|x| format!("{x:02x}")).collect::<String>();
-                    out.insert(hex(&md5::Md5::digest(&b)));
-                    out.insert(hex(&sha2::Sha256::digest(&b)));
-                }
-            }
-        }
-    }
-    out.remove("");
-    out
+/// The library below `dir`, every chart read (their MD5 and SHA-256);
+/// not those waiting in its `downloads` folder.
+pub fn scan(dir: &Path, downloads: &str) -> bmseeker::library::Library {
+    bmseeker::library::Library::scan_except(&Disk, dir, &dir.join(downloads))
 }

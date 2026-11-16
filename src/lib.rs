@@ -7,6 +7,8 @@
 //! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar) into the library
 //!   (a [`fs::Store`]), with their files' times;
 //! - [`placement`]: which song's folder a chart of its own (差分) belongs in;
+//! - [`library`]: the library's songs' folders, their files and the charts'
+//!   hashes, read once or given by a player's own records;
 //! - [`install`]: a table's song from its links into the library;
 //! - [`links`]: links for a table's songs whose own are missing or dead;
 //! - [`bmssearch`]: a chart's work and its links from BMS SEARCH;
@@ -29,6 +31,7 @@ pub mod fs;
 pub mod hosts;
 pub mod import;
 pub mod install;
+pub mod library;
 pub mod links;
 pub mod manbow;
 pub mod net;

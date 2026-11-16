@@ -4,6 +4,7 @@
 //! A link that leads to a page instead is [`Done::Page`], for a browser.
 
 use crate::fs::Fs;
+use crate::library::Library;
 use std::path::{Path, PathBuf};
 
 /// What became of one link.
@@ -113,9 +114,18 @@ pub fn safe_name(name: &str) -> String {
 /// songs' folders, each with the files beside it there (extra sounds, a
 /// BGA; one the song has already stays unless this one is newer).
 pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
-    use crate::placement::{locate_in, LibraryIndex, Rules};
     // the library read once for all of them
-    let mut index = LibraryIndex::new(library);
+    place_charts_in(fs, dir, &mut Library::new(library))
+}
+
+/// The MD5 of the chart `p` (None: it cannot be read).
+fn md5_of(fs: &dyn Fs, p: &Path) -> Option<String> {
+    fs.read(p).ok().map(|b| md5_hex(&b))
+}
+
+/// [`place_charts`] into `index` (what comes in added to it).
+pub fn place_charts_in(fs: &dyn Fs, dir: &Path, index: &mut Library) -> Vec<Done> {
+    use crate::placement::{locate_in, Rules};
     let mut out = Vec::new();
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
@@ -130,7 +140,7 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
         for chart in files.iter().filter(|p| crate::placement::is_chart(p)) {
             use crate::placement::Located;
             let locate =
-                |siblings| locate_in(fs, chart, &index, siblings, Rules::default()).map(|(l, _)| l);
+                |siblings| locate_in(fs, chart, index, siblings, Rules::default()).map(|(l, _)| l);
             let here = locate(true);
             // a song's whole archive (a chart of it found there): its folder
             // in the library, by what that holds itself; the song's own
@@ -140,7 +150,7 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
             match at {
                 Some(Located::Move(to)) => {
                     if let Some(at) = crate::placement::bring(fs, chart, &to) {
-                        index.add(&at);
+                        index.add(&at, md5_of(fs, &at).as_deref());
                         out.push(Done::Placed(at));
                         if !whole {
                             song_dir = Some(to);
@@ -154,7 +164,7 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
         if let Some(to) = song_dir {
             for f in files.iter().filter(|p| !crate::placement::is_chart(p)) {
                 if let Some(at) = crate::placement::bring(fs, f, &to) {
-                    index.add(&at);
+                    index.add(&at, None);
                 }
             }
         }
@@ -181,13 +191,30 @@ pub fn link(
     check: Option<&str>,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
+    let lib = &mut Library::new(library);
+    link_in(downloads, lib, want, link, diff, md5, check, cx)
+}
+
+/// [`link`] into the library `lib` (what comes in added to it).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub fn link_in(
+    downloads: &Path,
+    lib: &mut Library,
+    want: &crate::hosts::Want,
+    link: &str,
+    diff: bool,
+    md5: &str,
+    check: Option<&str>,
+    cx: &crate::hosts::Context,
+) -> Vec<Done> {
     // this download's own folder for what passes through (two songs of
     // one title, or two downloads at once, do not meet)
     let job = downloads.join(format!(".job-{}", unique()));
     if let Err(e) = std::fs::create_dir_all(&job) {
         return vec![Done::Failed(e.to_string().into())];
     }
-    let out = link_in(&job, downloads, library, want, link, diff, md5, check, cx);
+    let out = link_job(&job, downloads, lib, want, link, diff, md5, check, cx);
     let _ = std::fs::remove_dir_all(&job);
     out
 }
@@ -206,13 +233,13 @@ pub(crate) fn unique() -> String {
     }
 }
 
-/// [`link`], what passes through in `job`.
+/// [`link_in`], what passes through in `job`.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
-fn link_in(
+fn link_job(
     job: &Path,
     downloads: &Path,
-    library: &Path,
+    lib: &mut Library,
     want: &crate::hosts::Want,
     link: &str,
     diff: bool,
@@ -269,7 +296,7 @@ fn link_in(
         let r = import::unpack_into(&file, &name, &dir);
         let _ = std::fs::remove_file(&file);
         let out = match r {
-            Ok(_) => place_diff(&Disk, &dir, downloads, library, md5, check),
+            Ok(_) => place_diff_in(&Disk, &dir, downloads, lib, md5, check),
             Err(e) => vec![Done::Failed(e.into())],
         };
         let _ = std::fs::remove_dir_all(&dir);
@@ -287,7 +314,7 @@ fn link_in(
             return vec![Done::Failed(Failure::NotTheChart)];
         }
     }
-    let mut out = vec![match import::import(&Disk, &file, library) {
+    let mut out = vec![match import::import_in(&Disk, &file, lib) {
         Ok(Imported::Unpacked(dir, n)) => Done::Added(dir, n),
         Ok(Imported::Placed(p)) => Done::Placed(p),
         Ok(Imported::Waiting(p)) | Ok(Imported::Ask(p, _)) => Done::Waiting(p),
@@ -297,7 +324,7 @@ fn link_in(
     // charts that waited for this song
     if matches!(out[0], Done::Added(..)) {
         out.extend(
-            place_waiting(&Disk, downloads, library)
+            place_waiting_in(&Disk, downloads, lib)
                 .into_iter()
                 .map(Done::Placed),
         );
@@ -318,10 +345,22 @@ pub fn place_diff(
     md5: &str,
     check: Option<&str>,
 ) -> Vec<Done> {
+    place_diff_in(fs, dir, downloads, &mut Library::new(library), md5, check)
+}
+
+/// [`place_diff`] into `lib` (what comes in added to it).
+pub fn place_diff_in(
+    fs: &dyn Fs,
+    dir: &Path,
+    downloads: &Path,
+    lib: &mut Library,
+    md5: &str,
+    check: Option<&str>,
+) -> Vec<Done> {
     if check.is_some_and(|m| !holds_chart(fs, dir, m)) {
         return vec![Done::Failed(Failure::NotTheChart)];
     }
-    keep_waiting(fs, place_charts(fs, dir, library), downloads, md5)
+    keep_waiting(fs, place_charts_in(fs, dir, lib), downloads, md5)
 }
 
 /// The charts of `done` that wait for their songs, out of the folder about
@@ -357,20 +396,24 @@ pub fn keep_waiting(fs: &dyn Fs, done: Vec<Done>, downloads: &Path, md5: &str) -
 /// Charts waiting in `downloads` (their song came later): place those that
 /// now have a folder.
 pub fn place_waiting(fs: &dyn Fs, downloads: &Path, library: &Path) -> Vec<PathBuf> {
-    use crate::placement::{bring, is_chart, locate_in, LibraryIndex, Located, Rules};
     // the library read once for all of them
-    let mut index = LibraryIndex::new(library);
+    place_waiting_in(fs, downloads, &mut Library::new(library))
+}
+
+/// [`place_waiting`] into `index` (what comes in added to it).
+pub fn place_waiting_in(fs: &dyn Fs, downloads: &Path, index: &mut Library) -> Vec<PathBuf> {
+    use crate::placement::{bring, is_chart, locate_in, Located, Rules};
     let mut out = Vec::new();
     for e in fs.read_dir(downloads).unwrap_or_default() {
         if e.is_dir || !is_chart(&e.path) {
             continue;
         }
-        let at = match locate_in(fs, &e.path, &index, false, Rules::default()) {
+        let at = match locate_in(fs, &e.path, index, false, Rules::default()) {
             Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir),
             _ => None,
         };
         if let Some(at) = at {
-            index.add(&at);
+            index.add(&at, md5_of(fs, &at).as_deref());
             out.push(at);
         }
     }
@@ -514,6 +557,20 @@ pub fn links(
     sources: &crate::sources::Sources,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
+    links_in(downloads, &mut Library::new(library), q, own, sources, cx)
+}
+
+/// [`links`] into the library `lib` (read once for many songs; what comes
+/// in added to it).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn links_in(
+    downloads: &Path,
+    lib: &mut Library,
+    q: &crate::sources::Query,
+    own: &[String],
+    sources: &crate::sources::Sources,
+    cx: &crate::hosts::Context,
+) -> Vec<Done> {
     let cancelled = || cx.cancelled();
     let mut tries = Tries::default();
     let mut tried: Vec<String> = Vec::new();
@@ -529,9 +586,9 @@ pub fn links(
             }
             tried.push(l.clone());
             let check = check.filter(|_| checked);
-            if let Some(done) = tries.record(link(
-                downloads, library, &q.want, &l, q.diff, md5, check, cx,
-            )) {
+            if let Some(done) =
+                tries.record(link_in(downloads, lib, &q.want, &l, q.diff, md5, check, cx))
+            {
                 return Some(done);
             }
         }

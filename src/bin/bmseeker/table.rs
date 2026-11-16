@@ -141,7 +141,8 @@ fn missing(
     args: &LinkArgs,
 ) -> Result<(), String> {
     let (t, links) = load_filled(r, url, args)?;
-    let have = scan(library, &r.config().downloads);
+    // the library read once for the run (what comes in added to it)
+    let mut have = scan(library, &r.config().downloads);
     let listed: Vec<&TableEntry> = t
         .entries
         .iter()
@@ -150,7 +151,7 @@ fn missing(
     let missing: Vec<&TableEntry> = listed
         .iter()
         .copied()
-        .filter(|e| !have.contains(&e.md5) && !have.contains(&e.sha256))
+        .filter(|e| !have.owns(&e.md5) && !have.owns(&e.sha256))
         .collect();
     for e in &missing {
         r.out.record(
@@ -192,7 +193,7 @@ fn missing(
                 want: want.clone(),
                 diff,
             };
-            let done = install::links(&downloads, library, &q, &own, &sources, &r.cx);
+            let done = install::links_in(&downloads, &mut have, &q, &own, &sources, &r.cx);
             for d in &done {
                 r.out.record(done_record(&e.title, d), || {
                     crate::library::done_text(&e.title, d)
