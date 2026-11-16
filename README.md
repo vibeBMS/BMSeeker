@@ -117,9 +117,8 @@ bmseeker-gui <CLI 명령>...    CLI 그대로 (link, song, table, library, event
 
 ## 웹 (wasm32)
 
-라이브러리는 wasm32에서도 빌드됩니다(네트워크는 `net::Task`라 브라우저가 요청을 대신). 다만 RAR을 푸는 `unrar-rs`는
-0.16.3까지 wasm32-unknown-unknown에서 빌드되지 않아, 이 리포는 고친 브랜치로 바꿔 씁니다(`[patch.crates-io]`,
-업스트림 PR 대기). 이 크레이트를 쓰는 쪽도 웹 빌드라면 같은 패치가 필요합니다.
+라이브러리는 wasm32에서도 빌드됩니다(네트워크는 `net::Task`라 브라우저가 요청을 대신). RAR을 푸는 `unrar-rs`는
+0.16.4부터 wasm32-unknown-unknown에서 빌드됩니다.
 
 ## 출처
 
@@ -133,6 +132,3 @@ bmseeker-gui <CLI 명령>...    CLI 그대로 (link, song, table, library, event
 (Apache-2.0, UnRAR 라이선스 제한 포함)로 풉니다.
 
 > UnRAR source code may be used in any software to handle RAR archives without limitations free of charge, but cannot be used to develop RAR (WinRAR) compatible archiver and to re-create RAR compression algorithm, which is proprietary. Distribution of modified UnRAR source code in separate form or as a part of other software is permitted, provided that full text of this paragraph, starting from "UnRAR source code" words, is included in license, or in documentation if license is not available, and in source code comments of resulting package.
-
-웹(wasm)에서 쓰려면 워크스페이스의 `[patch.crates-io] unrar-rs` 패치가 필요합니다
-(`third_party/unrar-rs/VIBEBMS.md`).
