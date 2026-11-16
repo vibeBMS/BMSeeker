@@ -582,10 +582,25 @@ pub fn locate_in(
         return Some((Located::Here, Vec::new()));
     }
     let bundled: Vec<String> = below.into_iter().filter(|f| !f.contains('/')).collect();
+    Some(locate_by(fs, &info, &bundled, &here, index, rules))
+}
+
+/// Where the chart `info`, now in the folder `here` with the files
+/// `bundled` (paths in that folder) that go with it, belongs among the
+/// folders of `index` (`here` aside), with the candidates (for a person to
+/// look at).
+pub fn locate_by(
+    fs: &dyn Fs,
+    info: &ChartInfo,
+    bundled: &[String],
+    here: &Path,
+    index: &LibraryIndex,
+    rules: Rules,
+) -> (Located, Vec<(Candidate, String)>) {
     // the folders with any of its sounds; their charts read for the best
-    let sounds = Needs::of(&info).audio.keys;
-    let near = index.near(fs, &sounds, &here);
-    let rough = rank(&info, &bundled, &near);
+    let sounds = Needs::of(info).audio.keys;
+    let near = index.near(fs, &sounds, here);
+    let rough = rank(info, bundled, &near);
     let keep: Vec<FolderInfo> = rough
         .iter()
         .enumerate()
@@ -596,7 +611,7 @@ pub fn locate_in(
             ..f.clone()
         })
         .collect();
-    let ranked = rank(&info, &bundled, &keep);
+    let ranked = rank(info, bundled, &keep);
     let song = |d: &Path| {
         let s = keep
             .iter()
@@ -625,7 +640,7 @@ pub fn locate_in(
             (c, label)
         })
         .collect();
-    Some((located, listed))
+    (located, listed)
 }
 
 /// The charts below `dir` (a few levels), read.

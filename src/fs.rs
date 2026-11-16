@@ -59,6 +59,9 @@ pub trait Store: Fs + AsFs {
     fn open(&self, p: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
         Ok(Box::new(io::Cursor::new(self.read(p)?)))
     }
+    /// Make the folder `p` and those above it (a store without folders of
+    /// their own needs nothing).
+    fn create_dir_all(&self, _p: &Path) {}
 }
 
 /// `mtime` (seconds since 1970) as a time (None: before it).
@@ -152,6 +155,10 @@ impl Store for Disk {
 
     fn open(&self, p: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
         Ok(Box::new(std::fs::File::open(p)?))
+    }
+
+    fn create_dir_all(&self, p: &Path) {
+        let _ = std::fs::create_dir_all(p);
     }
 }
 

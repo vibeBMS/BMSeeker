@@ -48,6 +48,11 @@ pub struct Config {
     /// How much of a chart's sounds a song folder must hold to take it
     /// (0..1).
     pub min_coverage: f32,
+    /// Whether a download whose charts are all in the library already
+    /// brings its files in again: those of a name the song's folder has
+    /// replace them when newer. Else only the files the folder lacks come
+    /// in.
+    pub reinstall: bool,
 }
 
 /// The [`Config::sources`] that are third parties' copies.
@@ -181,6 +186,7 @@ impl Default for Config {
             .to_vec(),
             downloads: ".bmseeker".into(),
             min_coverage: 0.99,
+            reinstall: false,
         }
     }
 }

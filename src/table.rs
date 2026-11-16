@@ -53,6 +53,10 @@ pub struct TableEntry {
     pub url: String,
     pub url_diff: String,
     pub comment: String,
+    /// The MD5s of the song's own charts (`org_md5`, `org_md5s`): for a
+    /// separate chart, the song it belongs to.
+    #[serde(default)]
+    pub org_md5: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -236,10 +240,26 @@ pub fn parse_data(v: &Value) -> Result<Vec<TableEntry>, TableError> {
                 url: get("url"),
                 url_diff: get("url_diff"),
                 comment: get("comment"),
+                org_md5: org_md5(o),
             }
         })
         .filter(|e| !e.md5.is_empty() || !e.sha256.is_empty())
         .collect())
+}
+
+/// An entry's `org_md5` and `org_md5s` (a string or a list each), lower
+/// case, each once.
+fn org_md5(o: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for k in ["org_md5", "org_md5s"] {
+        for m in o.get(k).map(str_list).unwrap_or_default() {
+            let m = m.trim().to_ascii_lowercase();
+            if !m.is_empty() && !out.contains(&m) {
+                out.push(m);
+            }
+        }
+    }
+    out
 }
 
 fn join(base: &str, rel: &str) -> Result<String, TableError> {
@@ -493,5 +513,21 @@ mod tests {
         assert_eq!(t.header.courses.len(), 1);
         assert_eq!(t.header.courses[0].md5.len(), 2);
         assert_eq!(t.label("12"), "sl12");
+    }
+
+    /// A separate chart's entry names its song's charts.
+    #[test]
+    fn the_songs_own_charts() {
+        let v: Value = serde_json::from_str(
+            r#"[{"md5":"a","org_md5":"ABC"},{"md5":"b","org_md5":["x","Y"],"org_md5s":["y","z"]},{"md5":"c"}]"#,
+        )
+        .unwrap();
+        let e = parse_data(&v).unwrap();
+        assert_eq!(e[0].org_md5, ["abc"]);
+        assert_eq!(e[1].org_md5, ["x", "y", "z"]);
+        assert!(e[2].org_md5.is_empty());
+        // a table kept before there were any
+        let old: TableEntry = serde_json::from_str(r#"{"md5":"a","sha256":"","level":"1","title":"","artist":"","url":"","url_diff":"","comment":""}"#).unwrap();
+        assert!(old.org_md5.is_empty());
     }
 }

@@ -16,12 +16,14 @@ use crate::net::{Answer, BoxTask, Next, Ready, Task};
 
 /// What is looked for: a chart (by its MD5, if known) of the song `want`;
 /// `diff`: the chart's own link (a 差分 posted apart from its song), else
-/// the song's.
+/// the song's; `org_md5`: the MD5s of the song's own charts a table names
+/// (where a separate chart goes).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Query {
     pub md5: String,
     pub want: Want,
     pub diff: bool,
+    pub org_md5: Vec<String>,
 }
 
 /// A place a song's links are looked for.
@@ -508,6 +510,7 @@ mod tests {
             md5: md5.into(),
             want: Want::default(),
             diff: false,
+            ..Default::default()
         };
         let api = &config.bmssearch_api;
         let http = Canned(vec![
@@ -548,6 +551,7 @@ mod tests {
             md5: md5.into(),
             want: Want::default(),
             diff: true,
+            ..Default::default()
         };
         assert_eq!(
             run(&mut m.find(&q), &http),
@@ -610,6 +614,7 @@ mod tests {
                 artist: "SHIKI / black train".into(),
             },
             diff: false,
+            ..Default::default()
         };
         assert_eq!(
             run(&mut lib.find(&q), &http),
@@ -648,6 +653,7 @@ mod tests {
                 artist: "Grand thaw".into(),
             },
             diff: false,
+            ..Default::default()
         };
         assert_eq!(
             run(&mut lib.find(&q), &http),

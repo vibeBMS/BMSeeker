@@ -192,6 +192,8 @@ fn missing(
                 md5: e.md5.clone(),
                 want: want.clone(),
                 diff,
+                // (the song's own charts: where its separate chart goes)
+                org_md5: e.org_md5.clone(),
             };
             let done = install::links_in(&downloads, &mut have, &q, &own, &sources, &r.cx);
             for d in &done {

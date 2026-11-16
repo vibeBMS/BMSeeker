@@ -152,7 +152,7 @@ fn get(
         let q = Query {
             md5: song.md5.clone(),
             want: song.want(),
-            diff: false,
+            ..Default::default()
         };
         let found = run(&mut sources.find_all(&q), &Client::new(r.config()));
         if found.is_empty() {
@@ -215,6 +215,7 @@ pub fn song(r: &Run, c: Song) -> Result<(), String> {
         md5: song.md5.clone(),
         want: song.want(),
         diff,
+        ..Default::default()
     };
     for (source, url) in run(&mut sources.find_all(&q), &Client::new(r.config())) {
         r.out.record(json!({"source": source, "url": url}), || {

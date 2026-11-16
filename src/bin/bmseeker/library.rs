@@ -178,6 +178,7 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 md5: song.md5.clone(),
                 want: song.want(),
                 diff,
+                ..Default::default()
             };
             let downloads = library.join(&r.config().downloads);
             let done = install::links(&downloads, &library, &q, &links, &sources, &r.cx);

@@ -180,7 +180,7 @@ fn check(
         let q = bmseeker::sources::Query {
             md5: String::new(),
             want: want.clone(),
-            diff: false,
+            ..Default::default()
         };
         for (source, url) in bmseeker::net::run(&mut sources.find_all(&q), &http) {
             if !found.iter().any(|(u, _)| *u == url) {
