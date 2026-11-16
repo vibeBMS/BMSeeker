@@ -238,19 +238,7 @@ pub fn file_name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Charts waiting in `downloads` (their song came later): place those that
-/// now have a folder.
-pub fn place_waiting(fs: &dyn Fs, downloads: &Path, library: &Path) -> Vec<PathBuf> {
-    fs.read_dir(downloads)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| !e.is_dir && placement::is_chart(&e.path))
-        .filter_map(|e| match placement::locate_loose(fs, &e.path, library) {
-            Some(Located::Move(dir)) => placement::bring(fs, &e.path, &dir),
-            _ => None,
-        })
-        .collect()
-}
+pub use crate::install::place_waiting;
 
 #[cfg(test)]
 mod tests {

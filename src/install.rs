@@ -199,10 +199,7 @@ pub fn link(
         let r = import::unpack_into(&file, &name, &dir);
         let _ = std::fs::remove_file(&file);
         let out = match r {
-            Ok(_) if check.is_some_and(|m| !holds_chart(&Disk, &dir, m)) => {
-                vec![Done::Failed(NOT_THE_CHART.into())]
-            }
-            Ok(_) => keep_waiting(place_charts(&Disk, &dir, library), downloads, md5),
+            Ok(_) => place_diff(&Disk, &dir, downloads, library, md5, check),
             Err(e) => vec![Done::Failed(e)],
         };
         let _ = std::fs::remove_dir_all(&dir);
@@ -230,7 +227,7 @@ pub fn link(
     // charts that waited for this song
     if matches!(out[0], Done::Added(..)) {
         out.extend(
-            import::place_waiting(&Disk, downloads, library)
+            place_waiting(&Disk, downloads, library)
                 .into_iter()
                 .map(Done::Placed),
         );
@@ -238,25 +235,44 @@ pub fn link(
     out
 }
 
+/// A separate chart's archive, unpacked into `dir` (to be removed after):
+/// with `check` (a chart's MD5, the archive found by name), nothing unless
+/// it holds that chart; else its charts into their songs' folders
+/// ([`place_charts`]), those whose songs are not here waiting in
+/// `downloads` ([`keep_waiting`]).
+pub fn place_diff(
+    fs: &dyn Fs,
+    dir: &Path,
+    downloads: &Path,
+    library: &Path,
+    md5: &str,
+    check: Option<&str>,
+) -> Vec<Done> {
+    if check.is_some_and(|m| !holds_chart(fs, dir, m)) {
+        return vec![Done::Failed(NOT_THE_CHART.into())];
+    }
+    keep_waiting(fs, place_charts(fs, dir, library), downloads, md5)
+}
+
 /// The charts of `done` that wait for their songs, out of the folder about
-/// to go and into `downloads` (where [`import::place_waiting`] finds them
-/// once a song comes): the chart `md5` only, when it is known.
-///
-/// [`import::place_waiting`]: crate::import::place_waiting
-#[cfg(not(target_arch = "wasm32"))]
-fn keep_waiting(done: Vec<Done>, downloads: &Path, md5: &str) -> Vec<Done> {
+/// to go and into `downloads` (where [`place_waiting`] finds them once a
+/// song comes): the chart `md5` only, when it is known. Nothing placed
+/// and nothing kept: [`NOT_THE_CHART`] (a pack of other songs' charts).
+pub fn keep_waiting(fs: &dyn Fs, done: Vec<Done>, downloads: &Path, md5: &str) -> Vec<Done> {
     let md5 = md5.trim().to_ascii_lowercase();
     let kept = done
         .into_iter()
         .filter_map(|d| match d {
             Done::Waiting(p) => {
-                let bytes = std::fs::read(&p).ok()?;
-                if md5.len() == 32 && md5_hex(&bytes) != md5 {
+                if md5.len() == 32 && fs.read(&p).map(|b| md5_hex(&b)).ok()? != md5 {
                     return None;
                 }
                 let to = downloads.join(p.file_name()?);
-                std::fs::write(&to, &bytes).ok()?;
-                Some(Done::Waiting(to))
+                // an older copy of it goes
+                if to != p && fs.stamp(&to).is_some() {
+                    fs.remove(&to);
+                }
+                (to == p || fs.rename(&p, &to)).then_some(Done::Waiting(to))
             }
             d => Some(d),
         })
@@ -265,6 +281,21 @@ fn keep_waiting(done: Vec<Done>, downloads: &Path, md5: &str) -> Vec<Done> {
         return vec![Done::Failed(NOT_THE_CHART.into())];
     }
     kept
+}
+
+/// Charts waiting in `downloads` (their song came later): place those that
+/// now have a folder.
+pub fn place_waiting(fs: &dyn Fs, downloads: &Path, library: &Path) -> Vec<PathBuf> {
+    use crate::placement::{bring, is_chart, locate_loose, Located};
+    fs.read_dir(downloads)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !e.is_dir && is_chart(&e.path))
+        .filter_map(|e| match locate_loose(fs, &e.path, library) {
+            Some(Located::Move(dir)) => bring(fs, &e.path, &dir),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether the archive `bytes` (zip, 7z, rar) holds the chart `md5`: what
@@ -576,6 +607,65 @@ mod tests {
             done.iter().all(|d| matches!(d, Done::Placed(_))),
             "{done:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A separate chart's archive: checked, the chart wanted kept waiting
+    /// (no other), then placed once its song comes.
+    #[test]
+    fn a_separate_charts_archive() {
+        use crate::fs::Disk;
+        let root = std::env::temp_dir().join(format!("bmseeker-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (library, downloads) = (root.join("bms"), root.join("downloads"));
+        let dir = downloads.join(".diff-x");
+        let ours = "#TITLE Song [X]\n#ARTIST alpha / obj: b\n#WAV01 01.wav\n#WAV02 02.wav\n";
+        let other = "#TITLE Other [X]\n#ARTIST gamma\n#WAV01 o.wav\n";
+        std::fs::create_dir_all(dir.join("pack")).unwrap();
+        std::fs::write(dir.join("pack/ours.bms"), ours).unwrap();
+        std::fs::write(dir.join("pack/other.bms"), other).unwrap();
+        let charts_in = |d: &Path| {
+            let mut v: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".bms"))
+                .collect();
+            v.sort();
+            v
+        };
+        let not_the_chart = |d: &[Done]| matches!(d, [Done::Failed(e)] if e == NOT_THE_CHART);
+        let place = |md5: &str, check: Option<&str>| {
+            place_diff(&Disk, &dir, &downloads, &library, md5, check)
+        };
+        // found by name and not holding the chart
+        let missing = md5_hex(b"#TITLE Missing");
+        assert!(not_the_chart(&place(&missing, Some(&missing))));
+        // a pack without the chart wanted: none of its charts kept
+        assert!(not_the_chart(&place(&missing, None)));
+        assert!(charts_in(&downloads).is_empty());
+        // with it: that one waits in the downloads, alone
+        let done = place(&md5_hex(ours.as_bytes()), None);
+        assert!(
+            matches!(&done[..], [Done::Waiting(p)] if *p == downloads.join("ours.bms")),
+            "{done:?}"
+        );
+        assert_eq!(charts_in(&downloads), ["ours.bms"]);
+        // its song comes: it goes into the song's folder
+        let song = library.join("Song");
+        std::fs::create_dir_all(&song).unwrap();
+        std::fs::write(
+            song.join("song.bms"),
+            "#TITLE Song\n#ARTIST alpha\n#WAV01 01.wav\n",
+        )
+        .unwrap();
+        std::fs::write(song.join("01.ogg"), b"x").unwrap();
+        std::fs::write(song.join("02.ogg"), b"x").unwrap();
+        assert_eq!(
+            place_waiting(&Disk, &downloads, &library),
+            [song.join("ours.bms")]
+        );
+        assert!(charts_in(&downloads).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
