@@ -1,18 +1,25 @@
 //! Downloaded songs: archives (.zip, .7z, .rar, .lzh) are unpacked into the
 //! library, a chart on its own goes into its song's folder (see
-//! `placement`). On any [`Store`] (a disk, a player's files).
+//! `placement`), as [`install::take`](crate::install::take) does with a
+//! song's download. On any [`Store`] (a disk, a player's files).
 
 use crate::fs::{Disk, Store};
+use crate::install::plan::{taken, Outcome, Request};
+use crate::install::Done;
 use crate::library::Library;
-use crate::placement::{self, Located};
+use crate::placement;
 use crate::unpack::{safe_rel, unpack, Blob, BUDGET};
 use std::path::{Path, PathBuf};
 
 /// What became of a downloaded file.
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Imported {
     /// Unpacked into this folder (files written).
     Unpacked(PathBuf, usize),
+    /// Its charts are in the library already, in this song's folder (the
+    /// files it lacked brought in).
+    Owned(PathBuf),
     /// A chart moved into its song's folder.
     Placed(PathBuf),
     /// A chart whose song is not in the library yet (it waits in the
@@ -36,87 +43,72 @@ fn is_archive(p: &Path) -> bool {
 }
 
 /// Bring a downloaded `file` into `library` (`<root>/bms`). Archives are
-/// unpacked into a folder named after them (when one of that name holds
-/// another song: `name (2)`...) and removed.
+/// unpacked: a song new to the library into a folder named after the
+/// archive (when one of that name holds another song: `name (2)`...); a
+/// song the library has all the charts of stays as it is (the files its
+/// folder lacks brought in); charts for a song's folder there go into it.
+/// The archive goes.
 pub fn import(fs: &dyn Store, file: &Path, library: &Path) -> Result<Imported, String> {
     import_in(fs, file, &mut Library::new(library))
 }
 
 /// [`import`] into the library `lib` (what comes in added to it).
 pub fn import_in(fs: &dyn Store, file: &Path, lib: &mut Library) -> Result<Imported, String> {
-    let read = fs.as_fs();
-    let library = lib.root().to_path_buf();
-    if is_archive(file) {
-        let stem = file
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "download".into());
-        let unpack_to = |dest: &Path| -> Result<usize, String> {
-            unpack(Blob::File(file.to_path_buf()), fs, dest, BUDGET)
-                .map(|m| m.len())
-                .inspect_err(|_| fs.remove_dir(dest))
-        };
-        let first = library.join(&stem);
-        if fs.read_dir(&first).is_err() {
-            let n = unpack_to(&first)?;
-            fs.remove(file);
-            lib.add_folder(read, &first);
-            return Ok(Imported::Unpacked(first, n));
-        }
-        // a folder of that name: unpacked beside the file first, then into
-        // it (the same song again) or a free name (another song)
-        let tmp = file.with_file_name(format!(".unpack-{}", crate::install::unique()));
-        let n = unpack_to(&tmp)?;
-        fs.remove(file);
-        let charts = placement::charts_below(read, &tmp);
-        let dest = placement::song_folder_in(read, lib, &stem, &charts);
-        let moved = move_tree(fs, &tmp, &dest);
-        fs.remove_dir(&tmp);
-        moved?;
-        lib.add_folder(read, &dest);
-        return Ok(Imported::Unpacked(dest, n));
-    }
-    if !placement::is_chart(file) {
-        return Ok(Imported::Other(file.to_path_buf()));
-    }
-    let located = placement::locate_in(read, file, lib, false, placement::Rules::default());
-    Ok(match located.map(|(l, _)| l) {
-        Some(Located::Move(dir)) => match placement::bring(read, file, &dir) {
-            Some(to) => {
-                let md5 = read.read(&to).ok().map(|b| crate::install::md5_hex(&b));
-                lib.add(&to, md5.as_deref());
-                Imported::Placed(to)
-            }
-            None => Imported::Waiting(file.to_path_buf()),
-        },
-        Some(Located::Ask(c)) => Imported::Ask(file.to_path_buf(), c),
-        _ => Imported::Waiting(file.to_path_buf()),
-    })
+    import_as(fs, file, lib, &Request::default())
 }
 
-/// Move everything below `from` into `to` (a file of the same name there
-/// replaced).
-fn move_tree(fs: &dyn Store, from: &Path, to: &Path) -> Result<(), String> {
-    if fs.read_dir(to).is_err() && fs.rename(from, to) {
-        return Ok(());
+/// [`import_in`] as `req` says (where the file came from; `reinstall`...);
+/// [`install::take`](crate::install::take) as one outcome. What it
+/// unpacks passes through a folder beside it; a chart that waits stays
+/// there.
+pub fn import_as(
+    fs: &dyn Store,
+    file: &Path,
+    lib: &mut Library,
+    req: &Request,
+) -> Result<Imported, String> {
+    if !is_archive(file) && !placement::is_chart(file) {
+        return Ok(Imported::Other(file.to_path_buf()));
     }
-    let mut todo = vec![from.to_path_buf()];
-    while let Some(d) = todo.pop() {
-        for e in fs.read_dir(&d).map_err(|e| e.to_string())? {
-            if e.is_dir {
-                todo.push(e.path);
-                continue;
-            }
-            let rel = e.path.strip_prefix(from).map_err(|e| e.to_string())?;
-            let at = to.join(rel);
-            fs.remove(&at);
-            if !fs.rename(&e.path, &at) {
-                // (a folder not there yet) copied, with its time
-                copy(fs, &e.path, &at).map_err(|err| format!("{}: {err}", at.display()))?;
-            }
-        }
+    let downloads = file.parent().unwrap_or(Path::new("")).to_path_buf();
+    let req = Request {
+        file: Some(file_name(file)),
+        ..req.clone()
+    };
+    let out = taken(
+        fs,
+        Blob::File(file.to_path_buf()),
+        &req,
+        &downloads,
+        lib,
+        false,
+    );
+    // what counts most: a song added, a chart placed, ... what failed
+    let rank = |o: &Outcome, d: &Done| -> Option<(u8, Imported)> {
+        Some(match (o, d) {
+            (_, Done::Added(dir, n)) => (0, Imported::Unpacked(dir.clone(), *n)),
+            (_, Done::Placed(p)) => (1, Imported::Placed(p.clone())),
+            (_, Done::Owned(p)) => (2, Imported::Owned(p.clone())),
+            (Outcome::Ask(c), Done::Waiting(p)) => (3, Imported::Ask(p.clone(), c.clone())),
+            (_, Done::Waiting(p)) => (4, Imported::Waiting(p.clone())),
+            _ => return None,
+        })
+    };
+    let best = out
+        .iter()
+        .flat_map(|(o, done)| done.iter().filter_map(move |d| rank(o, d)))
+        .min_by_key(|(r, _)| *r);
+    if let Some((_, i)) = best {
+        return Ok(i);
     }
-    Ok(())
+    Err(out
+        .iter()
+        .flat_map(|(_, d)| d)
+        .find_map(|d| match d {
+            Done::Failed(e) => Some(e.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "nothing came of it".into()))
 }
 
 /// Copy the file `from` to `to` in `fs` (its folders made), keeping its time.

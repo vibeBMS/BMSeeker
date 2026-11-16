@@ -63,6 +63,10 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                     json!({"state": "added", "path": d, "files": n}),
                     format!("added {} ({n} files)", d.display()),
                 ),
+                Imported::Owned(d) => (
+                    json!({"state": "owned", "path": d}),
+                    format!("in the library already: {}", d.display()),
+                ),
                 Imported::Placed(p) => (
                     json!({"state": "placed", "path": p}),
                     format!("placed {}", p.display()),
@@ -85,6 +89,10 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 Imported::Other(p) => (
                     json!({"state": "other", "path": p}),
                     format!("{}: not a song", p.display()),
+                ),
+                other => (
+                    json!({"state": "other", "detail": format!("{other:?}")}),
+                    format!("{other:?}"),
                 ),
             };
             r.out.record(v, || text);
@@ -209,20 +217,24 @@ fn located_record(chart: &Path, l: &Located) -> Value {
 pub fn done_record(title: &str, d: &Done) -> Value {
     match d {
         Done::Added(dir, n) => json!({"title": title, "state": "added", "path": dir, "files": n}),
+        Done::Owned(dir) => json!({"title": title, "state": "owned", "path": dir}),
         Done::Placed(p) => json!({"title": title, "state": "placed", "path": p}),
         Done::Waiting(p) => json!({"title": title, "state": "waiting", "path": p}),
         Done::Page(u) => json!({"title": title, "state": "page", "link": u}),
         Done::Failed(e) => json!({"title": title, "state": "failed", "error": e.to_string()}),
+        other => json!({"title": title, "state": "other", "detail": format!("{other:?}")}),
     }
 }
 
 pub fn done_text(title: &str, d: &Done) -> String {
     match d {
         Done::Added(dir, n) => format!("{title}: added {} ({n} files)", dir.display()),
+        Done::Owned(dir) => format!("{title}: in the library already: {}", dir.display()),
         Done::Placed(p) => format!("{title}: {}", p.display()),
         Done::Waiting(p) => format!("{title}: {} waits for its song", p.display()),
         Done::Page(u) => format!("{title}: a page, download it in a browser: {u}"),
         Done::Failed(e) => format!("{title}: failed: {e}"),
+        other => format!("{title}: {other:?}"),
     }
 }
 

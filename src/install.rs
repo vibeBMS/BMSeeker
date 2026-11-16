@@ -7,11 +7,19 @@ use crate::fs::Fs;
 use crate::library::Library;
 use std::path::{Path, PathBuf};
 
+pub mod plan;
+
+pub use plan::{apply, take, Item, Naming, Outcome, Request, Role};
+
 /// What became of one link.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Done {
     /// Unpacked into this folder (files written).
     Added(PathBuf, usize),
+    /// Its charts are in the library already, in this song's folder (the
+    /// files it lacked brought in).
+    Owned(PathBuf),
     /// A chart put into its song's folder.
     Placed(PathBuf),
     /// A chart whose song is not in the library yet.
@@ -173,8 +181,9 @@ pub fn place_charts_in(fs: &dyn Fs, dir: &Path, index: &mut Library) -> Vec<Done
 }
 
 /// One of a song's links (`diff`: its separate chart's) on a disk: into
-/// `downloads`, then into `library` (an archive unpacked, a chart into its
-/// song's folder; a separate chart's archive into its song's folder too).
+/// `downloads`, then into `library` ([`take`]: a song new to it into a
+/// folder of its own, a separate chart into its song's folder, what the
+/// library has already left as it is but for the files its folder lacks).
 /// With `check` (a chart's MD5), only if what it brings holds that chart.
 /// A separate chart whose song is not here yet waits in `downloads` (only
 /// `md5`, the chart wanted, when it is known: a pack of many songs' charts
@@ -208,13 +217,32 @@ pub fn link_in(
     check: Option<&str>,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
+    let q = crate::sources::Query {
+        md5: check.unwrap_or(md5).to_string(),
+        want: want.clone(),
+        diff,
+        org_md5: Vec::new(),
+    };
+    link_for(downloads, lib, &q, link, check.is_some(), cx)
+}
+
+/// [`link_in`] for `q` (`check`: what it brings must hold `q.md5`).
+#[cfg(not(target_arch = "wasm32"))]
+fn link_for(
+    downloads: &Path,
+    lib: &mut Library,
+    q: &crate::sources::Query,
+    link: &str,
+    check: bool,
+    cx: &crate::hosts::Context,
+) -> Vec<Done> {
     // this download's own folder for what passes through (two songs of
     // one title, or two downloads at once, do not meet)
     let job = downloads.join(format!(".job-{}", unique()));
     if let Err(e) = std::fs::create_dir_all(&job) {
         return vec![Done::Failed(e.to_string().into())];
     }
-    let out = link_job(&job, downloads, lib, want, link, diff, md5, check, cx);
+    let out = link_job(&job, downloads, lib, q, link, check, cx);
     let _ = std::fs::remove_dir_all(&job);
     out
 }
@@ -233,103 +261,66 @@ pub(crate) fn unique() -> String {
     }
 }
 
-/// [`link_in`], what passes through in `job`.
+/// What a link for `q` brings is for (`check`: found by name, it must
+/// hold the chart), as [`take`] needs it; `file`: its file name.
+pub fn request(
+    q: &crate::sources::Query,
+    check: bool,
+    file: Option<String>,
+    config: &crate::config::Config,
+) -> Request {
+    Request {
+        want: Some(q.want.clone()),
+        md5: Some(q.md5.trim().to_string()).filter(|m| m.len() == 32),
+        org_md5: q.org_md5.clone(),
+        role: if q.diff { Role::Diff } else { Role::Song },
+        check,
+        rules: crate::placement::Rules::default(),
+        // (the library folder is named after the song)
+        naming: Naming::Named(safe_name(&q.want.title)),
+        file,
+        reinstall: config.reinstall,
+    }
+}
+
+/// [`link_for`], what passes through in `job`.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
 fn link_job(
     job: &Path,
     downloads: &Path,
     lib: &mut Library,
-    want: &crate::hosts::Want,
+    q: &crate::sources::Query,
     link: &str,
-    diff: bool,
-    md5: &str,
-    check: Option<&str>,
+    check: bool,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
-    use crate::fs::Disk;
-    use crate::import::{self, Imported};
-    let title = want.title.as_str();
-    let file = if chart_link(link) {
+    use crate::unpack::Blob;
+    let (blob, file) = if chart_link(link) {
         cx.stage(crate::progress::Stage::Finding);
-        let file = downloads.join(chart_name(link));
+        let name = chart_name(link);
+        let file = job.join(&name);
         if let Err(e) = crate::hosts::download(link, &file, cx) {
-            let _ = std::fs::remove_file(&file);
             return vec![Done::Failed(e.into())];
         }
         // a page where a chart was expected
         let bytes = std::fs::read(&file).unwrap_or_default();
         if bytes.trim_ascii_start().starts_with(b"<") {
-            let _ = std::fs::remove_file(&file);
             return vec![Done::Page(link.to_string())];
         }
-        if check.is_some_and(|m| !md5_hex(&bytes).eq_ignore_ascii_case(m.trim())) {
-            let _ = std::fs::remove_file(&file);
-            return vec![Done::Failed(Failure::NotTheChart)];
-        }
-        file
+        (Blob::File(file), Some(name))
     } else {
-        let tmp = job.join("song");
+        let tmp = job.join("download");
         // the song's own link may be a pack of many songs: its archive
-        let want = (!diff).then(|| want.clone());
+        let want = (!q.diff).then(|| q.want.clone());
         match crate::hosts::fetch(link, want, &tmp, cx) {
-            Ok(()) => {
-                let ext = crate::hosts::sniff(&tmp).unwrap_or("zip");
-                // (the library folder is named after it)
-                let file = job.join(format!("{}.{ext}", safe_name(title)));
-                if std::fs::rename(&tmp, &file).is_err() {
-                    return vec![Done::Failed("could not keep the download".into())];
-                }
-                file
-            }
+            Ok(()) => (Blob::File(tmp), Some("download".to_string())),
             Err(crate::hosts::Fetch::Page) => return vec![Done::Page(link.to_string())],
-            Err(crate::hosts::Fetch::Failed(e)) => {
-                let _ = std::fs::remove_file(&tmp);
-                return vec![Done::Failed(e.into())];
-            }
+            Err(crate::hosts::Fetch::Failed(e)) => return vec![Done::Failed(e.into())],
         }
     };
     cx.stage(crate::progress::Stage::Unpacking);
-    if diff && !chart_link(link) {
-        let dir = job.join("diff");
-        let name = import::file_name(&file);
-        let r = import::unpack_into(&file, &name, &dir);
-        let _ = std::fs::remove_file(&file);
-        let out = match r {
-            Ok(_) => place_diff_in(&Disk, &dir, downloads, lib, md5, check),
-            Err(e) => vec![Done::Failed(e.into())],
-        };
-        let _ = std::fs::remove_dir_all(&dir);
-        return out;
-    }
-    // found by name: looked into before it goes into the library
-    if let Some(m) = check.filter(|_| !chart_link(link)) {
-        let dir = job.join("check");
-        let name = import::file_name(&file);
-        let holds = import::unpack_into(&file, &name, &dir).is_ok()
-            && (holds_chart(&Disk, &dir, m) || holds_song(&Disk, &dir, want));
-        let _ = std::fs::remove_dir_all(&dir);
-        if !holds {
-            let _ = std::fs::remove_file(&file);
-            return vec![Done::Failed(Failure::NotTheChart)];
-        }
-    }
-    let mut out = vec![match import::import_in(&Disk, &file, lib) {
-        Ok(Imported::Unpacked(dir, n)) => Done::Added(dir, n),
-        Ok(Imported::Placed(p)) => Done::Placed(p),
-        Ok(Imported::Waiting(p)) | Ok(Imported::Ask(p, _)) => Done::Waiting(p),
-        Ok(Imported::Other(p)) => Done::Failed(format!("{} is not a song", p.display()).into()),
-        Err(e) => Done::Failed(e.into()),
-    }];
-    // charts that waited for this song
-    if matches!(out[0], Done::Added(..)) {
-        out.extend(
-            place_waiting_in(&Disk, downloads, lib)
-                .into_iter()
-                .map(Done::Placed),
-        );
-    }
-    out
+    let req = request(q, check, file, &cx.config);
+    take(&crate::fs::Disk, blob, &req, downloads, lib)
 }
 
 /// A separate chart's archive, unpacked into `dir` (to be removed after):
@@ -502,10 +493,15 @@ pub fn added(done: &[Done]) -> impl Iterator<Item = &Path> {
     })
 }
 
-/// Whether a link's outcome brought the song (or its chart) in.
+/// Whether a link's outcome brought the song (or its chart) in, or found
+/// it in the library already.
 pub fn got(done: &[Done]) -> bool {
-    done.iter()
-        .any(|d| matches!(d, Done::Added(..) | Done::Placed(_) | Done::Waiting(_)))
+    done.iter().any(|d| {
+        matches!(
+            d,
+            Done::Added(..) | Done::Owned(_) | Done::Placed(_) | Done::Waiting(_)
+        )
+    })
 }
 
 /// What trying one link after another came to: the first that brought it
@@ -574,8 +570,7 @@ pub fn links_in(
     let cancelled = || cx.cancelled();
     let mut tries = Tries::default();
     let mut tried: Vec<String> = Vec::new();
-    let md5 = q.md5.trim();
-    let check = (md5.len() == 32).then_some(md5);
+    let check = (q.md5.trim().len() == 32).then_some(());
     let mut try_all = |links: Vec<String>, checked: bool, tries: &mut Tries| -> Option<Vec<Done>> {
         for l in links {
             if cancelled() {
@@ -585,10 +580,8 @@ pub fn links_in(
                 continue;
             }
             tried.push(l.clone());
-            let check = check.filter(|_| checked);
-            if let Some(done) =
-                tries.record(link_in(downloads, lib, &q.want, &l, q.diff, md5, check, cx))
-            {
+            let check = check.is_some() && checked;
+            if let Some(done) = tries.record(link_for(downloads, lib, q, &l, check, cx)) {
                 return Some(done);
             }
         }

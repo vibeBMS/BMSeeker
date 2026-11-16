@@ -9,7 +9,11 @@
 //! - [`placement`]: which song's folder a chart of its own (差分) belongs in;
 //! - [`library`]: the library's songs' folders, their files and the charts'
 //!   hashes, read once or given by a player's own records;
-//! - [`install`]: a table's song from its links into the library;
+//! - [`package`]: what a download holds: songs' folders and charts of their
+//!   own, each new to the library, the library's already, or for a song's
+//!   folder there;
+//! - [`install`]: a table's song from its links into the library (a
+//!   download staged, planned, then applied: [`install::plan`]);
 //! - [`links`]: links for a table's songs whose own are missing or dead;
 //! - [`bmssearch`]: a chart's work and its links from BMS SEARCH;
 //! - [`sources`]: where else a song's links are looked for, in order;
@@ -35,6 +39,7 @@ pub mod library;
 pub mod links;
 pub mod manbow;
 pub mod net;
+pub mod package;
 pub mod placement;
 // downloads and unpacks to a disk
 #[cfg(not(target_arch = "wasm32"))]
