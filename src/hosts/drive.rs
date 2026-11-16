@@ -1,12 +1,13 @@
 //! Google Drive: a file downloads from its id (`confirm=t` skips the virus
 //! scan page of big files); a folder's listing (`embeddedfolderview`)
-//! names its archives, the best of which is taken.
+//! names its archives, the best of which is taken. A folder link ending in
+//! `#sub/folder/file` names goes down to that file.
 
 use super::{
     archive_name, between, get_then, pick_file, unescape, Host, Link, Resolved, Target, Want,
 };
 use crate::config::Config;
-use crate::net::{BoxTask, Ready};
+use crate::net::{Answer, BoxTask, Next, Ready, Request, Task};
 
 pub struct Drive;
 
@@ -25,6 +26,16 @@ impl Host for Drive {
         };
         if !link.lower.contains("/folders/") {
             return Ready::boxed(Resolved::File(Target::url(file_url(&id))));
+        }
+        if let Some((_, path)) = link.url.split_once('#') {
+            let names: Vec<String> = path
+                .split('/')
+                .filter(|n| !n.is_empty())
+                .map(crate::net::percent_decode)
+                .collect();
+            if !names.is_empty() {
+                return Box::new(Walk { folder: id, names });
+            }
         }
         get_then(
             format!("https://drive.google.com/embeddedfolderview?id={id}"),
@@ -67,22 +78,116 @@ fn file_url(id: &str) -> String {
 
 /// (name, file id) of the files in an `embeddedfolderview` page.
 fn folder_entries(page: &str) -> Vec<(String, String)> {
+    listing(page)
+        .into_iter()
+        .filter(|e| !e.folder)
+        .map(|e| (e.name, e.id))
+        .collect()
+}
+
+/// A file or folder in a folder's listing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub name: String,
+    pub id: String,
+    pub folder: bool,
+}
+
+/// What an `embeddedfolderview` page lists.
+pub fn listing(page: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     for part in page.split("class=\"flip-entry\"").skip(1) {
-        let Some(id) = between(part, "/file/d/", "/") else {
-            continue; // a sub-folder
+        let (id, folder) = match between(part, "/file/d/", "/") {
+            Some(id) => (id, false),
+            None => match between(part, "/folders/", "\"") {
+                Some(id) => (id.split(['?', '&']).next().unwrap_or(id), true),
+                None => continue,
+            },
         };
         if let Some(name) = between(part, "flip-entry-title\">", "<") {
-            out.push((unescape(name), id.to_string()));
+            out.push(Entry {
+                name: unescape(name),
+                id: id.to_string(),
+                folder,
+            });
         }
     }
     out
+}
+
+/// A folder's listing page.
+pub fn listing_url(id: &str) -> String {
+    format!("https://drive.google.com/embeddedfolderview?id={id}")
+}
+
+/// A Drive file's link.
+pub fn file_link(id: &str) -> String {
+    format!("https://drive.google.com/file/d/{id}/view")
+}
+
+/// Down a folder's sub-folders by name to a file.
+struct Walk {
+    folder: String,
+    names: Vec<String>,
+}
+
+impl Task for Walk {
+    type Output = Resolved;
+
+    fn start(&mut self) -> Next<Resolved> {
+        Next::Ask(Request::Get(listing_url(&self.folder)))
+    }
+
+    fn feed(&mut self, answer: Answer) -> Next<Resolved> {
+        let body = match answer {
+            Ok(b) => b,
+            Err(e) => return Next::Done(Resolved::Failed(e)),
+        };
+        let page = String::from_utf8_lossy(&body);
+        let name = self.names.remove(0);
+        let last = self.names.is_empty();
+        match listing(&page)
+            .into_iter()
+            .find(|e| e.name == name && e.folder != last)
+        {
+            Some(e) if last => {
+                Next::Done(Resolved::File(Target::named(file_url(&e.id), Some(e.name))))
+            }
+            Some(e) => {
+                self.folder = e.id;
+                self.start()
+            }
+            None => Next::Done(Resolved::Failed(format!("{name}: not in the folder"))),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hosts::tests::resolve;
+
+    #[test]
+    fn down_the_folders() {
+        let root = r#"<div class="flip-entry" id="entry-F1"><a href="https://drive.google.com/drive/folders/F36"><div class="flip-entry-title">36xx</div></a></div>"#;
+        let sub = r#"<div class="flip-entry"><a href="https://drive.google.com/file/d/Z1/view?usp=drive_web"><div class="flip-entry-title">03691.zip</div></a></div>"#;
+        assert_eq!(
+            resolve(
+                "https://drive.google.com/drive/folders/ROOT#36xx/03691.zip",
+                &[
+                    (
+                        "https://drive.google.com/embeddedfolderview?id=ROOT",
+                        root.as_bytes()
+                    ),
+                    (
+                        "https://drive.google.com/embeddedfolderview?id=F36",
+                        sub.as_bytes()
+                    ),
+                ]
+            ),
+            Ok(Target::named(file_url("Z1"), Some("03691.zip".into())))
+        );
+    }
 
     #[test]
     fn ids() {

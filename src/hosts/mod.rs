@@ -17,10 +17,11 @@
 mod browser;
 #[cfg(not(target_arch = "wasm32"))]
 mod download;
-mod drive;
+pub mod drive;
 mod dropbox;
 mod mediafire;
 mod mega;
+mod uploader;
 mod venues;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -168,6 +169,16 @@ impl Default for Hosts {
 }
 
 impl Hosts {
+    /// The [`Hosts::default`] ones, with the settings' dead uploaders'
+    /// mirrors first.
+    pub fn from_config(config: &Config) -> Hosts {
+        let mut hosts = Hosts::default();
+        if !config.uploaders.is_empty() {
+            hosts.first(Box::new(uploader::Uploaders(config.uploaders.clone())));
+        }
+        hosts
+    }
+
     /// No host: [`Hosts::push`] them.
     pub fn none() -> Hosts {
         Hosts(Vec::new())
@@ -209,8 +220,8 @@ pub struct Context {
 impl Context {
     pub fn new(config: Config) -> Context {
         Context {
+            hosts: Arc::new(Hosts::from_config(&config)),
             config: Arc::new(config),
-            hosts: Arc::new(Hosts::default()),
         }
     }
 }

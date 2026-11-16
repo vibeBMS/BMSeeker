@@ -60,7 +60,7 @@ fn work_links(bms: &Value) -> Vec<String> {
 
 /// The title to search for: the table's without its chart's name
 /// (`Song [ANOTHER]`, `Song -Remix-`, `Song (7KEYS)`).
-fn base_title(t: &str) -> String {
+pub(crate) fn base_title(t: &str) -> String {
     let cut = t
         .char_indices()
         .find(|&(i, c)| {

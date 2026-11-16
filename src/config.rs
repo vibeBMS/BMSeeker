@@ -22,8 +22,20 @@ pub struct Config {
     pub mega_api: String,
     /// Where else a song's links are looked for, in order: `table` (the
     /// difficulty tables given), `stella`, `tsv` (link lists given),
-    /// `bmssearch`.
+    /// `bmssearch`, `mirrors` (a separate chart in [`Config::chart_mirrors`]),
+    /// `bmslibrary` (the community archive's songs: [`Config::bms_library`];
+    /// not used unless named).
     pub sources: Vec<String>,
+    /// Dead uploaders' files, numbered, kept elsewhere: a link to one goes
+    /// to its mirrors.
+    pub uploaders: Vec<Uploader>,
+    /// Folders where separate charts of dead sites are kept under their
+    /// file names (BMS SEARCH knows a chart's): the `mirrors` source.
+    pub chart_mirrors: Vec<String>,
+    /// The community archive's "BMS Library" Google Drive folder (a folder
+    /// per first letter, of `Title (by Artist).rar`): the `bmslibrary`
+    /// source.
+    pub bms_library: String,
     /// Difficulty tables to use when none is given.
     pub tables: Vec<String>,
     /// The folder (in a library) downloads are kept in until imported.
@@ -31,6 +43,64 @@ pub struct Config {
     /// How much of a chart's sounds a song folder must hold to take it
     /// (0..1).
     pub min_coverage: f32,
+}
+
+/// A dead uploader whose files are kept elsewhere by number.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Uploader {
+    /// Its host name: a link there names a file by number (the last digits
+    /// in it, as `upload.cgi?get=03691`).
+    pub site: String,
+    /// The number's width, zeros before.
+    pub digits: usize,
+    /// Where its files are, tried in order: `{n}` is the number, `{h}` its
+    /// hundreds (`03691`: `36`), both with their zeros. A Google Drive
+    /// folder link may end in `#sub/folder/file` names, followed from it.
+    pub mirrors: Vec<String>,
+}
+
+impl Default for Uploader {
+    fn default() -> Uploader {
+        Uploader {
+            site: String::new(),
+            digits: 5,
+            mirrors: Vec::new(),
+        }
+    }
+}
+
+impl Uploader {
+    /// The file number in `url` (a link to this uploader).
+    pub fn number(&self, url: &str) -> Option<u64> {
+        let lower = url.to_ascii_lowercase();
+        let host = lower.split('/').nth(2)?;
+        if self.site.is_empty()
+            || !(host == self.site || host.ends_with(&format!(".{}", self.site)))
+        {
+            return None;
+        }
+        let rest = &lower[lower.find(host)? + host.len()..];
+        let digits: String = rest
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .find(|d| !d.is_empty())?
+            .to_string();
+        digits.parse().ok()
+    }
+
+    /// `url`'s file on each mirror.
+    pub fn mirrored(&self, url: &str) -> Vec<String> {
+        let Some(n) = self.number(url) else {
+            return Vec::new();
+        };
+        let w = self.digits;
+        let num = format!("{n:0w$}");
+        let hundreds = format!("{:0h$}", n / 100, h = w.saturating_sub(3).max(1));
+        self.mirrors
+            .iter()
+            .map(|m| m.replace("{n}", &num).replace("{h}", &hundreds))
+            .collect()
+    }
 }
 
 impl Default for Config {
@@ -42,7 +112,22 @@ impl Default for Config {
             bmssearch_api: "https://api.bmssearch.net/v1".into(),
             stella_list: "https://stellabms.xyz/score_upload_full.json".into(),
             mega_api: "https://g.api.mega.co.nz/cs?id=0".into(),
-            sources: ["table", "stella", "tsv", "bmssearch"].map(String::from).to_vec(),
+            sources: ["table", "stella", "tsv", "bmssearch", "mirrors"]
+                .map(String::from)
+                .to_vec(),
+            uploaders: vec![Uploader {
+                site: "gnqg.rosx.net".into(),
+                digits: 5,
+                mirrors: [
+                    "https://bms.hexlataia.xyz/mirror/gnqg-upload/{n}.zip",
+                    "https://darksabun.club/mirror/gnqg-upload/{n}.zip",
+                ]
+                .map(String::from)
+                .to_vec(),
+            }],
+            chart_mirrors: vec!["https://darksabun.club/mirror/absolute/bms/".into()],
+            bms_library:
+                "https://drive.google.com/drive/folders/1mTcWY9jYMsnEzbVfvGkjfepBpN4Tj786".into(),
             tables: [
                 "https://darksabun.club/table/archive/insane1/",
                 "https://darksabun.club/table/archive/normal1/",
@@ -106,5 +191,27 @@ mod tests {
         assert!(c.uses("bmssearch") && !c.uses("stella"));
         assert_eq!(c.manbow, Config::default().manbow);
         assert!(Config::from_json("{").is_err());
+    }
+
+    #[test]
+    fn uploader_numbers() {
+        let u = Uploader {
+            site: "gnqg.rosx.net".into(),
+            digits: 5,
+            mirrors: vec![
+                "https://m/{n}.zip".into(),
+                "https://d/f#{h}xx/{n}.zip".into(),
+            ],
+        };
+        assert_eq!(
+            u.mirrored("http://gnqg.rosx.net/upload/upload.cgi?get=03691"),
+            ["https://m/03691.zip", "https://d/f#36xx/03691.zip"]
+        );
+        assert_eq!(
+            u.number("http://gnqg.rosx.net/upload/src/up12.zip"),
+            Some(12)
+        );
+        assert_eq!(u.number("http://gnqg.rosx.net/upload/"), None);
+        assert_eq!(u.number("http://example.com/upload.cgi?get=03691"), None);
     }
 }

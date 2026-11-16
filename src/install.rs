@@ -21,7 +21,7 @@ pub enum Done {
 }
 
 /// The MD5 of `bytes`, in hex.
-fn md5_hex(bytes: &[u8]) -> String {
+pub fn md5_hex(bytes: &[u8]) -> String {
     use md5::Digest;
     md5::Md5::digest(bytes)
         .iter()
@@ -119,6 +119,7 @@ pub fn place_charts(fs: &dyn Fs, dir: &Path, library: &Path) -> Vec<Done> {
 /// One of a song's links (`diff`: its separate chart's) on a disk: into
 /// `downloads`, then into `library` (an archive unpacked, a chart into its
 /// song's folder; a separate chart's archive into its song's folder too).
+/// With `check` (a chart's MD5), only if what it brings holds that chart.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn link(
     downloads: &Path,
@@ -126,6 +127,7 @@ pub fn link(
     want: &crate::hosts::Want,
     link: &str,
     diff: bool,
+    check: Option<&str>,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
     use crate::fs::Disk;
@@ -141,9 +143,14 @@ pub fn link(
             return vec![Done::Failed(e)];
         }
         // a page where a chart was expected
-        if std::fs::read(&file).is_ok_and(|b| b.trim_ascii_start().starts_with(b"<")) {
+        let bytes = std::fs::read(&file).unwrap_or_default();
+        if bytes.trim_ascii_start().starts_with(b"<") {
             let _ = std::fs::remove_file(&file);
             return vec![Done::Page(link.to_string())];
+        }
+        if check.is_some_and(|m| !md5_hex(&bytes).eq_ignore_ascii_case(m.trim())) {
+            let _ = std::fs::remove_file(&file);
+            return vec![Done::Failed(NOT_THE_CHART.into())];
         }
         file
     } else {
@@ -173,11 +180,25 @@ pub fn link(
         let r = import::unpack_into(&file, &name, &dir);
         let _ = std::fs::remove_file(&file);
         let out = match r {
+            Ok(_) if check.is_some_and(|m| !holds_chart(&Disk, &dir, m)) => {
+                vec![Done::Failed(NOT_THE_CHART.into())]
+            }
             Ok(_) => place_charts(&Disk, &dir, library),
             Err(e) => vec![Done::Failed(e)],
         };
         let _ = std::fs::remove_dir_all(&dir);
         return out;
+    }
+    // found by name: looked into before it goes into the library
+    if let Some(m) = check.filter(|_| !chart_link(link)) {
+        let dir = downloads.join(format!(".check-{}", safe_name(title)));
+        let name = import::file_name(&file);
+        let holds = import::unpack_into(&file, &name, &dir).is_ok() && holds_chart(&Disk, &dir, m);
+        let _ = std::fs::remove_dir_all(&dir);
+        if !holds {
+            let _ = std::fs::remove_file(&file);
+            return vec![Done::Failed(NOT_THE_CHART.into())];
+        }
     }
     let mut out = vec![match import::import(&Disk, &file, library) {
         Ok(Imported::Unpacked(dir, n)) => Done::Added(dir, n),
@@ -196,6 +217,9 @@ pub fn link(
     }
     out
 }
+
+/// A download found by name that does not hold the chart wanted.
+pub const NOT_THE_CHART: &str = "what it brought does not hold the chart";
 
 /// Whether the folder `dir` (a song just added) holds the chart `md5`
 /// already: its separate chart's links need no trying then (a table may
@@ -286,7 +310,9 @@ pub fn links(
     let cancelled = || crate::progress::current().is_some_and(|p| p.cancelled());
     let mut tries = Tries::default();
     let mut tried: Vec<String> = Vec::new();
-    let mut try_all = |links: Vec<String>, tries: &mut Tries| -> Option<Vec<Done>> {
+    let md5 = q.md5.trim();
+    let check = (md5.len() == 32).then_some(md5);
+    let mut try_all = |links: Vec<String>, checked: bool, tries: &mut Tries| -> Option<Vec<Done>> {
         for l in links {
             if cancelled() {
                 return Some(vec![Done::Failed(crate::progress::CANCELLED.into())]);
@@ -295,13 +321,16 @@ pub fn links(
                 continue;
             }
             tried.push(l.clone());
-            if let Some(done) = tries.record(link(downloads, library, &q.want, &l, q.diff, cx)) {
+            let check = check.filter(|_| checked);
+            if let Some(done) =
+                tries.record(link(downloads, library, &q.want, &l, q.diff, check, cx))
+            {
                 return Some(done);
             }
         }
         None
     };
-    if let Some(done) = try_all(own.to_vec(), &mut tries) {
+    if let Some(done) = try_all(own.to_vec(), false, &mut tries) {
         return done;
     }
     let http = crate::net::Client::new(&cx.config);
@@ -310,7 +339,7 @@ pub fn links(
             break;
         }
         let found = crate::net::run(&mut source.find(q), &http);
-        if let Some(done) = try_all(found, &mut tries) {
+        if let Some(done) = try_all(found, source.checked(), &mut tries) {
             return done;
         }
     }
@@ -341,6 +370,7 @@ mod tests {
                     &want,
                     &l,
                     var == "BMSEEKER_DIFF",
+                    None,
                     &crate::hosts::Context::default(),
                 );
                 println!("{var}: {done:?}");
