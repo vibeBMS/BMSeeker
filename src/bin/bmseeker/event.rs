@@ -5,7 +5,8 @@
 //! work   {"num","title","artist","team","kind","size_kb","page",
 //!         "links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
 //! check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
-//!         "size","charts","title"?,"error"?,"at"}
+//!         "size","charts","title"?,"error"?,"at",
+//!         "num"?,"source"?}   (a link a source found for work "num")
 //! ```
 
 use crate::io::{read_text, records, s};
@@ -43,6 +44,11 @@ pub enum Event {
         /// Stop checking after this long (the rest keep their earlier checks).
         #[arg(long)]
         minutes: Option<u64>,
+        /// A work none of whose links gives an archive: the links the
+        /// sources know for it (by its title and artist: BMS SEARCH; with
+        /// --third-party the community archive too), checked as well.
+        #[arg(long)]
+        search: bool,
     },
 }
 
@@ -54,7 +60,8 @@ pub fn event(r: &Run, c: Event) -> Result<(), String> {
             known,
             days,
             minutes,
-        } => check(r, works, known, days, minutes),
+            search,
+        } => check(r, works, known, days, minutes, search),
     }
 }
 
@@ -119,21 +126,26 @@ fn check(
     known: Option<PathBuf>,
     days: u64,
     minutes: Option<u64>,
+    search: bool,
 ) -> Result<(), String> {
     let works = records(&read_text(&works)?, "num")?;
     let known = match known {
         Some(p) if p.exists() => records(&read_text(&p)?, "url")?,
         _ => Vec::new(),
     };
-    let now = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
+    let sources = bmseeker::sources::Sources::from_config(r.config(), Vec::new());
+    let http = Client::new(r.config());
+    let mut c = Checks {
+        r,
+        known: &known,
+        days,
+        minutes,
+        start: now(),
+        tmp: std::env::temp_dir().join(format!("bmseeker-check-{}", std::process::id())),
+        seen: Vec::new(),
+        checked: 0,
+        kept: 0,
     };
-    let start = now();
-    let tmp = std::env::temp_dir().join(format!("bmseeker-check-{}", std::process::id()));
-    let (mut checked, mut kept) = (0, 0);
-    let mut seen: Vec<String> = Vec::new();
     for w in &works {
         let want = Want {
             title: s(w, "title"),
@@ -144,6 +156,7 @@ fn check(
             .and_then(|l| l.as_array())
             .cloned()
             .unwrap_or_default();
+        let mut got = false;
         for l in links {
             let url = l
                 .as_str()
@@ -151,56 +164,135 @@ fn check(
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            if !url.starts_with("http") || seen.contains(&url) {
-                continue;
+            got |= c.visit(&url, &want, None) == "archive";
+        }
+        let num = w.get("num").and_then(|n| n.as_u64()).unwrap_or(0);
+        if got || !search || c.time_up() {
+            continue;
+        }
+        // what the sources know for it: those found before, then theirs
+        let mut found: Vec<(String, String)> = known
+            .iter()
+            .filter(|k| k.get("num").and_then(|n| n.as_u64()) == Some(num))
+            .map(|k| (s(k, "url"), s(k, "source")))
+            .collect();
+        let q = bmseeker::sources::Query {
+            md5: String::new(),
+            want: want.clone(),
+            diff: false,
+        };
+        for (source, url) in bmseeker::net::run(&mut sources.find_all(&q), &http) {
+            if !found.iter().any(|(u, _)| *u == url) {
+                found.push((url, source.to_string()));
             }
-            seen.push(url.clone());
-            let before = known.iter().find(|k| s(k, "url") == url);
-            let fresh = before.is_some_and(|k| {
-                let at = k.get("at").and_then(|a| a.as_u64()).unwrap_or(0);
-                let keep = if s(k, "state") == "error" { 1 } else { days };
-                now().saturating_sub(at) < keep * 86_400
-            });
-            let time_up = minutes.is_some_and(|m| now() - start > m * 60);
-            if fresh || (time_up && before.is_some()) {
-                kept += 1;
-                r.out
-                    .json(&Value::Object(before.cloned().unwrap_or_default()));
-                continue;
+        }
+        for (url, source) in found {
+            if c.visit(&url, &want, Some((num, &source))) == "archive" {
+                break;
             }
-            if time_up {
-                continue;
-            }
-            let c = bmseeker::probe::probe(&url, Some(want.clone()), &tmp, &r.cx);
-            r.out.note(format!(
-                "{} | {:?} {:?} {} MB {} charts {} | {url}",
-                want.title,
-                c.state,
-                c.kind,
-                c.size >> 20,
-                c.charts,
-                c.error
-            ));
-            let mut v = serde_json::to_value(&c).map_err(|e| e.to_string())?;
-            if let Value::Object(o) = &mut v {
-                let mut rec = Map::new();
-                rec.insert("url".into(), json!(url));
-                rec.extend(std::mem::take(o));
-                rec.insert("at".into(), json!(now()));
-                v = Value::Object(rec);
-            }
-            r.out.json(&v);
-            checked += 1;
         }
     }
-    let _ = std::fs::remove_dir_all(&tmp);
+    // links found for works before, not looked at this time: kept
+    for k in &known {
+        if k.contains_key("source") && !c.seen.contains(&s(k, "url")) {
+            c.kept += 1;
+            r.out.json(&Value::Object(k.clone()));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&c.tmp);
     r.out.note(format!(
-        "{checked} checked, {kept} kept{}",
-        if minutes.is_some_and(|m| now() - start > m * 60) {
+        "{} checked, {} kept{}",
+        c.checked,
+        c.kept,
+        if c.time_up() {
             "; time is up, run again to go on"
         } else {
             ""
         }
     ));
     Ok(())
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// One check run: the links looked at, what was known of them.
+struct Checks<'a> {
+    r: &'a Run,
+    known: &'a [Map<String, Value>],
+    days: u64,
+    minutes: Option<u64>,
+    start: u64,
+    tmp: PathBuf,
+    seen: Vec<String>,
+    checked: usize,
+    kept: usize,
+}
+
+impl Checks<'_> {
+    fn time_up(&self) -> bool {
+        self.minutes.is_some_and(|m| now() - self.start > m * 60)
+    }
+
+    /// Check `url` (once a run; its earlier check when fresh enough, or
+    /// when time is up), writing its record (`found`: a source's link for
+    /// work `.0`). Its state, "" when not known.
+    fn visit(&mut self, url: &str, want: &Want, found: Option<(u64, &str)>) -> String {
+        if !url.starts_with("http") || self.seen.iter().any(|u| u == url) {
+            return String::new();
+        }
+        self.seen.push(url.to_string());
+        let before = self.known.iter().find(|k| s(k, "url") == url);
+        let fresh = before.is_some_and(|k| {
+            let at = k.get("at").and_then(|a| a.as_u64()).unwrap_or(0);
+            let keep = if s(k, "state") == "error" {
+                1
+            } else {
+                self.days
+            };
+            now().saturating_sub(at) < keep * 86_400
+        });
+        let time_up = self.time_up();
+        if fresh || (time_up && before.is_some()) {
+            let mut k = before.cloned().unwrap_or_default();
+            if let Some((num, source)) = found {
+                k.insert("num".into(), json!(num));
+                k.insert("source".into(), json!(source));
+            }
+            self.kept += 1;
+            self.r.out.json(&Value::Object(k.clone()));
+            return s(&k, "state");
+        }
+        if time_up {
+            return String::new();
+        }
+        let c = bmseeker::probe::probe(url, Some(want.clone()), &self.tmp, &self.r.cx);
+        self.r.out.note(format!(
+            "{}{} | {:?} {:?} {} MB {} charts {} | {url}",
+            want.title,
+            found.map(|(_, s)| format!(" ({s})")).unwrap_or_default(),
+            c.state,
+            c.kind,
+            c.size >> 20,
+            c.charts,
+            c.error
+        ));
+        let mut rec = Map::new();
+        rec.insert("url".into(), json!(url));
+        if let Ok(Value::Object(o)) = serde_json::to_value(&c) {
+            rec.extend(o);
+        }
+        rec.insert("at".into(), json!(now()));
+        if let Some((num, source)) = found {
+            rec.insert("num".into(), json!(num));
+            rec.insert("source".into(), json!(source));
+        }
+        self.checked += 1;
+        let state = s(&rec, "state");
+        self.r.out.json(&Value::Object(rec));
+        state
+    }
 }

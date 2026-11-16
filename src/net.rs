@@ -137,7 +137,30 @@ impl Http for Client {
         if !self.user_agent.is_empty() {
             req.headers.insert("User-Agent", &self.user_agent);
         }
-        answer(ehttp::fetch_blocking(&req))
+        fetch(&req)
+    }
+}
+
+/// `req`'s answer, its headers not looked at (ehttp gives up on one that
+/// is not ASCII, as a file name in Japanese).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn fetch(req: &ehttp::Request) -> Answer {
+    let mut r = req.fetch_raw_native(false).map_err(|e| e.to_string())?;
+    if !r.status().is_success() {
+        return Err(format!("HTTP {}", r.status().as_u16()));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut r.body_mut().as_reader(), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// A header's value as text: UTF-8, else each byte a Latin-1 character.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn header_text(v: &[u8]) -> String {
+    match std::str::from_utf8(v) {
+        Ok(t) => t.to_string(),
+        Err(_) => v.iter().map(|&b| b as char).collect(),
     }
 }
 
@@ -146,15 +169,6 @@ impl Http for Client {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn get(url: &str) -> Answer {
     Client::new(&crate::config::Config::default()).send(&Request::Get(url.into()))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn answer(r: Result<ehttp::Response, String>) -> Answer {
-    match r {
-        Ok(r) if r.ok => Ok(r.bytes),
-        Ok(r) => Err(format!("HTTP {}", r.status)),
-        Err(e) => Err(e),
-    }
 }
 
 /// `s` percent-encoded for a URL's query.

@@ -47,6 +47,8 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","
 
 예: `bmseeker event works 152 --overrides overrides.json > works.jsonl`,
 `bmseeker event check works.jsonl --known links.jsonl --minutes 290 > links.new.jsonl`.
+`event check --search`: 자기 링크가 하나도 안 되는 작품은 소스가 제목·아티스트로 아는 링크(BMS SEARCH,
+`--third-party`면 커뮤니티 아카이브도)까지 확인해 `"num"`, `"source"`를 붙여 씁니다.
 
 다른 링크를 찾는 곳(소스)은 설정의 `sources` 순서로 묻습니다: 난이도표(`table`, `--also`로 더), Stella 업로더
 목록(`stella`), TSV 목록(`tsv`, `--list`; `md5`, `url_diff`, `url`), [BMS SEARCH](https://bmssearch.net)(`bmssearch`,

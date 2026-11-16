@@ -165,10 +165,14 @@ pub fn download_to(url: &str, out: &Path) -> Result<(), String> {
 /// [`download_to`], and the file name the server gives
 /// (`Content-Disposition`), if any.
 fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, String> {
-    use ehttp::streaming::Part;
-    use std::ops::ControlFlow;
     use std::sync::mpsc::{channel, RecvTimeoutError};
     use std::time::{Duration, Instant};
+    /// What the request's thread sends: the answer's head, its data, its
+    /// end (an empty chunk), or what went wrong.
+    enum Part {
+        Head(Option<String>, Option<u64>),
+        Chunk(Vec<u8>),
+    }
     let file = std::fs::File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut w = std::io::BufWriter::new(file);
     let progress = crate::progress::current();
@@ -181,21 +185,37 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, S
     // the request on its own thread; its parts come here. Once this returns
     // the channel is closed and it stops at its next part.
     let (tx, rx) = channel::<Result<Part, String>>();
-    ehttp::streaming::fetch(
-        req,
-        Box::new(move |part| {
-            let end = match &part {
-                Err(_) => true,
-                Ok(Part::Chunk(c)) => c.is_empty(),
-                Ok(Part::Response(_)) => false,
-            };
-            if tx.send(part).is_err() || end {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
+    std::thread::spawn(move || {
+        let mut r = match req.fetch_raw_native(false) {
+            Ok(r) => r,
+            Err(e) => return drop(tx.send(Err(e.to_string()))),
+        };
+        if !r.status().is_success() {
+            return drop(tx.send(Err(format!("HTTP {}", r.status().as_u16()))));
+        }
+        let header = |k: &str| {
+            r.headers()
+                .get(k)
+                .map(|v| crate::net::header_text(v.as_bytes()))
+        };
+        let name = header("content-disposition").and_then(|d| disposition_name(&d));
+        let length = header("content-length").and_then(|l| l.trim().parse().ok());
+        if tx.send(Ok(Part::Head(name, length))).is_err() {
+            return;
+        }
+        let mut body = r.body_mut().as_reader();
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            match std::io::Read::read(&mut body, &mut buf) {
+                Ok(n) => {
+                    if tx.send(Ok(Part::Chunk(buf[..n].to_vec()))).is_err() || n == 0 {
+                        return;
+                    }
+                }
+                Err(e) => return drop(tx.send(Err(e.to_string()))),
             }
-        }),
-    );
+        }
+    });
     let mut last = Instant::now();
     let mut name = None;
     loop {
@@ -204,14 +224,10 @@ fn download(url: &str, out: &Path, user_agent: &str) -> Result<Option<String>, S
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Err(e)) => return Err(e),
-            Ok(Ok(Part::Response(r))) if !r.ok => return Err(format!("HTTP {}", r.status)),
-            Ok(Ok(Part::Response(r))) => {
-                name = r
-                    .headers
-                    .get("content-disposition")
-                    .and_then(disposition_name);
+            Ok(Ok(Part::Head(n, length))) => {
+                name = n;
                 if let Some(p) = &progress {
-                    p.start_file(r.headers.get("content-length").and_then(|l| l.parse().ok()));
+                    p.start_file(length);
                 }
                 last = Instant::now();
             }

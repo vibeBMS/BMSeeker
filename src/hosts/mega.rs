@@ -493,8 +493,7 @@ mod tests {
                     format!("{}&n={h}", Config::default().mega_api),
                     br#"[{"a":"f","c":1,"r":1,"ca":1}]"#.to_vec(),
                 );
-                let got = crate::net::answer(ehttp::fetch_blocking(&req))
-                    .and_then(|b| mega_nodes(&b, &key));
+                let got = crate::net::fetch(&req).and_then(|b| mega_nodes(&b, &key));
                 got.unwrap_or_else(|e| {
                     println!("{h}: {e}");
                     Vec::new()
