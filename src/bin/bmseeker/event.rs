@@ -14,7 +14,7 @@ use crate::io::{read_text, records, s};
 use crate::Run;
 use bmseeker::hosts::Want;
 use bmseeker::manbow;
-use bmseeker::net::{Client, Http, Request};
+use bmseeker::native::Native;
 use clap::Subcommand;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -67,9 +67,9 @@ pub fn event(r: &Run, c: Event) -> Result<(), String> {
 }
 
 fn works(r: &Run, venue: u32, overrides: Option<PathBuf>) -> Result<(), String> {
-    let http = Client::new(r.config());
+    let native = Native::new(&r.cx);
     let base = &r.config().manbow;
-    let page = |u: String| http.send(&Request::Get(u)).map(|b| manbow::decode(&b));
+    let page = |u: String| native.get(&u).map(|b| manbow::decode(&b));
     let works = manbow::works(
         base,
         venue,
@@ -135,7 +135,7 @@ fn check(
         _ => Vec::new(),
     };
     let sources = bmseeker::sources::Sources::from_config(r.config(), Vec::new());
-    let http = Client::new(r.config());
+    let native = Native::new(&r.cx);
     let mut c = Checks {
         r,
         known: &known,
@@ -182,7 +182,7 @@ fn check(
             want: want.clone(),
             ..Default::default()
         };
-        for (source, url) in bmseeker::net::run(&mut sources.find_all(&q), &http) {
+        for (source, url) in native.run(&mut sources.find_all(&q)) {
             if !found.iter().any(|(u, _)| *u == url) {
                 found.push((url, source.to_string()));
             }

@@ -129,19 +129,13 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
     }
     let file = tmp.join("download");
     let r = if crate::install::chart_link(link) {
-        crate::hosts::download(link, &file, cx)
-            .map_err(Fetch::Failed)
-            .and_then(|_| {
-                let page =
-                    std::fs::read(&file).is_ok_and(|b| b.trim_ascii_start().starts_with(b"<"));
-                if page {
-                    Err(Fetch::Page)
-                } else {
-                    Ok(())
-                }
-            })
+        let mut plain = crate::install::job::Acquire::plain(link, file.clone(), cx);
+        match crate::install::job::run_job(&mut plain, &crate::native::Native::new(cx)) {
+            Ok(g) if g.head.trim_ascii_start().starts_with(b"<") => Err(Fetch::Page),
+            r => r.map(|_| ()),
+        }
     } else {
-        crate::hosts::fetch(link, want, &file, false, cx).map(|_| ())
+        crate::native::fetch(link, want, &file, false, cx).map(|_| ())
     };
     let out = match r {
         Err(Fetch::Page) => Checked::state(State::Page, String::new()),

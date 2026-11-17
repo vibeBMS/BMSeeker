@@ -185,8 +185,8 @@ impl Task for Lookup {
 /// [`Lookup`] run natively (blocking).
 #[cfg(test)]
 pub(crate) fn lookup(md5: &str, want: &Want, config: &crate::config::Config) -> Vec<String> {
-    let mut l = Lookup::new(md5, want, &config.bmssearch_api);
-    crate::net::run(&mut l, &crate::net::Client::new(config))
+    let cx = crate::hosts::Context::new(config.clone());
+    crate::native::Native::new(&cx).run(&mut Lookup::new(md5, want, &config.bmssearch_api))
 }
 
 #[cfg(test)]

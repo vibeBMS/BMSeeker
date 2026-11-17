@@ -516,11 +516,16 @@ mod tests {
             };
             let (h, key, node) = mega_folder(link.trim()).unwrap();
             let files = seen.entry(h.clone()).or_insert_with(|| {
-                let req = ehttp::Request::post(
-                    format!("{}&n={h}", Config::default().mega_api),
-                    br#"[{"a":"f","c":1,"r":1,"ca":1}]"#.to_vec(),
-                );
-                let got = crate::net::get_bytes(&req).and_then(|b| mega_nodes(&b, &key));
+                use crate::install::job::{Driver, Effect, Fed};
+                let req = crate::net::Request::Post {
+                    url: format!("{}&n={h}", Config::default().mega_api),
+                    body: br#"[{"a":"f","c":1,"r":1,"ca":1}]"#.to_vec(),
+                };
+                let native = crate::native::Native::new(&Default::default());
+                let Fed::Http(got) = native.perform(Effect::Http(req)) else {
+                    unreachable!()
+                };
+                let got = got.and_then(|b| mega_nodes(&b, &key));
                 got.unwrap_or_else(|e| {
                     println!("{h}: {e}");
                     Vec::new()

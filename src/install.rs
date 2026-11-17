@@ -285,7 +285,7 @@ mod tests {
                 let store = std::sync::Arc::new(crate::fs::Disk);
                 let mut job =
                     job::Install::new(store, root.join("downloads"), lib, q, vec![l], &cx);
-                let done = job::run_job(&mut job, &crate::hosts::Native::new(&cx)).done;
+                let done = job::run_job(&mut job, &crate::native::Native::new(&cx)).done;
                 println!("{var}: {done:?}");
             }
         }

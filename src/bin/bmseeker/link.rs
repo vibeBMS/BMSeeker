@@ -1,9 +1,9 @@
 //! `link resolve`, `link get`, `song find`.
 
 use crate::{Run, SongArgs};
-use bmseeker::hosts::{self, Fetch, Resolver};
+use bmseeker::hosts::{Fetch, Resolver};
 use bmseeker::links::Links;
-use bmseeker::net::{run, Client};
+use bmseeker::native::{self, Native};
 use bmseeker::sources::{Query, Sources};
 use clap::Subcommand;
 use serde_json::json;
@@ -58,10 +58,10 @@ pub enum Song {
 pub fn link(r: &Run, c: Link) -> Result<(), String> {
     match c {
         Link::Resolve { links, song } => {
-            let http = Client::new(r.config());
+            let native = Native::new(&r.cx);
             for l in links {
                 let mut res = Resolver::new(&l, Some(song.want()), &r.cx);
-                let got = run(&mut res, &http);
+                let got = native.run(&mut res);
                 let host = res.host();
                 let rec = match &got {
                     Ok(t) => json!({"link": l, "state": "file", "host": host, "url": t.url,
@@ -131,7 +131,7 @@ fn get(
             return None;
         }
         tried.push(l.to_string());
-        match hosts::fetch(l, Some(song.want()), &tmp, any, &r.cx) {
+        match native::fetch(l, Some(song.want()), &tmp, any, &r.cx) {
             Ok(name) => Some((l.to_string(), name)),
             Err(Fetch::Page) => {
                 errors.push(format!("{l}: a page, not a file"));
@@ -154,7 +154,7 @@ fn get(
             want: song.want(),
             ..Default::default()
         };
-        let found = run(&mut sources.find_all(&q), &Client::new(r.config()));
+        let found = Native::new(&r.cx).run(&mut sources.find_all(&q));
         if found.is_empty() {
             errors.push("the sources know no other link".into());
         }
@@ -217,7 +217,7 @@ pub fn song(r: &Run, c: Song) -> Result<(), String> {
         diff,
         ..Default::default()
     };
-    for (source, url) in run(&mut sources.find_all(&q), &Client::new(r.config())) {
+    for (source, url) in Native::new(&r.cx).run(&mut sources.find_all(&q)) {
         r.out.record(json!({"source": source, "url": url}), || {
             format!("{source}\t{url}")
         });
@@ -228,11 +228,7 @@ pub fn song(r: &Run, c: Song) -> Result<(), String> {
 /// A list's bytes: a URL or a file (a failure noted, not fatal).
 pub fn fetch_list(at: &str, r: &Run) -> Option<Vec<u8>> {
     let got = if at.starts_with("http") {
-        bmseeker::net::Http::send(
-            &Client::new(r.config()),
-            &bmseeker::net::Request::Get(at.into()),
-        )
-        .map_err(|e| e.to_string())
+        Native::new(&r.cx).get(at).map_err(|e| e.to_string())
     } else {
         std::fs::read(at).map_err(|e| e.to_string())
     };

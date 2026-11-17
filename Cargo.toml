@@ -37,7 +37,6 @@ md-5 = "0.10"
 sha2 = "0.10"
 url = "2"
 web-time = "1"
-ehttp = "0.7"
 # archives (.zip; .7z; .rar: Apache-2.0 with the UnRAR license restriction;
 # .lzh: 0.6, 0.7 and later need a newer Rust)
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -51,14 +50,15 @@ aes = "0.9"
 # beatoraja table caches (.bmt) are gzip
 flate2 = "1"
 
+# Natively (desktop, iOS, Android): HTTP. 3.5 for its transport API (a
+# download's connection watching its progress), which may change in a minor
+# version.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "~3.5", default-features = false, features = ["rustls", "gzip"] }
+
 # Desktop: trust the OS certificate store (corporate proxies, custom CAs).
 [target.'cfg(any(windows, target_os = "macos", target_os = "linux"))'.dependencies]
-ehttp = { version = "0.7", features = ["platform-verifier"] }
-
-# Natively (desktop, iOS, Android): where a download's redirects ended
-# (ehttp's own client)
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ureq = { version = "3", default-features = false }
+ureq = { version = "~3.5", default-features = false, features = ["rustls", "gzip", "platform-verifier"] }
 
 [profile.release]
 opt-level = 3

@@ -1,8 +1,8 @@
 //! Requests as data. Whatever reads the network here is a [`Task`]: it says
 //! which request it needs next ([`Next::Ask`]) and is fed the answer, until
 //! it is done. A task does no I/O itself, so the same task runs natively
-//! ([`run`] with an [`Http`] such as [`Client`]), in a web page (through a
-//! CORS proxy, asynchronously) and in tests (canned answers).
+//! (`native::Native::run`), in a web page (through a CORS proxy,
+//! asynchronously) and in tests (canned answers).
 
 /// A request a task needs answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +106,16 @@ pub trait Task: Send {
 /// A task of any kind with this output.
 pub(crate) type BoxTask<T> = Box<dyn Task<Output = T>>;
 
+impl<T: Task + ?Sized> Task for &mut T {
+    type Output = T::Output;
+    fn start(&mut self) -> Next<T::Output> {
+        (**self).start()
+    }
+    fn feed(&mut self, answer: Answer) -> Next<T::Output> {
+        (**self).feed(answer)
+    }
+}
+
 impl<T> Task for BoxTask<T> {
     type Output = T;
     fn start(&mut self) -> Next<T> {
@@ -167,13 +177,15 @@ where
     })
 }
 
-/// What answers requests.
-pub trait Http {
+/// What answers requests (in tests).
+#[cfg(test)]
+pub(crate) trait Http {
     fn send(&self, request: &Request) -> Answer;
 }
 
 /// Run `task` to its end, asking `http`.
-pub fn run<T: Task + ?Sized>(task: &mut T, http: &dyn Http) -> T::Output {
+#[cfg(test)]
+pub(crate) fn run<T: Task + ?Sized>(task: &mut T, http: &dyn Http) -> T::Output {
     let mut next = task.start();
     loop {
         match next {
@@ -195,73 +207,6 @@ impl Http for Canned {
             .find(|(u, _)| u == r.url())
             .map(|(_, a)| a.clone())
             .unwrap_or_else(|| Err(format!("no answer for {}", r.url()).into()))
-    }
-}
-
-/// Blocking requests (desktop): the user agent of the [`Config`](crate::config::Config);
-/// retries stop once `progress` is cancelled.
-#[cfg(not(target_arch = "wasm32"))]
-pub struct Client {
-    pub user_agent: String,
-    pub progress: Option<std::sync::Arc<crate::progress::Progress>>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Client {
-    pub fn new(config: &crate::config::Config) -> Client {
-        Client {
-            user_agent: config.user_agent.clone(),
-            progress: None,
-        }
-    }
-
-    /// With `cx`'s settings and progress.
-    pub(crate) fn in_context(cx: &crate::hosts::Context) -> Client {
-        Client {
-            progress: cx.progress(),
-            ..Client::new(&cx.config)
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Http for Client {
-    fn send(&self, r: &Request) -> Answer {
-        let mut req = match r {
-            Request::Get(u) => ehttp::Request::get(u),
-            Request::Post { url, body } => {
-                let mut q = ehttp::Request::post(url, body.clone());
-                q.headers.insert("Content-Type", "application/json");
-                q
-            }
-        };
-        if !self.user_agent.is_empty() {
-            req.headers.insert("User-Agent", &self.user_agent);
-        }
-        crate::hosts::retrying(self.progress.as_deref(), || get_bytes(&req))
-    }
-}
-
-/// `req`'s answer, its headers not looked at (ehttp gives up on one that
-/// is not ASCII, as a file name in Japanese).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn get_bytes(req: &ehttp::Request) -> Answer {
-    let mut r = req.fetch_raw_native(false).map_err(|e| e.to_string())?;
-    if !r.status().is_success() {
-        return Err(NetError::Status(r.status().as_u16()));
-    }
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut r.body_mut().as_reader(), &mut bytes)
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
-}
-
-/// A header's value as text: UTF-8, else each byte a Latin-1 character.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn header_text(v: &[u8]) -> String {
-    match std::str::from_utf8(v) {
-        Ok(t) => t.to_string(),
-        Err(_) => v.iter().map(|&b| b as char).collect(),
     }
 }
 

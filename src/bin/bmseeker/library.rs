@@ -239,7 +239,7 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
             let lib = bmseeker::library::Library::new(&library);
             let store = std::sync::Arc::new(Disk);
             let job = install::job::Install::new(store, downloads, lib, q, links, &r.cx);
-            let native = bmseeker::hosts::Native::new(&r.cx);
+            let native = bmseeker::native::Native::new(&r.cx);
             let done = install::job::run_job(&mut job.sources(sources), &native).done;
             for d in &done {
                 r.out

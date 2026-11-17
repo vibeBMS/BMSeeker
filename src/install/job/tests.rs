@@ -15,6 +15,8 @@ pub(crate) struct Canned {
     pub(crate) done: RefCell<Vec<String>>,
     /// Cancel this progress at the first download.
     pub(crate) cancel: Option<Arc<Progress>>,
+    /// Requests answered 503 the first time.
+    pub(crate) busy: RefCell<Vec<String>>,
 }
 
 impl Canned {
@@ -28,6 +30,11 @@ impl Driver for Canned {
         match effect {
             Effect::Http(r) => {
                 self.done.borrow_mut().push(format!("get {}", r.url()));
+                let mut busy = self.busy.borrow_mut();
+                if let Some(i) = busy.iter().position(|u| u == r.url()) {
+                    busy.remove(i);
+                    return Fed::Http(Err(NetError::Status(503)));
+                }
                 let a = self.http.iter().find(|(u, _)| u == r.url());
                 Fed::Http(a.map_or_else(
                     || Err(format!("no answer for {}", r.url()).into()),
@@ -365,7 +372,7 @@ fn acquired_then_taken() {
 
 #[test]
 fn a_task_as_a_job() {
-    let mut j = TaskJob(crate::net::get_then("http://e.test/t".into(), |a| {
+    let mut j = TaskJob::new(crate::net::get_then("http://e.test/t".into(), |a| {
         a.is_ok()
     }));
     let d = Canned {
@@ -373,6 +380,76 @@ fn a_task_as_a_job() {
         ..Default::default()
     };
     assert!(run_job(&mut j, &d));
+}
+
+/// A link whose page names its file.
+struct Paged;
+
+impl Host for Paged {
+    fn name(&self) -> &'static str {
+        "paged"
+    }
+    fn accepts(&self, link: &Link) -> bool {
+        link.on("paged.test")
+    }
+    fn open(&self, l: &Link, _: Option<&Want>, _: &crate::config::Config) -> BoxTask<Resolved> {
+        crate::net::get_then(l.url.clone(), |a| match a {
+            Ok(b) => Resolved::File(Target::url(String::from_utf8(b).unwrap())),
+            Err(e) => Resolved::Failed(e),
+        })
+    }
+}
+
+/// A request (a task's, a link's page) or a download that the server is
+/// too busy for is tried again after a wait, by any driver.
+#[test]
+fn busy_servers_are_asked_again() {
+    let d = Canned {
+        http: vec![
+            ("http://e.test/t".into(), Ok(b"x".to_vec())),
+            (
+                "http://paged.test/p".into(),
+                Ok(b"http://f.test/a.zip".to_vec()),
+            ),
+        ],
+        busy: RefCell::new(vec!["http://e.test/t".into(), "http://paged.test/p".into()]),
+        ..Default::default()
+    };
+    let mut j = TaskJob::new(crate::net::get_then("http://e.test/t".into(), |a| a));
+    assert_eq!(run_job(&mut j, &d), Ok(b"x".to_vec()));
+    assert_eq!(
+        steps(&d),
+        ["get http://e.test/t", "sleep 3", "get http://e.test/t"]
+    );
+    d.done.borrow_mut().clear();
+    let mut hosts = Hosts::default();
+    hosts.first(Box::new(Paged));
+    let cx = Context {
+        hosts: Arc::new(hosts),
+        ..Default::default()
+    };
+    d.file("http://f.test/a.zip", status(502));
+    d.file("http://f.test/a.zip", zip_served());
+    assert!(acquire("http://paged.test/p", &cx, &d).is_ok());
+    assert_eq!(
+        steps(&d),
+        [
+            "get http://paged.test/p",
+            "sleep 3",
+            "get http://paged.test/p",
+            "download http://f.test/a.zip",
+            "sleep 3",
+            "download http://f.test/a.zip",
+        ]
+    );
+    // twice at most
+    let d = Canned {
+        busy: RefCell::new(vec!["http://e.test/t".into(); 3]),
+        ..Default::default()
+    };
+    let mut j = TaskJob::new(crate::net::get_then("http://e.test/t".into(), |a| a));
+    assert_eq!(run_job(&mut j, &d), Err(NetError::Status(503)));
+    assert_eq!(steps(&d).len(), 5);
 }
 
 /// Files one after another: a mirror's as it is (a page too), an author's

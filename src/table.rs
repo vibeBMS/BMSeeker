@@ -10,7 +10,7 @@
 //!    `level_order` and `course`,
 //! 3. a data JSON: an array of entries with `md5` / `sha256` and `level`.
 
-use crate::net::{Answer, Http, Next, Request, Task};
+use crate::net::{Answer, Next, Request, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -416,11 +416,6 @@ impl Task for TableLoader {
     }
 }
 
-/// Load a table, blocking on `http` (tools, tests).
-pub fn fetch_table(http: &dyn Http, url: &str) -> Result<DifficultyTable, TableError> {
-    crate::net::run(&mut TableLoader::new(url), http)
-}
-
 /// Compare levels naturally ("2" < "10", "10" < "10+", numbers before text).
 fn level_key(l: &str) -> (u8, f64, String) {
     let num: String = l
@@ -470,7 +465,7 @@ mod tests {
     use std::collections::HashMap;
 
     struct Mock(HashMap<String, String>);
-    impl Http for Mock {
+    impl crate::net::Http for Mock {
         fn send(&self, r: &Request) -> Answer {
             let url = r.url();
             self.0
@@ -513,7 +508,11 @@ mod tests {
             "https://ex.com/t/data/score.json".into(),
             r#"[{"md5":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","level":1,"title":"x"},{"sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","level":"10"},{"md5":"11111111111111111111111111111111","level":"2"},{"title":"no hash"}]"#.into(),
         );
-        let t = fetch_table(&Mock(m), "https://ex.com/t/table.html").unwrap();
+        let t = crate::net::run(
+            &mut TableLoader::new("https://ex.com/t/table.html"),
+            &Mock(m),
+        )
+        .unwrap();
         assert_eq!(t.header.symbol, "sl");
         assert_eq!(t.entries.len(), 3);
         assert_eq!(t.entries[0].md5, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");

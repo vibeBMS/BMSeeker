@@ -5,13 +5,12 @@ use crate::link::fetch_list;
 use crate::Run;
 use bmseeker::export;
 use bmseeker::fs::Disk;
-use bmseeker::hosts::Native;
 use bmseeker::install::job::run_job;
 use bmseeker::install::{self, Batch, Entry, EntryJob};
 use bmseeker::links::Links;
-use bmseeker::net::Client;
+use bmseeker::native::Native;
 use bmseeker::sources::Sources;
-use bmseeker::table::{fetch_table, DifficultyTable, TableEntry};
+use bmseeker::table::{DifficultyTable, TableEntry, TableLoader};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -218,7 +217,9 @@ fn missing(
 }
 
 pub fn load(r: &Run, url: &str) -> Result<DifficultyTable, String> {
-    fetch_table(&Client::new(r.config()), url).map_err(|e| e.to_string())
+    Native::new(&r.cx)
+        .run(&mut TableLoader::new(url))
+        .map_err(|e| e.to_string())
 }
 
 /// A table and the other links known for its charts (none with

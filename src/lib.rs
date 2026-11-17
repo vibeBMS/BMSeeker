@@ -26,11 +26,11 @@
 //! library somewhere other than a disk (the vibeBMS web build keeps it in
 //! memory). Whatever reads the network is a [`net::Task`] (it asks for
 //! requests and is fed the answers): [`hosts::Resolver`] (a link through
-//! its hosts' strategies), [`table::TableLoader`], BMS SEARCH's lookup;
-//! [`net::run`] runs one natively. A download is an
-//! [`install::job::Job`] (requests, files downloaded, waits as effects a
-//! platform's driver does): [`install::job::Acquire`] takes a link to its
-//! file. Every place read from is in [`config::Config`].
+//! its hosts' strategies), [`table::TableLoader`], BMS SEARCH's lookup. A
+//! download is an [`install::job::Job`] (requests, files downloaded, waits
+//! as effects a platform's driver does): [`install::job::Acquire`] takes a
+//! link to its file. Natively `native::Native` drives both. Every place
+//! read from is in [`config::Config`].
 
 #![warn(unreachable_pub)]
 
@@ -47,6 +47,8 @@ pub mod library;
 pub mod links;
 pub mod manbow;
 mod naming;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
 pub mod net;
 mod package;
 pub mod placement;

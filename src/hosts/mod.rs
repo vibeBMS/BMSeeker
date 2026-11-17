@@ -12,11 +12,9 @@
 //! [`Resolver`] walks a link through the hosts as a [`Task`]: it asks for
 //! requests and is fed the answers ([`crate::net`]), so it runs natively,
 //! in a web page and in tests alike. Downloading the file itself is the
-//! caller's ([`download`] natively).
+//! driver's ([`Native`](crate::native::Native) natively).
 
 mod browser;
-#[cfg(not(target_arch = "wasm32"))]
-mod download;
 pub(crate) mod drive;
 mod dropbox;
 mod key;
@@ -25,12 +23,6 @@ mod mega;
 mod uploader;
 mod venues;
 
-#[cfg(all(feature = "tools", not(target_arch = "wasm32")))]
-pub(crate) use download::download;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use download::retrying;
-#[cfg(not(target_arch = "wasm32"))]
-pub use download::{fetch, fetch_files, Native};
 pub(crate) use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;

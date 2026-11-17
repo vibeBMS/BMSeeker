@@ -1,15 +1,17 @@
 //! Downloads as data. A [`Job`] says what it needs done next (an
 //! [`Effect`]: a request, a file downloaded, a wait) and is fed what came
 //! of it ([`Fed`]), until it is done; it does no I/O itself. A platform's
-//! driver does the effects: natively [`run_job`] with the native transport
-//! (`hosts::Native`: a thread per download, stall and cancel); in a web
-//! page, through its fetch and proxy, asynchronously; in tests, canned.
-//! A [`Task`] (requests only) is a job too ([`TaskJob`]).
+//! driver does the effects: natively [`run_job`] with
+//! [`Native`](crate::native::Native); in a web page, through its fetch and
+//! proxy, asynchronously; in tests, canned. A [`Task`] (requests only) is a
+//! job too ([`TaskJob`]). A request or a download that meets a server's
+//! passing failure (busy; a gateway's error) is tried again here after a
+//! wait, so every driver retries alike.
 //!
 //! [`Acquire`]: one link to its file (the link resolved through the hosts,
 //! a page reached through redirects opened from where it ended, a page's
-//! other links tried when its file does not come, a server's passing
-//! failure tried again, Google Drive's quota told apart from a page).
+//! other links tried when its file does not come, Google Drive's quota told
+//! apart from a page).
 
 use super::{Batch, Done, Failure, Tries};
 use crate::fs::Store;
@@ -128,27 +130,73 @@ pub fn run_job<J: Job + ?Sized>(job: &mut J, driver: &dyn Driver) -> J::Output {
     }
 }
 
-/// A [`Task`] as a job: its requests are [`Effect::Http`].
-pub struct TaskJob<T>(pub T);
+/// Waits (seconds) before a request or a download is tried again after a
+/// server's passing failure ([`NetError::passing`]).
+const WAITS: [u64; 2] = [3, 10];
 
-fn asked<T>(next: Next<T>) -> Step<T> {
-    match next {
-        Next::Ask(r) => Step::Do(Effect::Http(r)),
-        Next::Done(out) => Step::Done(out),
+/// The waits of one request or download.
+#[derive(Default)]
+struct Again(usize);
+
+impl Again {
+    /// The wait before `e`'s request is tried again, if it is.
+    fn after(&mut self, e: &NetError) -> Option<Effect> {
+        let s = WAITS.get(self.0).filter(|_| e.passing())?;
+        self.0 += 1;
+        Some(Effect::Sleep(Duration::from_secs(*s)))
+    }
+}
+
+/// A [`Task`] as a job: its requests are [`Effect::Http`] (each tried
+/// again after a passing failure).
+pub struct TaskJob<T> {
+    task: T,
+    asked: Option<Request>,
+    again: Again,
+}
+
+impl<T: Task> TaskJob<T> {
+    pub fn new(task: T) -> TaskJob<T> {
+        TaskJob {
+            task,
+            asked: None,
+            again: Again::default(),
+        }
+    }
+
+    fn asked(&mut self, next: Next<T::Output>) -> Step<T::Output> {
+        match next {
+            Next::Ask(r) => {
+                self.again = Again::default();
+                self.asked = Some(r.clone());
+                Step::Do(Effect::Http(r))
+            }
+            Next::Done(out) => Step::Done(out),
+        }
     }
 }
 
 impl<T: Task> Job for TaskJob<T> {
     type Output = T::Output;
     fn start(&mut self) -> Step<T::Output> {
-        asked(self.0.start())
+        let next = self.task.start();
+        self.asked(next)
     }
     fn feed(&mut self, fed: Fed) -> Step<T::Output> {
-        match fed {
-            Fed::Http(a) => asked(self.0.feed(a)),
-            // (fed what it did not ask for: as a failed request)
-            _ => asked(self.0.feed(Err("not a request's answer".into()))),
-        }
+        let answer = match fed {
+            Fed::Http(Err(e)) => match self.again.after(&e) {
+                Some(wait) => return Step::Do(wait),
+                None => Err(e),
+            },
+            Fed::Http(a) => a,
+            Fed::Woke => match &self.asked {
+                Some(r) => return Step::Do(Effect::Http(r.clone())),
+                None => Err("not a request's answer".into()),
+            },
+            Fed::Downloaded(_) => Err("not a request's answer".into()),
+        };
+        let next = self.task.feed(answer);
+        self.asked(next)
     }
 }
 
@@ -164,10 +212,6 @@ pub struct Got {
 /// Times a download's redirects may lead it to another host.
 pub(crate) const MOVES: u8 = 2;
 
-/// Waits (seconds) before a download is tried again after a server's
-/// passing failure (busy; a gateway's error).
-const WAITS: [u64; 2] = [3, 10];
-
 /// One link to its file ([`Got`]); a link that is a page for a browser:
 /// [`Fetch::Page`].
 pub struct Acquire {
@@ -177,8 +221,10 @@ pub struct Acquire {
     slot: PathBuf,
     r: Resolver,
     target: Option<Target>,
+    /// The resolver's request being answered (asked again after a wait).
+    asked: Option<Request>,
     moves: u8,
-    waits: usize,
+    again: Again,
     /// The link is the file's own ([`Acquire::plain`]).
     plain: bool,
 }
@@ -201,8 +247,9 @@ impl Acquire {
             any,
             slot,
             target: None,
+            asked: None,
             moves: 0,
-            waits: 0,
+            again: Again::default(),
             plain: false,
         }
     }
@@ -217,11 +264,15 @@ impl Acquire {
     }
 
     fn resolved(&mut self, next: Next<Result<Target, Fetch>>) -> Step<Result<Got, Fetch>> {
+        self.again = Again::default();
         match next {
-            Next::Ask(r) => Step::Do(Effect::Http(r)),
+            Next::Ask(r) => {
+                self.asked = Some(r.clone());
+                Step::Do(Effect::Http(r))
+            }
             Next::Done(Ok(t)) => {
+                self.asked = None;
                 self.target = Some(t);
-                self.waits = 0;
                 self.download()
             }
             Next::Done(Err(e)) => self.failed(e, None),
@@ -270,9 +321,8 @@ impl Acquire {
     /// The file did not come: again after a wait, else as a page or a
     /// failure.
     fn unserved(&mut self, u: Unserved) -> Step<Result<Got, Fetch>> {
-        if u.error.passing() && self.waits < WAITS.len() && !self.cx.cancelled() {
-            self.waits += 1;
-            return Step::Do(Effect::Sleep(Duration::from_secs(WAITS[self.waits - 1])));
+        if let Some(wait) = self.again(&u.error) {
+            return Step::Do(wait);
         }
         let t = self.target.take().expect("a target");
         if self.cx.failures_are_pages && u.error != NetError::Cancelled {
@@ -280,6 +330,12 @@ impl Acquire {
             return self.failed(Fetch::Page, moved);
         }
         self.failed(Fetch::Failed(u.error), None)
+    }
+
+    /// The wait before what failed with `e` is tried again (not once
+    /// cancelled).
+    fn again(&mut self, e: &NetError) -> Option<Effect> {
+        self.again.after(e).filter(|_| !self.cx.cancelled())
     }
 
     /// What failed (`moved`: a page reached through redirects ended
@@ -323,13 +379,23 @@ impl Job for Acquire {
     }
     fn feed(&mut self, fed: Fed) -> Step<Self::Output> {
         match fed {
+            Fed::Http(Err(e)) => match self.again(&e) {
+                Some(wait) => Step::Do(wait),
+                None => {
+                    let next = self.r.feed(Err(e));
+                    self.resolved(next)
+                }
+            },
             Fed::Http(a) => {
                 let next = self.r.feed(a);
                 self.resolved(next)
             }
             Fed::Downloaded(Ok(s)) => self.served(s),
             Fed::Downloaded(Err(u)) => self.unserved(u),
-            Fed::Woke => self.download(),
+            Fed::Woke => match &self.asked {
+                Some(r) => Step::Do(Effect::Http(r.clone())),
+                None => self.download(),
+            },
         }
     }
 }
@@ -590,7 +656,7 @@ impl Install {
         };
         self.next_source += 1;
         self.checked = source.checked();
-        let mut find = TaskJob(source.find(&self.q));
+        let mut find = TaskJob::new(source.find(&self.q));
         let step = find.start();
         self.finding(find, step)
     }

@@ -664,46 +664,6 @@ mod tests {
         );
     }
 
-    /// A server on this machine for `files` (path, body), counting the
-    /// requests for each path.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn serve(
-        files: Vec<(&'static str, Vec<u8>)>,
-    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        use std::io::{Read, Write};
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log = asked.clone();
-        std::thread::spawn(move || {
-            for c in l.incoming() {
-                let Ok(mut c) = c else { return };
-                let mut buf = [0u8; 4096];
-                let n = c.read(&mut buf).unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
-                let path = head.split(' ').nth(1).unwrap_or("").to_string();
-                log.lock().unwrap().push(path.clone());
-                let reply = match files.iter().find(|(p, _)| *p == path) {
-                    Some((_, b)) => {
-                        let mut r = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            b.len()
-                        )
-                        .into_bytes();
-                        r.extend(b);
-                        r
-                    }
-                    None => {
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_vec()
-                    }
-                };
-                let _ = c.write_all(&reply);
-            }
-        });
-        (format!("http://{addr}"), asked)
-    }
-
     /// A table's run (audit defect 3): two entries of one song and a pack
     /// of separate charts for two songs. The song is downloaded once, the
     /// pack once; each chart ends in its song's folder.
@@ -720,28 +680,30 @@ mod tests {
             chart("Beta [N]", "bb"),
             chart("Beta [X]", "bb / obj: z"),
         );
-        let (base, asked) = serve(vec![
+        use crate::testkit::{serve, Reply};
+        let server = serve(vec![
             (
                 "/alpha.zip",
-                crate::testkit::zip(&[
+                Reply::ok(zip(&[
                     ("Alpha/n.bms", a_n.as_str()),
                     ("Alpha/01.ogg", "1"),
                     ("Alpha/02.ogg", "2"),
-                ]),
+                ])),
             ),
             (
                 "/beta.zip",
-                crate::testkit::zip(&[
+                Reply::ok(zip(&[
                     ("Beta/n.bms", b_n.as_str()),
                     ("Beta/01.ogg", "1"),
                     ("Beta/02.ogg", "2"),
-                ]),
+                ])),
             ),
             (
                 "/pack.zip",
-                crate::testkit::zip(&[("p/ax.bms", &a_x), ("p/bx.bms", &b_x)]),
+                Reply::ok(zip(&[("p/ax.bms", &a_x), ("p/bx.bms", &b_x)])),
             ),
         ]);
+        let base = &server.url;
         let root = crate::testkit::tmp("batch");
         let (library, downloads) = (root.join("bms"), root.join("bms/.dl"));
         let entry = |md5: &str, title: &str, artist: &str, song: &str, chart: &str| Entry {
@@ -784,14 +746,14 @@ mod tests {
         let mut lib = Library::scan(&Disk, &library);
         let mut batch = Batch::new(entries.iter().map(|e| e.md5.clone()));
         let cx = Context::default();
-        let native = crate::hosts::Native::new(&cx);
+        let native = crate::native::Native::new(&cx);
         for e in &entries {
             let dl = downloads.clone();
             let job = EntryJob::new(Arc::new(Disk), dl, lib, e.clone(), Sources::default(), &cx);
             let out = crate::install::job::run_job(&mut job.batch(batch), &native);
             (lib, batch) = (out.lib, out.batch);
         }
-        let mut asked = asked.lock().unwrap().clone();
+        let mut asked = server.asked();
         asked.sort();
         assert_eq!(asked, ["/alpha.zip", "/beta.zip", "/pack.zip"]);
         for e in &entries {
