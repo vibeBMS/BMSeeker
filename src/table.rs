@@ -223,6 +223,17 @@ pub fn parse_header(v: &Value) -> Result<TableHeader, TableError> {
     Ok(header)
 }
 
+/// A chart hash of `len` hex digits as tables write it (spaces around it,
+/// either case), lower case; empty when it is not one.
+fn hash(v: &str, len: usize) -> String {
+    let v = v.trim();
+    if v.len() == len && v.bytes().all(|b| b.is_ascii_hexdigit()) {
+        v.to_ascii_lowercase()
+    } else {
+        String::new()
+    }
+}
+
 pub fn parse_data(v: &Value) -> Result<Vec<TableEntry>, TableError> {
     let a = v
         .as_array()
@@ -232,8 +243,8 @@ pub fn parse_data(v: &Value) -> Result<Vec<TableEntry>, TableError> {
         .map(|o| {
             let get = |k: &str| o.get(k).map(s).unwrap_or_default();
             TableEntry {
-                md5: get("md5").to_ascii_lowercase(),
-                sha256: get("sha256").to_ascii_lowercase(),
+                md5: hash(&get("md5"), 32),
+                sha256: hash(&get("sha256"), 64),
                 level: get("level"),
                 title: get("title"),
                 artist: get("artist"),
@@ -503,12 +514,12 @@ mod tests {
         );
         m.insert(
             "https://ex.com/t/data/score.json".into(),
-            r#"[{"md5":"ABC","level":1,"title":"x"},{"sha256":"def","level":"10"},{"md5":"q","level":"2"},{"title":"no hash"}]"#.into(),
+            r#"[{"md5":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","level":1,"title":"x"},{"sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","level":"10"},{"md5":"11111111111111111111111111111111","level":"2"},{"title":"no hash"}]"#.into(),
         );
         let t = fetch_table(&Mock(m), "https://ex.com/t/table.html").unwrap();
         assert_eq!(t.header.symbol, "sl");
         assert_eq!(t.entries.len(), 3);
-        assert_eq!(t.entries[0].md5, "abc");
+        assert_eq!(t.entries[0].md5, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(t.levels(), vec!["0", "1", "2", "10"]);
         assert_eq!(t.header.courses.len(), 1);
         assert_eq!(t.header.courses[0].md5.len(), 2);
@@ -519,13 +530,21 @@ mod tests {
     #[test]
     fn the_songs_own_charts() {
         let v: Value = serde_json::from_str(
-            r#"[{"md5":"a","org_md5":"ABC"},{"md5":"b","org_md5":["x","Y"],"org_md5s":["y","z"]},{"md5":"c"}]"#,
+            r#"[{"md5":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","org_md5":"ABC"},{"md5":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","org_md5":["x","Y"],"org_md5s":["y","z"]},{"md5":"cccccccccccccccccccccccccccccccc"}]"#,
         )
         .unwrap();
         let e = parse_data(&v).unwrap();
         assert_eq!(e[0].org_md5, ["abc"]);
         assert_eq!(e[1].org_md5, ["x", "y", "z"]);
         assert!(e[2].org_md5.is_empty());
+        // hashes as tables write them: spaces, upper case; not a hash: no entry
+        let v: Value = serde_json::from_str(
+            r#"[{"md5":" 0123456789ABCDEF0123456789abcdef\n"},{"md5":"zz"},{"md5":"","sha256":"x"}]"#,
+        )
+        .unwrap();
+        let e = parse_data(&v).unwrap();
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].md5, "0123456789abcdef0123456789abcdef");
         // a table kept before there were any
         let old: TableEntry = serde_json::from_str(r#"{"md5":"a","sha256":"","level":"1","title":"","artist":"","url":"","url_diff":"","comment":""}"#).unwrap();
         assert!(old.org_md5.is_empty());
