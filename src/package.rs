@@ -193,7 +193,7 @@ fn uses_any(info: &ChartInfo, have: &HashSet<(Kind, String)>) -> bool {
 /// preview, which no chart need name).
 fn preview_sound(s: &Staged, files: &[usize]) -> bool {
     files.iter().any(|&f| {
-        let name = crate::placement::file_name(&s.members[f].rel).to_lowercase();
+        let name = crate::fs::file_name(&s.members[f].rel).to_lowercase();
         (name.starts_with("preview") || name.starts_with("_preview"))
             && class_of(&name) == Some(Kind::Audio)
     })

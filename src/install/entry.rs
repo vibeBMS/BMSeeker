@@ -166,7 +166,7 @@ impl Batch {
 }
 
 /// An entry's steps ([`entry_steps`]) one after another, each through its
-/// links and the sources ([`super::links_seen`]), into `lib` (what comes
+/// links and the sources ([`super::run`]), into `lib` (what comes
 /// in added to it); `batch`: what the run has had. `each`: what a step
 /// came to, as it comes.
 #[cfg(not(target_arch = "wasm32"))]
@@ -186,7 +186,7 @@ pub fn entry_in(
             continue;
         }
         let q = e.query(step.role);
-        last = super::links_seen(downloads, lib, &q, &step.links, sources, batch, cx);
+        last = super::run(downloads, lib, &q, &step.links, sources, batch, cx);
         each(&step, &last);
         out.extend(last.iter().cloned());
     }

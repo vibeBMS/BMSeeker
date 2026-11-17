@@ -333,7 +333,7 @@ impl Sink for Into<'_> {
 }
 
 /// Whether a file is an archive by its name.
-fn is_archive(p: &Path) -> bool {
+pub fn is_archive(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),

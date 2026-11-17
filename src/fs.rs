@@ -70,6 +70,23 @@ pub fn system_time(mtime: i64) -> Option<std::time::SystemTime> {
     std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
 }
 
+/// A path's file name (lossy), empty when it has none.
+pub fn file_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Copy the file `from` to `to` in `store` (its folders made), keeping its
+/// time.
+pub fn copy(store: &dyn Store, from: &Path, to: &Path) -> io::Result<()> {
+    let bytes = store.read(from)?;
+    let mtime = store.stamp(from).map(|(t, _)| t);
+    let mut w = store.create(to, mtime)?;
+    w.write_all(&bytes)?;
+    w.flush()
+}
+
 /// `std::fs`.
 pub struct Disk;
 

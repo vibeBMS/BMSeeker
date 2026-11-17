@@ -146,7 +146,7 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
                 }
             })
     } else {
-        crate::hosts::fetch(link, want, &file, cx)
+        crate::hosts::fetch(link, want, &file, false, cx).map(|_| ())
     };
     let out = match r {
         Err(Fetch::Page) => Checked::state(State::Page, String::new()),
@@ -169,7 +169,12 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
             } else {
                 let format = crate::hosts::sniff(&file).unwrap_or("zip").to_string();
                 let dir: PathBuf = tmp.join("unpacked");
-                match crate::import::unpack_into(&file, &format!("a.{format}"), &dir) {
+                match crate::import::unpack_into(
+                    &crate::fs::Disk,
+                    &file,
+                    &format!("a.{format}"),
+                    &dir,
+                ) {
                     Ok(_) => {
                         let _ = std::fs::remove_file(&file);
                         let (kind, charts, title) = classify(&dir);

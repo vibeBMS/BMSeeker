@@ -7,10 +7,8 @@
 //! read its library's charts when it likes).
 
 use crate::chart::ChartInfo;
-use crate::fs::Fs;
-use crate::placement::{
-    class_of, file_name, is_chart, key, rel, song_folders_except, Class, FolderInfo,
-};
+use crate::fs::{file_name, Fs};
+use crate::placement::{class_of, is_chart, key, rel, song_folders_except, Class, FolderInfo};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -436,7 +434,7 @@ mod tests {
     /// page's): their hashes, titles and artists.
     #[test]
     fn from_a_catalog() {
-        use crate::placement::{locate_in, Located, Rules};
+        use crate::placement::{locate, Located, Rules};
         // the library's charts cannot be read; its folders can be listed
         struct Unread(Mem);
         impl Fs for Unread {
@@ -466,7 +464,7 @@ mod tests {
             0,
         );
         let at = |lib: &Library| {
-            locate_in(&fs, Path::new("dl/x.bms"), lib, false, Rules::default()).map(|r| r.0)
+            locate(&fs, Path::new("dl/x.bms"), lib, false, Rules::default()).map(|r| r.0)
         };
         // read from the files: its song's charts unread, so not sure
         assert!(matches!(

@@ -12,17 +12,12 @@ use crate::unpack::Blob;
 use std::io::{Read, Write};
 use std::path::Path;
 
-/// Download the archive `link` leads to into `out`.
-pub fn fetch(link: &str, want: Option<Want>, out: &Path, cx: &Context) -> Result<(), Fetch> {
-    fetch_named(link, want, out, false, cx).map(|_| ())
-}
-
-/// [`fetch`], and the file's name where it came from (the folder's
-/// listing, MEGA, the mirror, the server, the link). With `any`, a file
-/// that is not an archive is kept too if it is not a page: a chart or a
-/// movie posted on its own (an event's add-on). [`Acquire`] run with the
-/// native transport ([`Native`]).
-pub fn fetch_named(
+/// Download the archive `link` leads to into `out`: its file name where it
+/// came from (the folder's listing, MEGA, the mirror, the server, the
+/// link). With `any`, a file that is not an archive is kept too if it is
+/// not a page: a chart or a movie posted on its own (an event's add-on).
+/// [`Acquire`] run with the native transport ([`Native`]).
+pub fn fetch(
     link: &str,
     want: Option<Want>,
     out: &Path,
@@ -190,11 +185,6 @@ pub fn download(url: &str, out: &Path, cx: &Context) -> Result<(), NetError> {
     retrying(p, || stream(url, out, &cx.config.user_agent, p)).map(|_| ())
 }
 
-/// [`download`] with the default settings.
-pub fn download_to(url: &str, out: &Path) -> Result<(), NetError> {
-    download(url, out, &Context::default())
-}
-
 /// `f` again after a server's passing failure (busy, or a gateway's error:
 /// manbow answers 502 and 503 at times), twice at most, waiting longer each
 /// time (not once `progress` is cancelled).
@@ -356,9 +346,9 @@ mod tests {
     fn fetch_url() {
         let url = std::env::var("VIBEBMS_FETCH").expect("VIBEBMS_FETCH");
         let out = std::env::temp_dir().join("vibebms-fetch");
-        match fetch(&url, None, &out, &Context::default()) {
-            Ok(()) => println!(
-                "OK {:?} {} bytes",
+        match fetch(&url, None, &out, false, &Context::default()) {
+            Ok(name) => println!(
+                "OK {name} {:?} {} bytes",
                 sniff(&out),
                 std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0)
             ),

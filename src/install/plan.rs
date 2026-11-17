@@ -7,7 +7,7 @@
 
 use super::{md5_hex, safe_name, unique, Done, Failure};
 use crate::chart::ChartInfo;
-use crate::fs::{Fs, Store};
+use crate::fs::{file_name, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
 use crate::package::{classify, split, Class, Package, Staged};
@@ -255,7 +255,7 @@ fn label(fs: &dyn Fs, lib: &Library, d: &Path) -> String {
         .first()
         .map(|c| format!("{} — {}", c.title, c.artist))
         .unwrap_or_default();
-    format!("{song}  ({})", placement::file_name(d))
+    format!("{song}  ({})", file_name(d))
 }
 
 /// The package's files into `dest` as they are laid out in it (the
@@ -294,7 +294,7 @@ fn waiting(s: &Staged, charts: &[usize], outcome: Outcome) -> Item {
             .iter()
             .map(|&c| {
                 let rel = s.chart_rel(c);
-                (s.root.join(rel), PathBuf::from(placement::file_name(rel)))
+                (s.root.join(rel), PathBuf::from(file_name(rel)))
             })
             .collect(),
     }
@@ -384,13 +384,13 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         .map(|(c, l, alone)| match l {
             Located::Move(to) => {
                 let rel = s.chart_rel(c);
-                let mut moves = vec![(s.root.join(rel), to.join(placement::file_name(rel)))];
+                let mut moves = vec![(s.root.join(rel), to.join(file_name(rel)))];
                 if !alone {
                     let dir = s.chart_dir(c);
                     for &f in &p.files {
                         let m = &s.members[f].rel;
                         if m.parent() == Some(dir) && !is_chart(m) && taken.insert(f) {
-                            moves.push((s.root.join(m), to.join(placement::file_name(m))));
+                            moves.push((s.root.join(m), to.join(file_name(m))));
                         }
                     }
                 }
@@ -442,7 +442,7 @@ fn new_item(
     files.extend((0..s.members.len()).filter(|f| !packed.contains(f)));
     files.sort_unstable();
     files.dedup();
-    let named = |stem: &str| placement::song_folder_in(fs, lib, stem, &charts);
+    let named = |stem: &str| placement::song_folder(fs, lib, stem, &charts);
     let (dest, strip) = match &req.naming {
         Naming::Named(n) => (named(n), None),
         Naming::Download => {
@@ -595,14 +595,7 @@ fn move_file(store: &dyn Store, from: &Path, to: &Path) -> bool {
     if store.rename(from, to) {
         return true;
     }
-    let copied = (|| -> std::io::Result<()> {
-        let bytes = store.read(from)?;
-        let mtime = store.stamp(from).map(|(t, _)| t);
-        let mut w = store.create(to, mtime)?;
-        w.write_all(&bytes)?;
-        w.flush()
-    })();
-    copied.is_ok() && {
+    crate::fs::copy(store, from, to).is_ok() && {
         store.remove(from);
         true
     }
@@ -733,7 +726,7 @@ pub(crate) fn taken(
     };
     let mut req = req.clone();
     if req.file.is_none() {
-        req.file = file.as_deref().map(placement::file_name);
+        req.file = file.as_deref().map(file_name);
     }
     let stage = downloads.join(format!(".take-{}", unique()));
     let loose = req.file.as_deref().filter(|n| is_chart(Path::new(n)));
@@ -763,7 +756,7 @@ pub(crate) fn taken(
             Outcome::Owned(_) => true,
             _ => false,
         }) {
-            let placed = super::place_waiting_in(fs, downloads, lib);
+            let placed = super::place_waiting(fs, downloads, lib);
             done.extend(placed.into_iter().map(Done::Placed));
         }
     }
@@ -784,7 +777,7 @@ fn put_loose(store: &dyn Store, blob: Blob, to: &Path) -> Result<Vec<Member>, St
         return Err(format!("{}: could not be written", to.display()));
     }
     Ok(vec![Member {
-        rel: PathBuf::from(placement::file_name(to)),
+        rel: PathBuf::from(file_name(to)),
         size: store.stamp(to).map_or(0, |s| s.1),
         mtime: None,
     }])

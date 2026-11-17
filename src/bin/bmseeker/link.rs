@@ -131,7 +131,7 @@ fn get(
             return None;
         }
         tried.push(l.to_string());
-        match hosts::fetch_named(l, Some(song.want()), &tmp, any, &r.cx) {
+        match hosts::fetch(l, Some(song.want()), &tmp, any, &r.cx) {
             Ok(name) => Some((l.to_string(), name)),
             Err(Fetch::Page) => {
                 errors.push(format!("{l}: a page, not a file"));

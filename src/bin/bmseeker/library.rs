@@ -97,7 +97,7 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 ..Default::default()
             };
             let lib = &mut scan(&library, &r.config().downloads);
-            let got = bmseeker::import::import_as(&Disk, &file, lib, &req)?;
+            let got = bmseeker::import::import(&Disk, &file, lib, &req)?;
             let (v, text) = match &got {
                 Imported::Unpacked(d, n) => (
                     json!({"state": "added", "path": d, "files": n}),
@@ -164,9 +164,14 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
             }
             let downloads = r.config().downloads.clone();
             let siblings = !chart.parent().is_some_and(|p| p.ends_with(&downloads));
-            let (located, candidates) =
-                placement::locate_with(&Disk, &chart, &library, siblings, rules)
-                    .ok_or_else(|| format!("{}: not a chart", chart.display()))?;
+            let (located, candidates) = placement::locate(
+                &Disk,
+                &chart,
+                &bmseeker::library::Library::new(&library),
+                siblings,
+                rules,
+            )
+            .ok_or_else(|| format!("{}: not a chart", chart.display()))?;
             r.out
                 .record(located_record(&chart, &located), || format!("{located:?}"));
             for (c, label) in candidates.iter().take(10) {
@@ -187,11 +192,10 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 .filter(|p| placement::is_chart(p))
                 .collect();
             // the library read once for all of them
-            let index = placement::LibraryIndex::new(&library);
+            let index = bmseeker::library::Library::new(&library);
             for c in &charts {
-                let (located, best) =
-                    placement::locate_in(&Disk, c, &index, false, Rules::default())
-                        .unwrap_or((Located::NoSong, Vec::new()));
+                let (located, best) = placement::locate(&Disk, c, &index, false, Rules::default())
+                    .unwrap_or((Located::NoSong, Vec::new()));
                 let mut v = located_record(c, &located);
                 if let Some((b, l)) = best.first() {
                     v["best"] = json!({"folder": b.dir, "label": l, "coverage": b.coverage});
@@ -231,7 +235,9 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 ..Default::default()
             };
             let downloads = library.join(&r.config().downloads);
-            let done = install::links(&downloads, &library, &q, &links, &sources, &r.cx);
+            let lib = &mut bmseeker::library::Library::new(&library);
+            let batch = &mut Default::default();
+            let done = install::run(&downloads, lib, &q, &links, &sources, batch, &r.cx);
             for d in &done {
                 r.out
                     .record(done_record(&song.title, d), || done_text(&song.title, d));

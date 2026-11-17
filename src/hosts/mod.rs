@@ -28,7 +28,7 @@ mod venues;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use download::retrying;
 #[cfg(not(target_arch = "wasm32"))]
-pub use download::{download, download_to, fetch, fetch_files, fetch_named, sniff, Native};
+pub use download::{download, fetch, fetch_files, sniff, Native};
 pub use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;

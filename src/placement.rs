@@ -13,7 +13,8 @@
 //! nothing. Else the user picks among the best candidates (songs alike
 //! first).
 
-use crate::fs::Fs;
+use crate::fs::{file_name, Fs};
+use crate::library::Library;
 use crate::titles;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -424,12 +425,6 @@ pub fn is_chart(p: &std::path::Path) -> bool {
         .is_some_and(|e| CHART_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-pub(crate) fn file_name(p: &std::path::Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 /// `p`'s path in `dir`, `/` between its parts.
 pub(crate) fn rel(p: &Path, dir: &Path) -> String {
     p.strip_prefix(dir)
@@ -547,40 +542,13 @@ pub fn chart_info(fs: &dyn Fs, path: &std::path::Path) -> Option<ChartInfo> {
     crate::chart::info(path, &bytes)
 }
 
-/// Where `chart` belongs among the folders below `library` (see [`place`]),
-/// the files beside it having come with it.
-pub fn locate(fs: &dyn Fs, chart: &Path, library: &Path) -> Option<Located> {
-    locate_with(fs, chart, library, true, Rules::default()).map(|(l, _)| l)
-}
-
-/// [`locate`] for a chart that came on its own, into a folder of downloads
-/// (the files beside it are not its).
-pub fn locate_loose(fs: &dyn Fs, chart: &Path, library: &Path) -> Option<Located> {
-    locate_with(fs, chart, library, false, Rules::default()).map(|(l, _)| l)
-}
-
-/// The library's songs' folders, read once for many charts: a
-/// [`Library`](crate::library::Library).
-pub type LibraryIndex = crate::library::Library;
-
-/// [`locate`] (`siblings`: the files beside the chart came with it) by
-/// `rules`, with the candidates (for a person to look at).
-pub fn locate_with(
+/// Where `chart` belongs among the folders of `lib` (see [`place`]), with
+/// the candidates (for a person to look at); `siblings`: the files beside
+/// it came with it (else it came on its own, into a folder of downloads).
+pub fn locate(
     fs: &dyn Fs,
     chart: &Path,
-    library: &Path,
-    siblings: bool,
-    rules: Rules,
-) -> Option<(Located, Vec<(Candidate, String)>)> {
-    locate_in(fs, chart, &LibraryIndex::new(library), siblings, rules)
-}
-
-/// [`locate_with`] among the folders of `index` (read once for many
-/// charts).
-pub fn locate_in(
-    fs: &dyn Fs,
-    chart: &Path,
-    index: &LibraryIndex,
+    lib: &Library,
     siblings: bool,
     rules: Rules,
 ) -> Option<(Located, Vec<(Candidate, String)>)> {
@@ -597,7 +565,7 @@ pub fn locate_in(
         return Some((Located::Here, Vec::new()));
     }
     let bundled: Vec<String> = below.into_iter().filter(|f| !f.contains('/')).collect();
-    Some(locate_by(fs, &info, &bundled, &here, index, rules))
+    Some(locate_by(fs, &info, &bundled, &here, lib, rules))
 }
 
 /// Where the chart `info`, now in the folder `here` with the files
@@ -609,7 +577,7 @@ pub fn locate_by(
     info: &ChartInfo,
     bundled: &[String],
     here: &Path,
-    index: &LibraryIndex,
+    index: &Library,
     rules: Rules,
 ) -> (Located, Vec<(Candidate, String)>) {
     // the folders with any of its sounds; their charts read for the best
@@ -658,38 +626,11 @@ pub fn locate_by(
     (located, listed)
 }
 
-/// The charts below `dir` (a few levels), read.
-pub fn charts_below(fs: &dyn Fs, dir: &Path) -> Vec<ChartInfo> {
-    let mut out = Vec::new();
-    let mut todo = vec![(dir.to_path_buf(), 0)];
-    while let Some((d, depth)) = todo.pop() {
-        for e in fs.read_dir(&d).unwrap_or_default() {
-            if e.is_dir && depth < 8 {
-                todo.push((e.path, depth + 1));
-            } else if !e.is_dir && is_chart(&e.path) {
-                out.extend(chart_info(fs, &e.path));
-            }
-        }
-    }
-    out
-}
-
-/// The folder below `library` for a song's archive named `stem` whose
+/// The folder below `lib`'s root for a song's archive named `stem` whose
 /// charts are `charts`: `stem` when it is free or holds the same song (a
-/// chart of the same title and artist), else `stem (2)`, `stem (3)`...
-/// (another song of that title).
-pub fn song_folder(fs: &dyn Fs, library: &Path, stem: &str, charts: &[ChartInfo]) -> PathBuf {
-    free_folder(fs, library, stem, charts, |d| charts_below(fs, d))
-}
-
-/// [`song_folder`] in `lib` (its charts' titles and artists as it knows
-/// them).
-pub fn song_folder_in(
-    fs: &dyn Fs,
-    lib: &LibraryIndex,
-    stem: &str,
-    charts: &[ChartInfo],
-) -> PathBuf {
+/// chart of the same title and artist, as `lib` knows them), else
+/// `stem (2)`, `stem (3)`... (another song of that title).
+pub fn song_folder(fs: &dyn Fs, lib: &Library, stem: &str, charts: &[ChartInfo]) -> PathBuf {
     free_folder(fs, lib.root(), stem, charts, |d| lib.charts_below(fs, d))
 }
 
@@ -998,7 +939,7 @@ mod tests {
             );
         }
         let fs = Counting(Default::default());
-        let placed = crate::install::place_waiting(&fs, &downloads, &library);
+        let placed = crate::install::place_waiting(&fs, &downloads, &mut Library::new(&library));
         assert_eq!(placed.len(), 5, "{placed:?}");
         assert!(library.join("Song4/c4.bms").is_file());
         // the downloads, the library and its 10 folders: once each
@@ -1023,9 +964,9 @@ mod tests {
             &chart,
             "#TITLE Song [X]\n#ARTIST x\n#WAV01 01.wav\n#WAV02 02.wav\n",
         );
-        let mut index = LibraryIndex::new(&library);
-        let at = |index: &LibraryIndex| {
-            locate_in(&crate::fs::Disk, &chart, index, false, Rules::default()).map(|(l, _)| l)
+        let mut index = Library::new(&library);
+        let at = |index: &Library| {
+            locate(&crate::fs::Disk, &chart, index, false, Rules::default()).map(|(l, _)| l)
         };
         assert_eq!(at(&index), Some(Located::NoSong));
         put(&song.join("02.ogg"), "x");
@@ -1054,7 +995,8 @@ mod tests {
             &diff,
             "#TITLE Song [EX]\n#ARTIST a\n#WAV01 sound/kick.wav\n#WAV02 sound\\snare.wav\n",
         );
-        let at = |c: &Path| locate_with(&Disk, c, &lib, false, Rules::default()).map(|r| r.0);
+        let at =
+            |c: &Path| locate(&Disk, c, &Library::new(&lib), false, Rules::default()).map(|r| r.0);
         assert_eq!(at(&diff), Some(Located::Move(song.clone())));
         // the same names beside its charts are not those in `sound/`
         let flat = dl.join("flat.bms");
@@ -1065,7 +1007,14 @@ mod tests {
         assert_eq!(at(&flat), Some(Located::NoSong));
         // a song's archive with its sounds in `sound/`: they are beside it
         assert_eq!(
-            locate(&Disk, &song.join("song.bms"), &lib),
+            locate(
+                &Disk,
+                &song.join("song.bms"),
+                &Library::new(&lib),
+                true,
+                Rules::default()
+            )
+            .map(|r| r.0),
             Some(Located::Here)
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1086,13 +1035,13 @@ mod tests {
             &diff,
             "#TITLE Song [EX]\n#ARTIST a\n#WAV01 01.wav\n#WAV02 02.wav\n",
         );
-        let r = locate_with(&Disk, &diff, &lib, false, Rules::default()).map(|r| r.0);
+        let r = locate(&Disk, &diff, &Library::new(&lib), false, Rules::default()).map(|r| r.0);
         assert_eq!(r, Some(Located::NoSong));
         // a folder of files that are no chart's is no song
         let loose = lib.join("Loose");
         put(&loose.join("01.ogg"), "x");
         put(&loose.join("02.ogg"), "x");
-        let r = locate_with(&Disk, &diff, &lib, false, Rules::default()).map(|r| r.0);
+        let r = locate(&Disk, &diff, &Library::new(&lib), false, Rules::default()).map(|r| r.0);
         assert_eq!(r, Some(Located::NoSong));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1211,7 +1160,7 @@ mod tests {
         assert_eq!(s[&lib.join("Pack/Song")], ["a.bms", "sound/x.ogg"]);
         assert_eq!(s[&lib.join("Pack/Song/Other")], ["b.bms", "y.ogg"]);
         assert_eq!(s.len(), 2, "{s:?}");
-        let mut index = LibraryIndex::new(&lib);
+        let mut index = Library::new(&lib);
         // (read before the files come)
         assert!(index.files(&Disk, &lib.join("Pack/Song")).is_some());
         index.add(&lib.join("Pack/Song/sound/z.ogg"), None);
