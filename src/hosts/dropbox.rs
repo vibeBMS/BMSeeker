@@ -6,7 +6,7 @@ use super::{Host, Link, Resolved, Target, Want};
 use crate::config::Config;
 use crate::net::{BoxTask, Ready};
 
-pub struct Dropbox;
+pub(crate) struct Dropbox;
 
 impl Host for Dropbox {
     fn name(&self) -> &'static str {

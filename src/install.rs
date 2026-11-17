@@ -7,12 +7,12 @@ use crate::fs::Fs;
 use crate::library::Library;
 use std::path::{Path, PathBuf};
 
-pub mod entry;
+pub(crate) mod entry;
 pub mod job;
-pub mod plan;
+pub(crate) mod plan;
 
-pub use entry::{entry_steps, Batch, Entry, EntryJob, EntryStep, When};
-pub use plan::{apply, take, Item, Naming, Outcome, Request, Role};
+pub use entry::{Batch, Entry, EntryJob};
+pub use plan::{take, Naming, Request, Role};
 
 /// What became of one link.
 #[derive(Clone, Debug)]
@@ -99,13 +99,13 @@ pub fn md5_hex(bytes: &[u8]) -> String {
 }
 
 /// A link to a chart file of its own (`….bms` and the like).
-pub fn chart_link(u: &str) -> bool {
+pub(crate) fn chart_link(u: &str) -> bool {
     let path = u.split(['?', '#']).next().unwrap_or("");
     crate::placement::is_chart(Path::new(path))
 }
 
 /// The chart's file name in its link.
-pub fn chart_name(u: &str) -> String {
+pub(crate) fn chart_name(u: &str) -> String {
     let path = u.split(['?', '#']).next().unwrap_or("");
     let name = path.rsplit('/').next().unwrap_or("chart.bms");
     safe_name(&crate::net::percent_decode(name))
@@ -187,14 +187,6 @@ pub(crate) fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) ->
         && same_artist(&c.artist, &want.artist)
 }
 
-/// The folders a song's outcome added.
-pub fn added(done: &[Done]) -> impl Iterator<Item = &Path> {
-    done.iter().filter_map(|d| match d {
-        Done::Added(dir, _) => Some(dir.as_path()),
-        _ => None,
-    })
-}
-
 /// Whether a link's outcome brought the song (or its chart) in, or found
 /// it in the library already.
 pub fn got(done: &[Done]) -> bool {
@@ -210,14 +202,14 @@ pub fn got(done: &[Done]) -> bool {
 /// in; else the first page among them (to open in a browser); else the last
 /// failure.
 #[derive(Default)]
-pub struct Tries {
+pub(crate) struct Tries {
     page: Option<String>,
     failed: Option<Failure>,
 }
 
 impl Tries {
     /// A link's outcome: Some(it) once one brought the file in.
-    pub fn record(&mut self, done: Vec<Done>) -> Option<Vec<Done>> {
+    pub(crate) fn record(&mut self, done: Vec<Done>) -> Option<Vec<Done>> {
         if got(&done) {
             return Some(done);
         }
@@ -234,7 +226,7 @@ impl Tries {
     }
 
     /// When no link brought it in.
-    pub fn end(self) -> Vec<Done> {
+    pub(crate) fn end(self) -> Vec<Done> {
         vec![match (self.page, self.failed) {
             (Some(p), _) => Done::Page(p),
             (None, Some(e)) => Done::Failed(e),

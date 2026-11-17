@@ -140,7 +140,7 @@ fn text(s: &str) -> String {
 
 /// `[(label, url)]` of a URL list's address cell: a line's own text, or the
 /// last heading lines above it.
-pub fn links_of(cell: &str) -> Vec<(String, String)> {
+pub(crate) fn links_of(cell: &str) -> Vec<(String, String)> {
     static BR: LazyLock<Pattern> = LazyLock::new(|| re(r"<br\s*/?>"));
     static HREF: LazyLock<Pattern> = LazyLock::new(|| Pattern::new(r#"href="https?://[^"]+""#));
     let mut out: Vec<(String, String)> = Vec::new();
@@ -257,7 +257,7 @@ fn first_max<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> i32) -> 
 
 /// Which of a work's `(label, URL)` links is its main archive, which are
 /// add-ons, and which mirror them.
-pub fn pick(links: &[(String, String)]) -> Pick {
+pub(crate) fn pick(links: &[(String, String)]) -> Pick {
     if links.is_empty() {
         return Pick {
             review: "no link".into(),
@@ -345,7 +345,7 @@ pub fn pick(links: &[(String, String)]) -> Pick {
 }
 
 /// A work's page on the venue: (event, work number).
-pub fn work_page(url: &str) -> Option<(u32, u32)> {
+pub(crate) fn work_page(url: &str) -> Option<(u32, u32)> {
     if !url.contains("manbow.nothing.sh/event/event.cgi") {
         return None;
     }

@@ -48,12 +48,12 @@ impl Entry {
     }
 
     /// Whether the library has the chart.
-    pub fn owned(&self, lib: &Library) -> bool {
+    pub(crate) fn owned(&self, lib: &Library) -> bool {
         lib.owns(&self.md5) || lib.owns(&self.sha256)
     }
 
     /// The query for one of its steps.
-    pub fn query(&self, role: Role) -> Query {
+    pub(crate) fn query(&self, role: Role) -> Query {
         Query {
             md5: self.md5.clone(),
             want: self.want.clone(),
@@ -65,7 +65,7 @@ impl Entry {
 
 /// When a step is taken, after the one before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum When {
+pub(crate) enum When {
     Always,
     /// While the library lacks the chart (the song before it may have
     /// brought it).
@@ -78,16 +78,16 @@ pub enum When {
 /// One download of an entry: its links (with none, those the sources
 /// find), what they are for, and when it is taken.
 #[derive(Clone, Debug, PartialEq)]
-pub struct EntryStep {
-    pub links: Vec<String>,
-    pub role: Role,
-    pub when: When,
+pub(crate) struct EntryStep {
+    pub(crate) links: Vec<String>,
+    pub(crate) role: Role,
+    pub(crate) when: When,
 }
 
 impl EntryStep {
     /// Whether the step is taken, the library as it is now and `before`
     /// what the step before it came to.
-    pub fn due(&self, e: &Entry, lib: &Library, before: &[Done]) -> bool {
+    pub(crate) fn due(&self, e: &Entry, lib: &Library, before: &[Done]) -> bool {
         match self.when {
             When::Always => true,
             When::Missing => !e.owned(lib),
@@ -98,7 +98,7 @@ impl EntryStep {
 
 /// Whether the library has the entry's song: one of its own charts the
 /// table names, or a chart of its title and artist.
-pub fn has_song(e: &Entry, lib: &Library) -> bool {
+pub(crate) fn has_song(e: &Entry, lib: &Library) -> bool {
     e.org_md5.iter().any(|m| lib.owns(m)) || !lib.song_folders_of(&e.want).is_empty()
 }
 
@@ -108,7 +108,7 @@ pub fn has_song(e: &Entry, lib: &Library) -> bool {
 /// the song only if the chart is left waiting (none of the chart's own
 /// links: only if it is still missing); else the song, then the chart
 /// unless the song brought it.
-pub fn entry_steps(e: &Entry, lib: &Library) -> Vec<EntryStep> {
+pub(crate) fn entry_steps(e: &Entry, lib: &Library) -> Vec<EntryStep> {
     let step = |links: &Vec<String>, role, when| EntryStep {
         links: links.clone(),
         role,
@@ -156,18 +156,18 @@ impl Batch {
 
     /// The key of `link` for `q` (a song's: a folder's link brings its
     /// archive).
-    pub fn key(link: &str, q: &Query) -> DownloadKey {
+    pub(crate) fn key(link: &str, q: &Query) -> DownloadKey {
         DownloadKey::of(link, (!q.diff).then_some(&q.want))
     }
 
     /// Whether the batch has had the file of `key`.
-    pub fn has(&self, key: &DownloadKey) -> bool {
+    pub(crate) fn has(&self, key: &DownloadKey) -> bool {
         self.seen.contains(key)
     }
 
     /// The file of `key` came to `done`: had, unless it was not the chart
     /// looked for (found by name, it may be another's) or cancelled.
-    pub fn tried(&mut self, key: DownloadKey, done: &[Done]) {
+    pub(crate) fn tried(&mut self, key: DownloadKey, done: &[Done]) {
         let again = done
             .iter()
             .any(|d| matches!(d, Done::Failed(f) if f.cancelled() || *f == Failure::NotTheChart));
@@ -177,7 +177,7 @@ impl Batch {
     }
 
     /// The charts wanted but `q`'s.
-    pub fn also(&self, q: &Query) -> Vec<String> {
+    pub(crate) fn also(&self, q: &Query) -> Vec<String> {
         let md5 = md5_key(&q.md5);
         self.wanted
             .iter()

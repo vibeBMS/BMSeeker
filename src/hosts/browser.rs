@@ -19,7 +19,7 @@ const PAGES: &[&str] = &[
     "box.com",
 ];
 
-pub struct BrowserOnly;
+pub(crate) struct BrowserOnly;
 
 impl Host for BrowserOnly {
     fn name(&self) -> &'static str {
@@ -35,7 +35,7 @@ impl Host for BrowserOnly {
     }
 }
 
-pub struct Direct;
+pub(crate) struct Direct;
 
 impl Host for Direct {
     fn name(&self) -> &'static str {

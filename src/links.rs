@@ -19,7 +19,7 @@ use std::collections::HashMap;
 const DEAD: &[&str] = &["gnqg.rosx.net", "absolute.pv.land.to"];
 
 /// A link to a host known to be gone (also through web.archive.org).
-pub fn is_dead(url: &str) -> bool {
+pub(crate) fn is_dead(url: &str) -> bool {
     let u = url.to_ascii_lowercase();
     DEAD.iter().any(|d| u.contains(d))
 }
@@ -149,7 +149,7 @@ impl Links {
     }
 
     /// `e`'s links, filled where missing or dead: (url, url_diff).
-    pub fn of(&self, e: &TableEntry) -> (String, String) {
+    pub(crate) fn of(&self, e: &TableEntry) -> (String, String) {
         let pick = |own: &str, other: Vec<String>| {
             if usable(own) {
                 own.to_string()

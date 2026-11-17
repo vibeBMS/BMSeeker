@@ -172,7 +172,8 @@ const STALL: std::time::Duration = std::time::Duration::from_millis(STALL_MS);
 /// Stream `url` into `out` with `cx`'s user agent, reporting to its
 /// progress. No limit on the whole, but it ends when no data comes for
 /// [`STALL_MS`], or when the progress is cancelled.
-pub fn download(url: &str, out: &Path, cx: &Context) -> Result<(), NetError> {
+#[cfg(feature = "tools")]
+pub(crate) fn download(url: &str, out: &Path, cx: &Context) -> Result<(), NetError> {
     let progress = cx.progress();
     let p = progress.as_deref();
     retrying(p, || stream(url, out, &cx.config.user_agent, p)).map(|_| ())
@@ -382,8 +383,7 @@ mod tests {
         });
         let out = std::env::temp_dir().join(format!("bmseeker-stall-{}", std::process::id()));
         let t = std::time::Instant::now();
-        let cx = Context::default().with_progress(p.clone());
-        let r = download(&format!("http://{addr}/a.zip"), &out, &cx);
+        let r = stream(&format!("http://{addr}/a.zip"), &out, "", Some(&p)).map(|_| ());
         assert_eq!(r, Err(NetError::Cancelled));
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(p.bytes(), (2, Some(1_000_000)));

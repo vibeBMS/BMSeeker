@@ -92,7 +92,7 @@ pub struct Request {
 
 /// What a package comes to.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// The library's already, in this folder (files it lacked brought in).
     Owned(PathBuf),
     /// A song new to the library, in this folder.
@@ -111,9 +111,9 @@ pub enum Outcome {
 /// A package's outcome and its files' moves (from the staged folder; to a
 /// path, or a name in the downloads folder when it waits).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Item {
-    pub outcome: Outcome,
-    pub moves: Vec<(PathBuf, PathBuf)>,
+pub(crate) struct Item {
+    pub(crate) outcome: Outcome,
+    pub(crate) moves: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Item {
@@ -495,7 +495,7 @@ fn of_song(c: &Option<ChartInfo>, want: &Want) -> bool {
 /// separate chart's archive is only the chart `md5` and those of `also` (a
 /// pack of many songs' charts keeps no others): nothing at all,
 /// [`Failure::NotTheChart`].
-pub fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> {
+pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> {
     let md5 = req.md5.as_deref().and_then(md5_key);
     if let Some(m) = md5.as_deref().filter(|_| req.check) {
         let holds = s.charts.iter().any(|c| c.md5 == m)
@@ -653,7 +653,8 @@ fn failed(p: &Path, e: io::Error) -> Done {
 
 /// Carry out `items` (from [`plan`]) in `store`: what comes into the
 /// library added to `lib`; charts that wait into `downloads`.
-pub fn apply(
+#[cfg(test)]
+pub(crate) fn apply(
     store: &dyn Store,
     items: Vec<Item>,
     downloads: &Path,
@@ -743,7 +744,7 @@ fn applied(
 
 /// The download `blob` into the library `lib`, in `store`, as `req` says:
 /// unpacked into a folder of its own in `downloads` (a chart on its own
-/// put there), planned ([`plan`]), carried out ([`apply`]); a song added,
+/// put there), planned, carried out; a song added,
 /// the charts that waited in `downloads` for it go into its folder; the
 /// staged folder goes. A file `blob` is gone once unpacked.
 pub fn take(

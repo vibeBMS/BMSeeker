@@ -19,30 +19,30 @@ use std::path::{Path, PathBuf};
 
 /// A chart of a staged download.
 #[derive(Clone, Debug, PartialEq)]
-pub struct StagedChart {
+pub(crate) struct StagedChart {
     /// Its file (in [`Staged::members`]).
-    pub member: usize,
+    pub(crate) member: usize,
     /// Its MD5 and SHA-256, lower case hex.
-    pub md5: String,
-    pub sha256: String,
+    pub(crate) md5: String,
+    pub(crate) sha256: String,
     /// What it says (None: it could not be read).
-    pub info: Option<ChartInfo>,
+    pub(crate) info: Option<ChartInfo>,
 }
 
 /// A download unpacked into the folder `root`: its files (paths in it) and
 /// its charts, read.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Staged {
-    pub root: PathBuf,
-    pub members: Vec<Member>,
-    pub charts: Vec<StagedChart>,
+pub(crate) struct Staged {
+    pub(crate) root: PathBuf,
+    pub(crate) members: Vec<Member>,
+    pub(crate) charts: Vec<StagedChart>,
     /// A file on its own (a chart's link), not an archive.
-    pub loose: bool,
+    pub(crate) loose: bool,
 }
 
 impl Staged {
     /// The download unpacked into `root` as `members`, its charts read.
-    pub fn read(fs: &dyn Fs, root: &Path, members: Vec<Member>, loose: bool) -> Staged {
+    pub(crate) fn read(fs: &dyn Fs, root: &Path, members: Vec<Member>, loose: bool) -> Staged {
         let charts = members
             .iter()
             .enumerate()
@@ -66,17 +66,17 @@ impl Staged {
     }
 
     /// The chart `c`'s path in the download.
-    pub fn chart_rel(&self, c: usize) -> &Path {
+    pub(crate) fn chart_rel(&self, c: usize) -> &Path {
         &self.members[self.charts[c].member].rel
     }
 
     /// The folder of the chart `c` in the download.
-    pub fn chart_dir(&self, c: usize) -> &Path {
+    pub(crate) fn chart_dir(&self, c: usize) -> &Path {
         self.chart_rel(c).parent().unwrap_or(Path::new(""))
     }
 
     /// Whether the library has the chart `c`.
-    pub fn owned(&self, c: usize, lib: &Library) -> bool {
+    pub(crate) fn owned(&self, c: usize, lib: &Library) -> bool {
         let c = &self.charts[c];
         lib.owns(&c.md5) || lib.owns(&c.sha256)
     }
@@ -84,18 +84,18 @@ impl Staged {
 
 /// Part of a download that goes somewhere as one.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Package {
+pub(crate) struct Package {
     /// Its folder in the download ("": the whole of it).
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
     /// Its charts (in [`Staged::charts`]).
-    pub charts: Vec<usize>,
+    pub(crate) charts: Vec<usize>,
     /// Its files, charts too (in [`Staged::members`]).
-    pub files: Vec<usize>,
+    pub(crate) files: Vec<usize>,
 }
 
 impl Package {
     /// The whole download as one.
-    pub fn whole(s: &Staged) -> Package {
+    pub(crate) fn whole(s: &Staged) -> Package {
         Package {
             root: PathBuf::new(),
             charts: (0..s.charts.len()).collect(),
@@ -104,7 +104,7 @@ impl Package {
     }
 
     /// Whether it holds a sound file.
-    pub fn has_audio(&self, s: &Staged) -> bool {
+    pub(crate) fn has_audio(&self, s: &Staged) -> bool {
         self.files
             .iter()
             .any(|&f| class_of(&rel(&s.members[f].rel, Path::new(""))) == Some(Class::Audio))
@@ -112,7 +112,7 @@ impl Package {
 
     /// Its files below the folder of its chart `c`, by their path there
     /// (what goes with the chart).
-    pub fn files_for(&self, s: &Staged, c: usize) -> Vec<String> {
+    pub(crate) fn files_for(&self, s: &Staged, c: usize) -> Vec<String> {
         let dir = s.chart_dir(c);
         self.files
             .iter()
@@ -124,7 +124,7 @@ impl Package {
 
     /// Whether it holds the sounds of each of its charts (`rules`' share)
     /// and a sound file at all: a song's own folder.
-    pub fn complete(&self, s: &Staged, rules: Rules) -> bool {
+    pub(crate) fn complete(&self, s: &Staged, rules: Rules) -> bool {
         self.has_audio(s)
             && self.charts.iter().all(|&c| {
                 let Some(info) = &s.charts[c].info else {
@@ -230,7 +230,7 @@ fn one_song(s: &Staged, charts: &[usize]) -> bool {
 /// on its own. Folders without charts are looked into. Not sure (a chart
 /// that cannot be read, a sound, image or movie left out of every package):
 /// the whole download, as one.
-pub fn split(s: &Staged) -> Vec<Package> {
+pub(crate) fn split(s: &Staged) -> Vec<Package> {
     if s.charts.is_empty() {
         return Vec::new();
     }
@@ -310,7 +310,7 @@ fn walk(s: &Staged, tree: &Tree, dir: &Path, out: &mut Vec<Package>) -> bool {
 
 /// What a package is to the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PackageKind {
+pub(crate) enum PackageKind {
     /// Each of its charts is in the library.
     Owned,
     /// A song new to the library: a folder of its own.
@@ -326,7 +326,13 @@ pub enum PackageKind {
 /// separate chart's link brought: a [`PackageKind::Diff`]. A song's link: a
 /// [`PackageKind::Song`] when it holds any sound. Anything else: a song when it
 /// holds its charts' sounds (`rules`), else a 差分.
-pub fn classify(p: &Package, s: &Staged, lib: &Library, role: Role, rules: Rules) -> PackageKind {
+pub(crate) fn classify(
+    p: &Package,
+    s: &Staged,
+    lib: &Library,
+    role: Role,
+    rules: Rules,
+) -> PackageKind {
     let owned = p.charts.iter().filter(|&&c| s.owned(c, lib)).count();
     if !p.charts.is_empty() && owned == p.charts.len() {
         return PackageKind::Owned;

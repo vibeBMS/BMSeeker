@@ -27,7 +27,7 @@ pub struct Query {
 }
 
 /// A place a song's links are looked for.
-pub trait Source: Send + Sync {
+pub(crate) trait Source: Send + Sync {
     /// Its name in [`Config::sources`] ("table", "stella", "tsv",
     /// "bmssearch").
     fn name(&self) -> &'static str;
@@ -42,13 +42,13 @@ pub trait Source: Send + Sync {
 
 /// A list of links by MD5 ([`Links`]): difficulty tables, the Stella
 /// uploader's list, a TSV list.
-pub struct List {
+pub(crate) struct List {
     name: &'static str,
     links: Links,
 }
 
 impl List {
-    pub fn new(name: &'static str, links: Links) -> List {
+    pub(crate) fn new(name: &'static str, links: Links) -> List {
         List { name, links }
     }
 }
@@ -73,12 +73,12 @@ impl Source for List {
 
 /// BMS SEARCH: the work a chart belongs to and its download links (a song
 /// only: BMS SEARCH lists works, not separate charts).
-pub struct BmsSearch {
+pub(crate) struct BmsSearch {
     api: String,
 }
 
 impl BmsSearch {
-    pub fn new(config: &Config) -> BmsSearch {
+    pub(crate) fn new(config: &Config) -> BmsSearch {
         BmsSearch {
             api: config.bmssearch_api.clone(),
         }
@@ -102,13 +102,13 @@ impl Source for BmsSearch {
 /// names ([`Config::chart_mirrors`]): the name is BMS SEARCH's for the MD5.
 ///
 /// [`Config::chart_mirrors`]: crate::config::Config::chart_mirrors
-pub struct ChartMirrors {
+pub(crate) struct ChartMirrors {
     api: String,
     folders: Vec<String>,
 }
 
 impl ChartMirrors {
-    pub fn new(config: &Config) -> ChartMirrors {
+    pub(crate) fn new(config: &Config) -> ChartMirrors {
         ChartMirrors {
             api: config.bmssearch_api.trim_end_matches('/').to_string(),
             folders: config.chart_mirrors.clone(),
@@ -162,13 +162,13 @@ impl Source for ChartMirrors {
 /// table's) and artist, so what one brings is checked for the chart.
 ///
 /// [`Config::bms_library`]: crate::config::Config::bms_library
-pub struct BmsLibrary {
+pub(crate) struct BmsLibrary {
     folder: String,
     api: String,
 }
 
 impl BmsLibrary {
-    pub fn new(config: &Config) -> BmsLibrary {
+    pub(crate) fn new(config: &Config) -> BmsLibrary {
         BmsLibrary {
             folder: crate::hosts::drive::drive_id(&config.bms_library).unwrap_or_default(),
             api: config.bmssearch_api.trim_end_matches('/').to_string(),
@@ -395,7 +395,7 @@ impl Sources {
         out
     }
 
-    pub fn push(&mut self, source: Box<dyn Source>) {
+    pub(crate) fn push(&mut self, source: Box<dyn Source>) {
         self.0.push(source.into());
     }
 
@@ -403,13 +403,7 @@ impl Sources {
         self.0.iter().map(|s| s.name()).collect()
     }
 
-    /// Whether the source named `name` wants what its links bring checked
-    /// ([`Source::checked`]).
-    pub fn checked(&self, name: &str) -> bool {
-        self.0.iter().any(|s| s.name() == name && s.checked())
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &dyn Source> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &dyn Source> {
         self.0.iter().map(|s| s.as_ref())
     }
 

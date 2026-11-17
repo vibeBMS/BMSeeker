@@ -64,7 +64,7 @@ pub fn sniff_file(p: &Path) -> Option<Format> {
 }
 
 /// Whether a file is an archive by its name.
-pub fn is_archive(p: &Path) -> bool {
+pub(crate) fn is_archive(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
@@ -90,7 +90,7 @@ pub struct Member {
 }
 
 /// `name` from an archive as a relative path that cannot leave its folder.
-pub fn safe_rel(name: &str) -> Option<PathBuf> {
+pub(crate) fn safe_rel(name: &str) -> Option<PathBuf> {
     let rel: PathBuf = name
         .split(['/', '\\'])
         .filter(|c| !c.is_empty() && *c != "." && *c != "..")
@@ -107,9 +107,9 @@ pub(crate) fn too_large(budget: u64) -> String {
 /// A writer that fails past `left` bytes (an archive member larger than it
 /// claims), `budget` being the whole's limit (for the message).
 pub(crate) struct Capped<W> {
-    pub w: W,
-    pub left: u64,
-    pub budget: u64,
+    pub(crate) w: W,
+    pub(crate) left: u64,
+    pub(crate) budget: u64,
 }
 
 impl<W: std::io::Write> std::io::Write for Capped<W> {

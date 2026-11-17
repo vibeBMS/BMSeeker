@@ -17,7 +17,7 @@
 mod browser;
 #[cfg(not(target_arch = "wasm32"))]
 mod download;
-pub mod drive;
+pub(crate) mod drive;
 mod dropbox;
 mod key;
 mod mediafire;
@@ -25,11 +25,13 @@ mod mega;
 mod uploader;
 mod venues;
 
+#[cfg(all(feature = "tools", not(target_arch = "wasm32")))]
+pub(crate) use download::download;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use download::retrying;
 #[cfg(not(target_arch = "wasm32"))]
-pub use download::{download, fetch, fetch_files, Native};
-pub use key::DownloadKey;
+pub use download::{fetch, fetch_files, Native};
+pub(crate) use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
 
@@ -98,7 +100,7 @@ impl Target {
 
 /// What a host makes of a link.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Resolved {
+pub(crate) enum Resolved {
     File(Target),
     /// Other links to go on with, the best first: a venue's work page names
     /// the author's link and its mirrors. The next is tried when one gives
@@ -111,18 +113,18 @@ pub enum Resolved {
 
 /// A link as hosts look at it.
 #[derive(Clone, Debug)]
-pub struct Link {
-    pub url: String,
-    pub lower: String,
+pub(crate) struct Link {
+    pub(crate) url: String,
+    pub(crate) lower: String,
     /// Its host name, lower case.
-    pub host: String,
+    pub(crate) host: String,
     /// Links followed to get here.
-    pub hops: u8,
+    pub(crate) hops: u8,
 }
 
 impl Link {
     /// An http(s) link.
-    pub fn parse(url: &str, hops: u8) -> Option<Link> {
+    pub(crate) fn parse(url: &str, hops: u8) -> Option<Link> {
         let url = url.trim().to_string();
         let lower = url.to_ascii_lowercase();
         if !(lower.starts_with("https://") || lower.starts_with("http://")) {
@@ -138,13 +140,13 @@ impl Link {
     }
 
     /// Whether its host is `domain` or under it.
-    pub fn on(&self, domain: &str) -> bool {
+    pub(crate) fn on(&self, domain: &str) -> bool {
         self.host == domain || self.host.ends_with(&format!(".{domain}"))
     }
 }
 
 /// A kind of link: a strategy of [`Resolver`].
-pub trait Host: Send + Sync {
+pub(crate) trait Host: Send + Sync {
     fn name(&self) -> &'static str;
     /// Whether this host handles `link`.
     fn accepts(&self, link: &Link) -> bool;
@@ -173,7 +175,7 @@ impl Default for Hosts {
 impl Hosts {
     /// The [`Hosts::default`] ones, with the settings' dead uploaders'
     /// mirrors first (third parties': with [`Config::third_party`]).
-    pub fn from_config(config: &Config) -> Hosts {
+    pub(crate) fn from_config(config: &Config) -> Hosts {
         let mut hosts = Hosts::default();
         if config.third_party && !config.uploaders.is_empty() {
             hosts.first(Box::new(uploader::Uploaders(config.uploaders.clone())));
@@ -181,33 +183,25 @@ impl Hosts {
         hosts
     }
 
-    /// No host: [`Hosts::push`] them.
-    pub fn none() -> Hosts {
-        Hosts(Vec::new())
-    }
-
-    /// Add `host` (after the others).
-    pub fn push(&mut self, host: Box<dyn Host>) {
-        self.0.push(host);
-    }
-
     /// Add `host` before the others.
-    pub fn first(&mut self, host: Box<dyn Host>) {
+    pub(crate) fn first(&mut self, host: Box<dyn Host>) {
         self.0.insert(0, host);
     }
 
     /// Leave out the host named `name`.
-    pub fn without(mut self, name: &str) -> Hosts {
+    #[cfg(test)]
+    pub(crate) fn without(mut self, name: &str) -> Hosts {
         self.0.retain(|h| h.name() != name);
         self
     }
 
-    pub fn names(&self) -> Vec<&'static str> {
+    #[cfg(test)]
+    pub(crate) fn names(&self) -> Vec<&'static str> {
         self.0.iter().map(|h| h.name()).collect()
     }
 
     /// The host that handles `link`.
-    pub fn find(&self, link: &Link) -> Option<&dyn Host> {
+    pub(crate) fn find(&self, link: &Link) -> Option<&dyn Host> {
         self.0.iter().find(|h| h.accepts(link)).map(|h| h.as_ref())
     }
 }
@@ -244,12 +238,12 @@ impl Context {
 
     /// The progress to report to: this context's, else the thread's
     /// ([`crate::progress::scope`], kept for older callers).
-    pub fn progress(&self) -> Option<Arc<Progress>> {
+    pub(crate) fn progress(&self) -> Option<Arc<Progress>> {
         self.progress.clone().or_else(crate::progress::current)
     }
 
     /// Whether the download was cancelled.
-    pub fn cancelled(&self) -> bool {
+    pub(crate) fn cancelled(&self) -> bool {
         self.progress().is_some_and(|p| p.cancelled())
     }
 
@@ -305,7 +299,7 @@ impl Resolver {
     /// After the file the last run gave did not download: go on with the
     /// next of the links the page named (a mirror), if there is one; then
     /// run the resolver again.
-    pub fn try_next(&mut self) -> bool {
+    pub(crate) fn try_next(&mut self) -> bool {
         if self.alts.is_empty() {
             return false;
         }
@@ -328,7 +322,7 @@ impl Resolver {
     }
 
     /// The link it goes on with (the one it was made for, at first).
-    pub fn link(&self) -> &str {
+    pub(crate) fn link(&self) -> &str {
         &self.link
     }
 
@@ -434,7 +428,7 @@ pub const PRESS_DOWNLOAD_JS: &str = r#"(function () {
 })();"#;
 
 /// Google Drive's answer for a file downloaded too often lately.
-pub const DRIVE_QUOTA: &str =
+pub(crate) const DRIVE_QUOTA: &str =
     "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
 
 /// Whether a page's first bytes are Google Drive's "Quota exceeded".

@@ -7,7 +7,7 @@ use super::{Host, Link, Resolved, Want};
 use crate::config::{Config, Uploader};
 use crate::net::{BoxTask, Ready};
 
-pub struct Uploaders(pub Vec<Uploader>);
+pub(crate) struct Uploaders(pub Vec<Uploader>);
 
 impl Host for Uploaders {
     fn name(&self) -> &'static str {

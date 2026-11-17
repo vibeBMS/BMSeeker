@@ -67,7 +67,7 @@ pub struct Config {
 }
 
 /// The [`Config::sources`] that are third parties' copies.
-pub const THIRD_PARTY_SOURCES: &[&str] = &["mirrors", "bmslibrary"];
+pub(crate) const THIRD_PARTY_SOURCES: &[&str] = &["mirrors", "bmslibrary"];
 
 /// A dead uploader whose files are kept elsewhere by number.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -115,7 +115,7 @@ impl Uploader {
     }
 
     /// `url`'s file on each mirror.
-    pub fn mirrored(&self, url: &str) -> Vec<String> {
+    pub(crate) fn mirrored(&self, url: &str) -> Vec<String> {
         let Some(n) = self.number(url) else {
             return Vec::new();
         };
@@ -206,12 +206,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// A JSON file's settings over the defaults (fields left out keep
-    /// theirs).
-    pub fn from_json(text: &str) -> Result<Config, String> {
-        serde_json::from_str(text).map_err(|e| e.to_string())
-    }
-
     /// Whether `name` is one of the [`Config::sources`] (a third party's
     /// only with [`Config::third_party`]).
     pub fn uses(&self, name: &str) -> bool {
@@ -241,7 +235,8 @@ impl Config {
             Some(f) => {
                 let text =
                     std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-                Config::from_json(&text).map_err(|e| format!("{}: {e}", f.display()))
+                // (fields left out keep their defaults)
+                serde_json::from_str(&text).map_err(|e| format!("{}: {e}", f.display()))
             }
         }
     }
@@ -253,7 +248,9 @@ mod tests {
 
     #[test]
     fn partial_files() {
-        let c = Config::from_json(r#"{"mirror_catalog": "", "sources": ["bmssearch"]}"#).unwrap();
+        let c =
+            serde_json::from_str::<Config>(r#"{"mirror_catalog": "", "sources": ["bmssearch"]}"#)
+                .unwrap();
         assert_eq!(c.mirror_catalog, "");
         assert!(c.uses("bmssearch") && !c.uses("stella"));
         // third parties' only when allowed
@@ -265,7 +262,7 @@ mod tests {
         };
         assert!(c.uses("mirrors") && c.uses("bmslibrary"));
         assert_eq!(c.manbow, Config::default().manbow);
-        assert!(Config::from_json("{").is_err());
+        assert!(serde_json::from_str::<Config>("{").is_err());
     }
 
     #[test]

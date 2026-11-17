@@ -14,13 +14,13 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 /// The name of a folder with no name of its own (the fork's).
-pub const NEW_FOLDER: &str = "新しいフォルダー";
+pub(crate) const NEW_FOLDER: &str = "新しいフォルダー";
 /// The fork's default format.
-pub const DEFAULT_FORMAT: &str = "[%ARTIST%] %TITLE%";
+pub(crate) const DEFAULT_FORMAT: &str = "[%ARTIST%] %TITLE%";
 /// Bytes (Shift_JIS) a folder's name may have.
-pub const MAX_NAME: usize = 128;
+pub(crate) const MAX_NAME: usize = 128;
 /// Bytes (Shift_JIS) a folder's whole path may have.
-pub const MAX_PATH: usize = 250;
+pub(crate) const MAX_PATH: usize = 250;
 
 fn re(s: &str) -> Pattern {
     Pattern::new(s)
@@ -112,7 +112,7 @@ fn tidy(s: &str) -> String {
 /// alike: of each two, the start they share (the first's chart name cut);
 /// none of two letters: each one, its chart name cut. Tidied (prefixes, credits, level tails),
 /// the best is the one with the most of length^0.65 × count.
-pub fn longest_common(strings: &[&str]) -> String {
+pub(crate) fn longest_common(strings: &[&str]) -> String {
     let given: Vec<&str> = strings
         .iter()
         .copied()
@@ -150,7 +150,7 @@ pub fn longest_common(strings: &[&str]) -> String {
 }
 
 /// Bytes `s` takes in Shift_JIS (a character it cannot have: as UTF-8).
-pub fn sjis_len(s: &str) -> usize {
+pub(crate) fn sjis_len(s: &str) -> usize {
     let mut buf = [0u8; 4];
     s.chars()
         .map(|c| {
@@ -209,7 +209,7 @@ fn fit(s: &str, max: usize) -> String {
 /// [`longest_common`]); `sjis_only`: only characters Shift_JIS has (for LR2
 /// on Windows); [`MAX_NAME`] bytes at most; [`NEW_FOLDER`] when nothing is
 /// left.
-pub fn folder_name(charts: &[ChartInfo], format: &str, sjis_only_chars: bool) -> String {
+pub(crate) fn folder_name(charts: &[ChartInfo], format: &str, sjis_only_chars: bool) -> String {
     let titles: Vec<&str> = charts.iter().map(|c| c.title.as_str()).collect();
     let artists: Vec<&str> = charts.iter().map(|c| c.artist.as_str()).collect();
     let title = longest_common(&titles);
@@ -236,7 +236,7 @@ pub fn folder_name(charts: &[ChartInfo], format: &str, sjis_only_chars: bool) ->
 }
 
 /// `name` cut so that `parent` and it take [`MAX_PATH`] bytes at most.
-pub fn fit_path(parent: &Path, name: &str) -> String {
+pub(crate) fn fit_path(parent: &Path, name: &str) -> String {
     let room = MAX_PATH.saturating_sub(sjis_len(&parent.to_string_lossy()) + 1);
     match fit(name, room.max(1)) {
         n if n.is_empty() => NEW_FOLDER.into(),

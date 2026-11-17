@@ -95,7 +95,7 @@ pub enum Step<T> {
 
 impl<T> Step<T> {
     /// The output, once there, as `f` makes it.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Step<U> {
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> Step<U> {
         match self {
             Step::Do(e) => Step::Do(e),
             Step::Done(out) => Step::Done(f(out)),
@@ -162,7 +162,7 @@ pub struct Got {
 }
 
 /// Times a download's redirects may lead it to another host.
-pub const MOVES: u8 = 2;
+pub(crate) const MOVES: u8 = 2;
 
 /// Waits (seconds) before a download is tried again after a server's
 /// passing failure (busy; a gateway's error).
@@ -187,7 +187,13 @@ impl Acquire {
     /// The file `link` leads to for the song `want` (a folder's link: its
     /// archive), natively into `slot`; `any`: a file that is not an
     /// archive too, if it is not a page (a chart, a movie).
-    pub fn new(link: &str, want: Option<Want>, any: bool, slot: PathBuf, cx: &Context) -> Acquire {
+    pub(crate) fn new(
+        link: &str,
+        want: Option<Want>,
+        any: bool,
+        slot: PathBuf,
+        cx: &Context,
+    ) -> Acquire {
         Acquire {
             r: Resolver::new(link, want.clone(), cx),
             cx: cx.clone(),
@@ -203,7 +209,7 @@ impl Acquire {
 
     /// The file `url` itself (a mirror's), not through the hosts: whatever
     /// it is (a server's passing failure tried again).
-    pub fn plain(url: &str, slot: PathBuf, cx: &Context) -> Acquire {
+    pub(crate) fn plain(url: &str, slot: PathBuf, cx: &Context) -> Acquire {
         Acquire {
             plain: true,
             ..Acquire::new(url, None, true, slot, cx)
@@ -511,18 +517,10 @@ impl Install {
     }
 
     /// What the run has had (a table's missing charts).
-    pub fn batch(mut self, batch: Batch) -> Install {
+    pub(crate) fn batch(mut self, batch: Batch) -> Install {
         self.batch = batch;
         self
     }
-
-    /// What its own links bring must hold the chart `q.md5` too (they
-    /// were found by name).
-    pub fn own_checked(mut self) -> Install {
-        self.checked = true;
-        self
-    }
-
     /// This install's library and batch, for the song `q` from `own` and
     /// then `sources`.
     pub(super) fn again(&mut self, q: Query, own: Vec<String>, sources: Sources) {

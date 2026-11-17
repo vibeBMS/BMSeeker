@@ -5,7 +5,7 @@ use super::{between, get_then, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
 use crate::net::{BoxTask, Ready};
 
-pub struct MediaFire;
+pub(crate) struct MediaFire;
 
 impl Host for MediaFire {
     fn name(&self) -> &'static str {

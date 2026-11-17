@@ -20,19 +20,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub use crate::chart::{class_of, ChartInfo, Class};
+pub use crate::chart::ChartInfo;
+pub(crate) use crate::chart::{class_of, Class};
 
 /// A folder of the library: its files and the charts in it.
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
-pub struct FolderInfo {
-    pub dir: PathBuf,
+pub(crate) struct FolderInfo {
+    pub(crate) dir: PathBuf,
     /// Files below the folder, by their path in it (`sound/kick.ogg`).
-    pub files: Vec<String>,
-    pub charts: Vec<ChartInfo>,
+    pub(crate) files: Vec<String>,
+    pub(crate) charts: Vec<ChartInfo>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Placement {
+pub(crate) enum Placement {
     /// Where it is (its sounds are there, or no folder has them all).
     Stay,
     /// Into this folder.
@@ -226,7 +228,7 @@ pub fn same_title(a: &str, b: &str) -> bool {
 
 /// Titles of one song's charts: [`same_title`], or the same once the
 /// chart's name is gone ("CG901B -7EX-[Short Ver.]" and "CG901B -5-").
-pub fn same_song_title(a: &str, b: &str) -> bool {
+pub(crate) fn same_song_title(a: &str, b: &str) -> bool {
     use crate::bmssearch::base_title;
     let (x, y) = (base_title(a), base_title(b));
     same_title(a, b) || (x.chars().count() >= 2 && same_name(&x, &y))
@@ -260,7 +262,7 @@ pub fn same_artist(a: &str, b: &str) -> bool {
 /// The share of `sounds` that `files` (paths in a song's folder) hold: by
 /// path and name, any sound extension; 1 when there are none (a sound
 /// outside the folder, `../`, is never held).
-pub fn coverage(files: &[String], sounds: &[String]) -> f32 {
+pub(crate) fn coverage(files: &[String], sounds: &[String]) -> f32 {
     let names = Names::default();
     let need = Need::of(&names, sounds.iter().map(|s| s.as_str()));
     need.share(Class::Audio, &Keys::of(&names, files), &Keys::default())
@@ -268,7 +270,7 @@ pub fn coverage(files: &[String], sounds: &[String]) -> f32 {
 
 /// Whether `files` (paths in a song's folder) hold every one of `sounds`
 /// that can be held (by path and name, any sound extension).
-pub fn covers(files: &[String], sounds: &[String]) -> bool {
+pub(crate) fn covers(files: &[String], sounds: &[String]) -> bool {
     let names = Names::default();
     let need = Need::of(&names, sounds.iter().map(|s| s.as_str()));
     let have = Keys::of(&names, files);
@@ -338,7 +340,12 @@ impl Candidate {
 /// the best first (the same song; then a song alike; then more of its
 /// sounds, more of them in the folder itself; then more of its images, movies, stage file / banner
 /// / back image; then fewer other sounds).
-pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Vec<Candidate> {
+#[cfg(test)]
+pub(crate) fn rank(
+    chart: &ChartInfo,
+    bundled: &[String],
+    folders: &[FolderInfo],
+) -> Vec<Candidate> {
     let names = Names::default();
     let keys: Vec<Keys> = folders.iter().map(|f| Keys::of(&names, &f.files)).collect();
     let titles: Vec<Vec<(String, String)>> = folders
@@ -369,9 +376,9 @@ pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Ve
 /// charts' titles and artists (none: not read).
 #[derive(Clone, Copy)]
 pub(crate) struct Folder<'a> {
-    pub dir: &'a Path,
-    pub keys: &'a Keys,
-    pub titles: &'a [(String, String)],
+    pub(crate) dir: &'a Path,
+    pub(crate) keys: &'a Keys,
+    pub(crate) titles: &'a [(String, String)],
 }
 
 /// [`rank`] for `chart` asking `need`, which came with the files of
@@ -443,7 +450,7 @@ fn ranked(
 /// and holds the chart's sounds (`min_coverage`); else the folders that
 /// hold most of them (`min_listed`: the user picks, at most 3); else none
 /// yet.
-pub fn decide(candidates: &[Candidate], rules: Rules) -> Placement {
+pub(crate) fn decide(candidates: &[Candidate], rules: Rules) -> Placement {
     let sure: Vec<&Candidate> = candidates
         .iter()
         .filter(|c| c.coverage >= rules.min_coverage && c.same_song && !c.outside)
@@ -463,7 +470,8 @@ pub fn decide(candidates: &[Candidate], rules: Rules) -> Placement {
 
 /// Where `chart`, now in `own` (with the files it came with), belongs among
 /// `folders` (by the default [`Rules`]).
-pub fn place(chart: &ChartInfo, own: &FolderInfo, folders: &[FolderInfo]) -> Placement {
+#[cfg(test)]
+pub(crate) fn place(chart: &ChartInfo, own: &FolderInfo, folders: &[FolderInfo]) -> Placement {
     if chart.sounds.is_empty() || covers(&own.files, &chart.sounds) {
         return Placement::Stay;
     }
@@ -512,36 +520,8 @@ fn hidden(p: &Path) -> bool {
         .is_some_and(|n| n.to_string_lossy().starts_with('.'))
 }
 
-/// Every folder below `dir` with its file names.
-pub fn folders(
-    fs: &dyn Fs,
-    dir: &std::path::Path,
-) -> std::collections::BTreeMap<PathBuf, Vec<String>> {
-    fn walk(
-        fs: &dyn Fs,
-        dir: &std::path::Path,
-        depth: usize,
-        out: &mut std::collections::BTreeMap<PathBuf, Vec<String>>,
-    ) {
-        for e in fs.read_dir(dir).unwrap_or_default() {
-            if e.is_dir {
-                if depth < 8 {
-                    walk(fs, &e.path, depth + 1, out);
-                }
-            } else {
-                out.entry(dir.to_path_buf())
-                    .or_default()
-                    .push(file_name(&e.path));
-            }
-        }
-    }
-    let mut out = std::collections::BTreeMap::new();
-    walk(fs, dir, 0, &mut out);
-    out
-}
-
 /// The files below `dir` (a few levels), by their path in it.
-pub fn files_below(fs: &dyn Fs, dir: &Path) -> Vec<String> {
+pub(crate) fn files_below(fs: &dyn Fs, dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut todo = vec![(dir.to_path_buf(), 0)];
     while let Some((d, depth)) = todo.pop() {
@@ -560,7 +540,11 @@ pub fn files_below(fs: &dyn Fs, dir: &Path) -> Vec<String> {
 /// files below it by their path in it (a folder below holding charts of
 /// its own is a song of its own; folders whose names start with `.` are
 /// passed by).
-pub fn song_folders(fs: &dyn Fs, dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<String>> {
+#[cfg(test)]
+pub(crate) fn song_folders(
+    fs: &dyn Fs,
+    dir: &Path,
+) -> std::collections::BTreeMap<PathBuf, Vec<String>> {
     song_folders_except(fs, dir, None)
 }
 
@@ -612,7 +596,7 @@ pub fn chart_info(fs: &dyn Fs, path: &std::path::Path) -> Option<ChartInfo> {
     crate::chart::info(path, &bytes)
 }
 
-/// Where `chart` belongs among the folders of `lib` (see [`place`]), with
+/// Where `chart` belongs among the folders of `lib`, with
 /// the candidates (for a person to look at); `siblings`: the files beside
 /// it came with it (else it came on its own, into a folder of downloads).
 pub fn locate(
@@ -642,7 +626,7 @@ pub fn locate(
 /// `bundled` (paths in that folder) that go with it, belongs among the
 /// folders of `index` (`here` aside), with the candidates (for a person to
 /// look at).
-pub fn locate_by(
+pub(crate) fn locate_by(
     fs: &dyn Fs,
     info: &ChartInfo,
     bundled: &[String],
@@ -704,7 +688,7 @@ pub fn locate_by(
 /// charts are `charts`: `stem` when it is free or holds the same song (a
 /// chart of the same title and artist, as `lib` knows them), else
 /// `stem (2)`, `stem (3)`... (another song of that title).
-pub fn song_folder(fs: &dyn Fs, lib: &Library, stem: &str, charts: &[ChartInfo]) -> PathBuf {
+pub(crate) fn song_folder(fs: &dyn Fs, lib: &Library, stem: &str, charts: &[ChartInfo]) -> PathBuf {
     free_folder(fs, lib.root(), stem, charts, |d| lib.charts_below(fs, d))
 }
 
@@ -733,7 +717,7 @@ fn free_folder(
 /// overwrite), by the (modification time, size) of it and of the file of
 /// its name there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Clash {
+pub(crate) enum Clash {
     /// None there: it goes in.
     Move,
     /// It replaces the one there.
@@ -749,7 +733,12 @@ pub enum Clash {
 /// same file; else a newer one replaces the one there, an older one does
 /// not. Without file times to go by (`times` false: a web page's storage),
 /// the one there stays.
-pub fn clash(new: (i64, u64), old: Option<(i64, u64)>, is_chart: bool, times: bool) -> Clash {
+pub(crate) fn clash(
+    new: (i64, u64),
+    old: Option<(i64, u64)>,
+    is_chart: bool,
+    times: bool,
+) -> Clash {
     let Some(old) = old else {
         return Clash::Move;
     };

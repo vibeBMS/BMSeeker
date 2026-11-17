@@ -16,7 +16,8 @@ pub enum Request {
 }
 
 impl Request {
-    pub fn url(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn url(&self) -> &str {
         match self {
             Request::Get(u) | Request::Post { url: u, .. } => u,
         }
@@ -45,7 +46,7 @@ pub enum NetError {
 impl NetError {
     /// The server busy (429, 503) or its gateway failing (502, 504): it
     /// may pass.
-    pub fn passing(&self) -> bool {
+    pub(crate) fn passing(&self) -> bool {
         matches!(self, NetError::Status(429 | 502 | 503 | 504))
     }
 
@@ -103,7 +104,7 @@ pub trait Task: Send {
 }
 
 /// A task of any kind with this output.
-pub type BoxTask<T> = Box<dyn Task<Output = T>>;
+pub(crate) type BoxTask<T> = Box<dyn Task<Output = T>>;
 
 impl<T> Task for BoxTask<T> {
     type Output = T;
@@ -116,10 +117,10 @@ impl<T> Task for BoxTask<T> {
 }
 
 /// A task that is done at once.
-pub struct Ready<T>(Option<T>);
+pub(crate) struct Ready<T>(Option<T>);
 
 impl<T: Send> Ready<T> {
-    pub fn boxed(value: T) -> BoxTask<T>
+    pub(crate) fn boxed(value: T) -> BoxTask<T>
     where
         T: 'static,
     {
@@ -138,7 +139,7 @@ impl<T: Send> Task for Ready<T> {
 }
 
 /// One GET, then what `then` makes of its answer.
-pub fn get_then<T, F>(url: String, then: F) -> BoxTask<T>
+pub(crate) fn get_then<T, F>(url: String, then: F) -> BoxTask<T>
 where
     T: Send + 'static,
     F: FnOnce(Answer) -> T + Send + 'static,
@@ -184,7 +185,7 @@ pub fn run<T: Task + ?Sized>(task: &mut T, http: &dyn Http) -> T::Output {
 
 /// Canned answers by URL, for tests.
 #[cfg(test)]
-pub struct Canned(pub Vec<(String, Answer)>);
+pub(crate) struct Canned(pub Vec<(String, Answer)>);
 
 #[cfg(test)]
 impl Http for Canned {
@@ -215,7 +216,7 @@ impl Client {
     }
 
     /// With `cx`'s settings and progress.
-    pub fn in_context(cx: &crate::hosts::Context) -> Client {
+    pub(crate) fn in_context(cx: &crate::hosts::Context) -> Client {
         Client {
             progress: cx.progress(),
             ..Client::new(&cx.config)
@@ -278,7 +279,7 @@ pub fn url_encode(s: &str) -> String {
 }
 
 /// `%XX` decoded (invalid UTF-8 replaced).
-pub fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

@@ -10,12 +10,12 @@ use super::Want;
 /// (Drive, MEGA) brings the archive of the song looked for in it: its key
 /// names that song too.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct DownloadKey(String);
+pub(crate) struct DownloadKey(String);
 
 impl DownloadKey {
     /// The key of `url`, for the song `want` (a folder's link: the song's
     /// archive in it).
-    pub fn of(url: &str, want: Option<&Want>) -> DownloadKey {
+    pub(crate) fn of(url: &str, want: Option<&Want>) -> DownloadKey {
         let url = url.trim();
         let (key, folder) = match super::Link::parse(url, 0) {
             Some(l) => known(&l).unwrap_or_else(|| (plain(url), false)),
@@ -29,10 +29,6 @@ impl DownloadKey {
             )),
             None => DownloadKey(key),
         }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 

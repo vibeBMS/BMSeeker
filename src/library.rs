@@ -1,7 +1,7 @@
 //! A BMS library as the install tools see it: its songs' folders (those
 //! holding charts) with the files below each by their path in it, the
 //! charts' titles and artists, and which folders hold a chart of an MD5 or
-//! SHA-256. Read from the files ([`Library::scan`], or folder by folder
+//! SHA-256. Read from the files (all at once, or folder by folder
 //! when first needed: [`Library::new`]) or given by a player that keeps its
 //! own records of its charts ([`Library::from_catalog`]: a web page cannot
 //! read its library's charts when it likes).
@@ -118,14 +118,16 @@ impl Library {
     }
 
     /// The library below `root`, every chart read now (their hashes known).
-    pub fn scan(fs: &dyn Fs, root: &Path) -> Library {
+    #[cfg(test)]
+    pub(crate) fn scan(fs: &dyn Fs, root: &Path) -> Library {
         let mut lib = Library::new(root);
         lib.read_all(fs);
         lib
     }
 
-    /// [`Library::scan`] passing by the folder `skip` (the downloads
-    /// waiting for their songs, when they are kept in the library).
+    /// The library below `root`, every chart read now, passing by the
+    /// folder `skip` (the downloads waiting for their songs, when they are
+    /// kept in the library).
     pub fn scan_except(fs: &dyn Fs, root: &Path, skip: &Path) -> Library {
         let mut lib = Library::new(root);
         lib.skip = Some(skip.to_path_buf());
@@ -157,7 +159,7 @@ impl Library {
         lib
     }
 
-    pub fn root(&self) -> &Path {
+    pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
@@ -167,7 +169,7 @@ impl Library {
     }
 
     /// The folders holding the chart of this MD5 or SHA-256 (hex).
-    pub fn folders_of(&self, hash: &str) -> &[PathBuf] {
+    pub(crate) fn folders_of(&self, hash: &str) -> &[PathBuf] {
         hash_key(hash)
             .and_then(|h| self.by_hash.get(&h))
             .map_or(&[], |v| v.as_slice())
@@ -176,7 +178,7 @@ impl Library {
     /// The folders holding a chart of the song `want` (its title but for
     /// the chart's name, and its artist), among the charts given or read so
     /// far (all of them once [`Library::scan`]ned).
-    pub fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
+    pub(crate) fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = self
             .charts
             .borrow()
@@ -192,7 +194,7 @@ impl Library {
     /// The folders holding a chart of the same song as one of `charts` (the
     /// title but for the chart's name, and the artist), among the charts
     /// given or read so far.
-    pub fn song_folders_like(&self, charts: &[ChartInfo]) -> Vec<PathBuf> {
+    pub(crate) fn song_folders_like(&self, charts: &[ChartInfo]) -> Vec<PathBuf> {
         use crate::placement::{same_artist, same_song_title};
         let mut out: Vec<PathBuf> = self
             .charts
@@ -216,7 +218,7 @@ impl Library {
     /// `file` is in the library now (moved there; `md5`: a chart's): the
     /// song's folder it is in holds it (a chart in a folder that was none:
     /// a song's of its own, with the files that came below it before).
-    pub fn add(&mut self, file: &Path, md5: Option<&str>) {
+    pub(crate) fn add(&mut self, file: &Path, md5: Option<&str>) {
         let Some(dir) = file.parent() else {
             return;
         };
@@ -252,7 +254,7 @@ impl Library {
 
     /// The folder `dir` is in the library now (a song unpacked there): its
     /// songs' folders and their files, their charts read (and hashed).
-    pub fn add_folder(&mut self, fs: &dyn Fs, dir: &Path) {
+    pub(crate) fn add_folder(&mut self, fs: &dyn Fs, dir: &Path) {
         let found = song_folders_except(fs, dir, None);
         for (song, files) in &found {
             for f in files.iter().filter(|f| !f.contains('/')) {
@@ -271,14 +273,14 @@ impl Library {
 
     /// The files of the song's folder `dir`, by their path in it (None: not
     /// a song's folder).
-    pub fn files(&self, fs: &dyn Fs, dir: &Path) -> Option<&[String]> {
+    pub(crate) fn files(&self, fs: &dyn Fs, dir: &Path) -> Option<&[String]> {
         let s = self.songs(fs);
         s.at.get(dir).map(|i| s.list[*i].files.as_slice())
     }
 
     /// The charts below `dir` (a song's folders there): those given or read
     /// before, else read now.
-    pub fn charts_below(&self, fs: &dyn Fs, dir: &Path) -> Vec<ChartInfo> {
+    pub(crate) fn charts_below(&self, fs: &dyn Fs, dir: &Path) -> Vec<ChartInfo> {
         let s = self.songs(fs);
         let mut out = Vec::new();
         for song in s.list.iter().filter(|s| s.dir.starts_with(dir)) {

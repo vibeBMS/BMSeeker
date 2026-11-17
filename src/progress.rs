@@ -121,7 +121,7 @@ pub fn scope<R>(p: Option<Arc<Progress>>, f: impl FnOnce() -> R) -> R {
 }
 
 /// This thread's progress, if any.
-pub fn current() -> Option<Arc<Progress>> {
+pub(crate) fn current() -> Option<Arc<Progress>> {
     CURRENT.with(|c| c.borrow().clone())
 }
 

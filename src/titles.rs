@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 /// How a folder's song stands to a chart's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Relation {
+pub(crate) enum Relation {
     /// No title on one side.
     #[default]
     Unavailable,
@@ -30,7 +30,7 @@ pub enum Relation {
 
 /// What [`Relation::Related`] asks for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Rule {
+pub(crate) enum Rule {
     /// The title or the artist alike.
     #[default]
     Either,
@@ -40,9 +40,9 @@ pub enum Rule {
 }
 
 /// Dice for [`Relation::Strong`] (titles).
-pub const STRONG: f64 = 0.72;
+pub(crate) const STRONG: f64 = 0.72;
 /// Dice for [`Relation::Related`].
-pub const RELATED: f64 = 0.5;
+pub(crate) const RELATED: f64 = 0.5;
 
 /// NFKC, ideographic spaces as spaces, runs of space as one, trimmed.
 fn common(s: &str) -> String {
@@ -127,7 +127,7 @@ fn suffix_start(t: &[char]) -> Option<usize> {
 
 /// A title as shown, its trailing group of bracketed parts (the chart's
 /// name: `[ANOTHER]`, `-7EX-`) cut, but kept up to its last `MIX`.
-pub fn title_display(title: &str) -> String {
+pub(crate) fn title_display(title: &str) -> String {
     let n = common(title);
     let t: Vec<char> = n.chars().collect();
     match suffix_start(&t) {
@@ -145,12 +145,12 @@ pub fn title_display(title: &str) -> String {
 }
 
 /// A title as compared ([`title_display`], lower case).
-pub fn title_key(title: &str) -> String {
+pub(crate) fn title_key(title: &str) -> String {
     title_display(title).to_lowercase()
 }
 
 /// An artist as compared ([`artist_display`], lower case).
-pub fn artist_key(artist: &str) -> String {
+pub(crate) fn artist_key(artist: &str) -> String {
     artist_display(artist).to_lowercase()
 }
 
@@ -345,7 +345,7 @@ fn slash_or_sep(t: &[char], i: usize) -> bool {
 /// An artist as shown, the credits for anything but the music removed
 /// (`alpha / obj: x` is `alpha`; `alpha feat. beta` is `alpha`; `remix:
 /// gamma` stays).
-pub fn artist_display(artist: &str) -> String {
+pub(crate) fn artist_display(artist: &str) -> String {
     let n = common(artist);
     let t: Vec<char> = n.chars().collect();
     // the credits, as a search finds them (one after another)
@@ -464,7 +464,7 @@ fn bigrams(s: &str) -> HashMap<(char, char), usize> {
 
 /// The Dice coefficient of `a` and `b` (normalized) by their two-letter
 /// pieces: 1 for the same, 0 when either is empty.
-pub fn dice(a: &str, b: &str) -> f64 {
+pub(crate) fn dice(a: &str, b: &str) -> f64 {
     if a.trim().is_empty() || b.trim().is_empty() {
         return 0.0;
     }
@@ -483,13 +483,13 @@ pub fn dice(a: &str, b: &str) -> f64 {
 /// The (title, artist) pairs of a song's charts, as compared: the most
 /// common first (then by path, then as given).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Profile {
-    pub pairs: Vec<(String, String)>,
+pub(crate) struct Profile {
+    pub(crate) pairs: Vec<(String, String)>,
 }
 
 impl Profile {
     /// Of charts' (title, artist, path); charts without a title count not.
-    pub fn of<'a>(charts: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) -> Profile {
+    pub(crate) fn of<'a>(charts: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) -> Profile {
         // (pair, count, first path, first index)
         let mut groups: Vec<((String, String), usize, String, usize)> = Vec::new();
         for (i, (title, artist, path)) in charts.into_iter().enumerate() {
@@ -519,12 +519,12 @@ impl Profile {
     }
 
     /// Of one chart.
-    pub fn one(title: &str, artist: &str) -> Profile {
+    pub(crate) fn one(title: &str, artist: &str) -> Profile {
         Profile::of([(title, artist, "")])
     }
 
     /// The most common pair.
-    pub fn dominant(&self) -> Option<&(String, String)> {
+    pub(crate) fn dominant(&self) -> Option<&(String, String)> {
         self.pairs.first()
     }
 
@@ -532,7 +532,7 @@ impl Profile {
     /// chart's): [`Relation::Strong`] by the two most common pairs; else
     /// [`Relation::Related`] when any of `other`'s pairs is alike by
     /// `rule`.
-    pub fn relation(&self, other: &Profile, rule: Rule) -> Relation {
+    pub(crate) fn relation(&self, other: &Profile, rule: Rule) -> Relation {
         let (Some((t, a)), Some((ot, oa))) = (self.dominant(), other.dominant()) else {
             return Relation::Unavailable;
         };
@@ -555,7 +555,8 @@ impl Profile {
 }
 
 /// Whether two charts are of one song by [`Relation::Strong`].
-pub fn same_song(title: &str, artist: &str, other_title: &str, other_artist: &str) -> bool {
+#[cfg(test)]
+pub(crate) fn same_song(title: &str, artist: &str, other_title: &str, other_artist: &str) -> bool {
     Profile::one(title, artist).relation(&Profile::one(other_title, other_artist), Rule::Either)
         == Relation::Strong
 }

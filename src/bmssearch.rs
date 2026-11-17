@@ -18,7 +18,7 @@ fn get(url: String) -> Step {
     Next::Ask(Request::Get(url))
 }
 
-pub struct Lookup {
+pub(crate) struct Lookup {
     api: String,
     md5: Option<String>,
     want: Want,
@@ -79,7 +79,7 @@ impl Lookup {
     /// by its title), asking the API at `api` ([`Config::bmssearch_api`]).
     ///
     /// [`Config::bmssearch_api`]: crate::config::Config::bmssearch_api
-    pub fn new(md5: &str, want: &Want, api: &str) -> Lookup {
+    pub(crate) fn new(md5: &str, want: &Want, api: &str) -> Lookup {
         Lookup {
             api: api.trim_end_matches('/').to_string(),
             md5: crate::chart::md5_key(md5),
@@ -183,8 +183,8 @@ impl Task for Lookup {
 }
 
 /// [`Lookup`] run natively (blocking).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn lookup(md5: &str, want: &Want, config: &crate::config::Config) -> Vec<String> {
+#[cfg(test)]
+pub(crate) fn lookup(md5: &str, want: &Want, config: &crate::config::Config) -> Vec<String> {
     let mut l = Lookup::new(md5, want, &config.bmssearch_api);
     crate::net::run(&mut l, &crate::net::Client::new(config))
 }

@@ -17,9 +17,9 @@ use url::Url;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct CourseTrophy {
-    pub name: String,
-    pub missrate: f64,
-    pub scorerate: f64,
+    pub(crate) name: String,
+    pub(crate) missrate: f64,
+    pub(crate) scorerate: f64,
 }
 
 /// A course (段位 / dan) defined by a table.
@@ -112,7 +112,7 @@ fn str_list(v: &Value) -> Vec<String> {
 }
 
 /// Find `<meta name="bmstable" content="...">` in an HTML page.
-pub fn find_bmstable_meta(html: &str) -> Option<String> {
+pub(crate) fn find_bmstable_meta(html: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
     let mut from = 0;
     while let Some(i) = lower[from..].find("<meta") {
@@ -162,7 +162,7 @@ fn attr(tag: &str, ltag: &str, name: &str) -> Option<String> {
     None
 }
 
-pub fn parse_header(v: &Value) -> Result<TableHeader, TableError> {
+pub(crate) fn parse_header(v: &Value) -> Result<TableHeader, TableError> {
     let o = v
         .as_object()
         .ok_or_else(|| TableError::Format("header is not an object".into()))?;
@@ -234,7 +234,7 @@ fn hash(v: &str, len: usize) -> String {
     }
 }
 
-pub fn parse_data(v: &Value) -> Result<Vec<TableEntry>, TableError> {
+pub(crate) fn parse_data(v: &Value) -> Result<Vec<TableEntry>, TableError> {
     let a = v
         .as_array()
         .ok_or_else(|| TableError::Format("data is not an array".into()))?;
@@ -285,7 +285,7 @@ fn join(base: &str, rel: &str) -> Result<String, TableError> {
 }
 
 /// Decode a response body (UTF-8 with BOM, or Shift_JIS for old tables).
-pub fn decode_body(bytes: &[u8]) -> String {
+pub(crate) fn decode_body(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_owned(),
@@ -295,7 +295,7 @@ pub fn decode_body(bytes: &[u8]) -> String {
 
 /// The 発狂 / 通常 tables (ribbit.xyz's, kept by darksabun.club).
 pub const INSANE: &str = "https://darksabun.club/table/archive/insane1/";
-pub const NORMAL: &str = "https://darksabun.club/table/archive/normal1/";
+pub(crate) const NORMAL: &str = "https://darksabun.club/table/archive/normal1/";
 
 /// Tables that moved: the old address, read from the new one (ribbit.xyz
 /// is gone).

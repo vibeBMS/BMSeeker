@@ -30,7 +30,7 @@ pub struct ChartInfo {
 /// extensions (BMS often names `.wav` files that are shipped as `.ogg`,
 /// `.bmp` as `.png`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Class {
+pub(crate) enum Class {
     Audio,
     Image,
     Movie,
@@ -45,13 +45,13 @@ const MOVIE: [&str; 15] = [
 
 /// A chart's MD5 as it is compared: 32 hex digits, lower case (None: not
 /// one).
-pub fn md5_key(m: &str) -> Option<String> {
+pub(crate) fn md5_key(m: &str) -> Option<String> {
     let m = m.trim();
     (m.len() == 32 && m.bytes().all(|b| b.is_ascii_hexdigit())).then(|| m.to_ascii_lowercase())
 }
 
 /// The class of a file by its extension (None: not one a chart uses).
-pub fn class_of(name: &str) -> Option<Class> {
+pub(crate) fn class_of(name: &str) -> Option<Class> {
     let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let (_, ext) = name.rsplit_once('.')?;
     let ext = ext.to_ascii_lowercase();
@@ -86,7 +86,7 @@ impl ChartInfo {
     }
 
     /// Its stage file, banner and back image (those it names).
-    pub fn extra_images(&self) -> Vec<&str> {
+    pub(crate) fn extra_images(&self) -> Vec<&str> {
         [&self.stagefile, &self.banner, &self.backbmp]
             .into_iter()
             .map(|s| s.as_str())
@@ -96,7 +96,7 @@ impl ChartInfo {
 }
 
 /// `bytes` of the chart file `path` (bmson by its extension, else BMS).
-pub fn info(path: &Path, bytes: &[u8]) -> Option<ChartInfo> {
+pub(crate) fn info(path: &Path, bytes: &[u8]) -> Option<ChartInfo> {
     let bmson = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("bmson"));

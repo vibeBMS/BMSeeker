@@ -9,7 +9,7 @@ use crate::net::{Answer, BoxTask, Next, Ready, Request, Task};
 use crate::unpack::is_archive;
 use std::path::Path;
 
-pub struct Drive;
+pub(crate) struct Drive;
 
 impl Host for Drive {
     fn name(&self) -> &'static str {
@@ -61,7 +61,7 @@ impl Host for Drive {
 
 /// The file or folder id of a Google Drive link (`/file/d/ID`,
 /// `/folders/ID`, `?id=ID`).
-pub fn drive_id(u: &str) -> Option<String> {
+pub(crate) fn drive_id(u: &str) -> Option<String> {
     let rest = ["/d/", "/folders/", "id="]
         .iter()
         .find_map(|k| u.find(k).map(|i| &u[i + k.len()..]))?;
@@ -87,14 +87,14 @@ fn folder_entries(page: &str) -> Vec<(String, String)> {
 
 /// A file or folder in a folder's listing.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Entry {
-    pub name: String,
-    pub id: String,
-    pub folder: bool,
+pub(crate) struct Entry {
+    pub(crate) name: String,
+    pub(crate) id: String,
+    pub(crate) folder: bool,
 }
 
 /// What an `embeddedfolderview` page lists.
-pub fn listing(page: &str) -> Vec<Entry> {
+pub(crate) fn listing(page: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     for part in page.split("class=\"flip-entry\"").skip(1) {
         let (id, folder) = match between(part, "/file/d/", "/") {
@@ -116,12 +116,12 @@ pub fn listing(page: &str) -> Vec<Entry> {
 }
 
 /// A folder's listing page.
-pub fn listing_url(id: &str) -> String {
+pub(crate) fn listing_url(id: &str) -> String {
     format!("https://drive.google.com/embeddedfolderview?id={id}")
 }
 
 /// A Drive file's link.
-pub fn file_link(id: &str) -> String {
+pub(crate) fn file_link(id: &str) -> String {
     format!("https://drive.google.com/file/d/{id}/view")
 }
 

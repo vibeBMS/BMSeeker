@@ -74,7 +74,7 @@ pub trait Store: Fs + AsFs {
 }
 
 /// `mtime` (seconds since 1970) as a time (None: before it).
-pub fn system_time(mtime: i64) -> Option<std::time::SystemTime> {
+pub(crate) fn system_time(mtime: i64) -> Option<std::time::SystemTime> {
     let secs = u64::try_from(mtime).ok()?;
     std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
 }
@@ -207,13 +207,13 @@ pub(crate) struct Mem(pub std::sync::Mutex<std::collections::BTreeMap<PathBuf, (
 
 #[cfg(test)]
 impl Mem {
-    pub fn put(&self, p: &Path, data: &[u8], mtime: i64) {
+    pub(crate) fn put(&self, p: &Path, data: &[u8], mtime: i64) {
         self.0
             .lock()
             .unwrap()
             .insert(p.to_path_buf(), (data.to_vec(), mtime));
     }
-    pub fn get(&self, p: &Path) -> Option<(Vec<u8>, i64)> {
+    pub(crate) fn get(&self, p: &Path) -> Option<(Vec<u8>, i64)> {
         self.0.lock().unwrap().get(p).cloned()
     }
 }

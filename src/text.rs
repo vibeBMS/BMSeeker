@@ -11,7 +11,7 @@ pub(crate) mod pattern;
 use encoding_rs::{EUC_KR, SHIFT_JIS, UTF_8};
 use entities::ENTITIES;
 
-pub fn decode_text(bytes: &[u8]) -> String {
+pub(crate) fn decode_text(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_owned();
@@ -63,7 +63,7 @@ fn kana_ratio(s: &str) -> f64 {
 }
 
 /// `bytes` in lower case hex.
-pub fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -74,13 +74,13 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// HTML's character references in text (`&amp;`, `&#12354;`,
 /// `&#x3042;`...).
-pub fn unescape(s: &str) -> String {
+pub(crate) fn unescape(s: &str) -> String {
     unescape_with(s, true)
 }
 
 /// [`unescape`] for an attribute's value (a link): only references that
 /// end in `;` (`&copy=1` in a URL stays).
-pub fn unescape_attr(s: &str) -> String {
+pub(crate) fn unescape_attr(s: &str) -> String {
     unescape_with(s, false)
 }
 
@@ -139,7 +139,7 @@ fn unescape_with(s: &str, legacy: bool) -> String {
 
 /// `n` as one file name: no path, nothing a file system refuses; None
 /// when nothing is left.
-pub fn safe_file_name(n: &str) -> Option<String> {
+pub(crate) fn safe_file_name(n: &str) -> Option<String> {
     let n: String = n
         .chars()
         .map(|c| match c {

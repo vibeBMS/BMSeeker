@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::net::{Answer, BoxTask, Next, Request, Task};
 
 /// A work on manbow (`event.cgi?action=More_def&num=N&event=E`).
-pub struct Manbow;
+pub(crate) struct Manbow;
 
 impl Host for Manbow {
     fn name(&self) -> &'static str {
@@ -154,7 +154,7 @@ impl Task for ManbowWork {
 
 /// A work on a BMS SEARCH event venue (`venue.bmssearch.net/<event>/<work>`):
 /// its manifest lists the links.
-pub struct BmsSearchVenue;
+pub(crate) struct BmsSearchVenue;
 
 impl Host for BmsSearchVenue {
     fn name(&self) -> &'static str {

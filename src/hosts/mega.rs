@@ -9,7 +9,7 @@ use crate::net::{Answer, BoxTask, NetError, Next, Ready, Request, Task};
 use crate::unpack::is_archive;
 use std::path::Path;
 
-pub struct Mega;
+pub(crate) struct Mega;
 
 impl Host for Mega {
     fn name(&self) -> &'static str {
@@ -175,7 +175,7 @@ impl MegaCipher {
 
 /// A MEGA file link (`mega.nz/file/H#K`, `mega.nz/#!H!K`): (handle,
 /// 32-byte key).
-pub fn mega_link(u: &str) -> Option<(String, Vec<u8>)> {
+pub(crate) fn mega_link(u: &str) -> Option<(String, Vec<u8>)> {
     if u.contains("/folder/") || u.contains("#F!") {
         return None;
     }
@@ -390,13 +390,13 @@ fn pick_in_pack<'a>(files: &'a [MegaFile], want: Option<&Want>) -> Option<&'a Me
 }
 
 /// The API request for a file's download URL.
-pub fn mega_request(handle: &str) -> Vec<u8> {
+pub(crate) fn mega_request(handle: &str) -> Vec<u8> {
     // ssl: an https URL (a page served over https may not read http)
     format!(r#"[{{"a":"g","g":1,"ssl":1,"p":"{handle}"}}]"#).into_bytes()
 }
 
 /// The download URL in the MEGA API's answer.
-pub fn mega_answer(body: &[u8]) -> Result<String, NetError> {
+pub(crate) fn mega_answer(body: &[u8]) -> Result<String, NetError> {
     let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("MEGA: {e}"))?;
     v.get(0)
         .and_then(|f| f.get("g"))

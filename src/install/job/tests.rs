@@ -10,15 +10,15 @@ use std::sync::Arc;
 /// answer after another; what was done, kept.
 #[derive(Default)]
 pub(crate) struct Canned {
-    pub http: Vec<(String, Answer)>,
-    pub files: RefCell<Vec<(String, Result<Served, Unserved>)>>,
-    pub done: RefCell<Vec<String>>,
+    pub(crate) http: Vec<(String, Answer)>,
+    pub(crate) files: RefCell<Vec<(String, Result<Served, Unserved>)>>,
+    pub(crate) done: RefCell<Vec<String>>,
     /// Cancel this progress at the first download.
-    pub cancel: Option<Arc<Progress>>,
+    pub(crate) cancel: Option<Arc<Progress>>,
 }
 
 impl Canned {
-    pub fn file(&self, url: &str, got: Result<Served, Unserved>) {
+    pub(crate) fn file(&self, url: &str, got: Result<Served, Unserved>) {
         self.files.borrow_mut().push((url.into(), got));
     }
 }

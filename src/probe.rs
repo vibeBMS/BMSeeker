@@ -71,18 +71,13 @@ impl Checked {
             error,
         }
     }
-
-    /// It downloads, as the song itself.
-    pub fn is_main(&self) -> bool {
-        matches!(self.state, State::Archive | State::Chart) && self.kind == Some(Kind::Main)
-    }
 }
 
 /// A share of a chart's sounds an archive must hold for it to be the song.
 const MAIN_COVERAGE: f32 = 0.9;
 
 /// What the files unpacked into `dir` are: (kind, charts, a title).
-pub fn classify(dir: &Path) -> (Kind, usize, String) {
+pub(crate) fn classify(dir: &Path) -> (Kind, usize, String) {
     let mut charts: Vec<(f32, String)> = Vec::new();
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
