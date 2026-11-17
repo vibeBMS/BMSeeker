@@ -4,6 +4,9 @@
 //! trimmed, the best by its length^0.65 × how many charts give it; a file
 //! system's limits kept (128 bytes a folder, 250 a path, as Shift_JIS
 //! counts them); `新しいフォルダー` when nothing is left.
+//!
+//! Derived from the BeMusicSeeker unofficial fork (MIT; copyright notices
+//! and licence text in THIRD_PARTY_NOTICES.md).
 
 use crate::chart::ChartInfo;
 use regex::Regex;

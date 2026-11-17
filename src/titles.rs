@@ -9,6 +9,9 @@
 //! artists are the same and the titles' Dice is at least 0.72,
 //! [`Relation::Related`] when the Dice of the title or the artist of any
 //! of the folder's pairs is at least 0.5 (both, with [`Rule::Both`]).
+//!
+//! Derived from the BeMusicSeeker unofficial fork (MIT; copyright notices
+//! and licence text in THIRD_PARTY_NOTICES.md).
 
 use std::collections::HashMap;
 

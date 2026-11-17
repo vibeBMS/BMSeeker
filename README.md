@@ -185,7 +185,8 @@ wasm32-unknown-unknown from 0.16.4; `delharc` (LHA) builds for it as it is.
 
 The rules for guessing a chart's folder, smart overwriting, filling links and exporting follow the behaviour of
 [BeMusicSeeker](https://github.com/Neeted/bemusicseeker-unofficial-fork) (by rib_2_bit; Neeted's unofficial fork; MIT),
-written again in Rust.
+written again in Rust, with some of its regular expressions as they are; its notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 
