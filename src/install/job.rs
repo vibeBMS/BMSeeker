@@ -165,6 +165,8 @@ pub struct Acquire {
     target: Option<Target>,
     moves: u8,
     waits: usize,
+    /// The link is the file's own ([`Acquire::plain`]).
+    plain: bool,
 }
 
 impl Acquire {
@@ -182,6 +184,7 @@ impl Acquire {
             target: None,
             moves: 0,
             waits: 0,
+            plain: false,
         }
     }
 
@@ -189,6 +192,15 @@ impl Acquire {
     pub fn failures_are_pages(mut self) -> Acquire {
         self.pages = true;
         self
+    }
+
+    /// The file `url` itself (a mirror's), not through the hosts: whatever
+    /// it is (a server's passing failure tried again).
+    pub fn plain(url: &str, slot: PathBuf, cx: &Context) -> Acquire {
+        Acquire {
+            plain: true,
+            ..Acquire::new(url, None, true, slot, cx)
+        }
     }
 
     fn resolved(&mut self, next: Next<Result<Target, Fetch>>) -> Step<Result<Got, Fetch>> {
@@ -216,7 +228,8 @@ impl Acquire {
     fn served(&mut self, s: Served) -> Step<Result<Got, Fetch>> {
         let t = self.target.take().expect("a target");
         let page = s.head.is_empty() || s.head.trim_ascii_start().starts_with(b"<");
-        if crate::hosts::sniff_bytes(&s.head).is_none() && !(self.any && !page) {
+        let kept = self.plain || crate::hosts::sniff_bytes(&s.head).is_some();
+        if !kept && !(self.any && !page) {
             let e = match crate::hosts::drive_quota(&s.head) {
                 true => Fetch::Failed(NetError::Other(crate::hosts::DRIVE_QUOTA.into())),
                 false => Fetch::Page,
@@ -279,6 +292,10 @@ impl Job for Acquire {
     type Output = Result<Got, Fetch>;
     fn start(&mut self) -> Step<Self::Output> {
         self.cx.stage(crate::progress::Stage::Finding);
+        if self.plain {
+            let url = self.r.link().to_string();
+            return self.resolved(Next::Done(Ok(Target::url(url))));
+        }
         let next = self.r.start();
         self.resolved(next)
     }
@@ -292,6 +309,114 @@ impl Job for Acquire {
             Fed::Downloaded(Err(u)) => self.unserved(u),
             Fed::Woke => self.download(),
         }
+    }
+}
+
+/// One of [`Files`]' links.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    pub url: String,
+    /// The file's own link (a mirror's: [`Acquire::plain`]), else an
+    /// author's (through the hosts).
+    pub plain: bool,
+}
+
+/// Why [`Files`] ended without them all: which link, and what it came to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Missed {
+    pub index: usize,
+    pub url: String,
+    pub fetch: Fetch,
+}
+
+/// Several links' files, one after another (natively into `<slots>-<i>`):
+/// all of them, or where the first that did not come stopped it.
+pub struct Files {
+    cx: Context,
+    sources: Vec<Source>,
+    slots: PathBuf,
+    pages: bool,
+    got: Vec<Got>,
+    current: Option<Acquire>,
+}
+
+impl Files {
+    /// `sources` in order, natively into files named after `slots`.
+    pub fn new(sources: Vec<Source>, slots: PathBuf, cx: &Context) -> Files {
+        Files {
+            cx: cx.clone(),
+            sources,
+            slots,
+            pages: false,
+            got: Vec::new(),
+            current: None,
+        }
+    }
+
+    /// A download that fails is a page ([`Acquire::failures_are_pages`]).
+    pub fn failures_are_pages(mut self) -> Files {
+        self.pages = true;
+        self
+    }
+
+    /// Where the `i`th file goes (natively).
+    pub fn slot(slots: &std::path::Path, i: usize) -> PathBuf {
+        let mut name = slots.file_name().unwrap_or_default().to_os_string();
+        name.push(format!("-{i}.part"));
+        slots.with_file_name(name)
+    }
+
+    /// The next file's job started, or the end.
+    fn next(&mut self) -> Step<Result<Vec<Got>, Missed>> {
+        let i = self.got.len();
+        let Some(src) = self.sources.get(i) else {
+            return Step::Done(Ok(std::mem::take(&mut self.got)));
+        };
+        let slot = Files::slot(&self.slots, i);
+        let mut a = match src.plain {
+            true => Acquire::plain(&src.url, slot, &self.cx),
+            false => Acquire::new(&src.url, None, false, slot, &self.cx),
+        };
+        if self.pages {
+            a = a.failures_are_pages();
+        }
+        let step = a.start();
+        self.current = Some(a);
+        self.went(step)
+    }
+
+    fn went(&mut self, step: Step<Result<Got, Fetch>>) -> Step<Result<Vec<Got>, Missed>> {
+        match step {
+            Step::Do(e) => Step::Do(e),
+            Step::Done(Ok(g)) => {
+                self.got.push(g);
+                self.current = None;
+                self.next()
+            }
+            Step::Done(Err(fetch)) => {
+                let index = self.got.len();
+                Step::Done(Err(Missed {
+                    index,
+                    url: self.sources[index].url.clone(),
+                    fetch,
+                }))
+            }
+        }
+    }
+}
+
+impl Job for Files {
+    type Output = Result<Vec<Got>, Missed>;
+    fn start(&mut self) -> Step<Self::Output> {
+        self.got.clear();
+        self.next()
+    }
+    fn feed(&mut self, fed: Fed) -> Step<Self::Output> {
+        let step = match self.current.as_mut() {
+            Some(a) => a.feed(fed),
+            None => return Step::Done(Ok(std::mem::take(&mut self.got))),
+        };
+        self.went(step)
     }
 }
 

@@ -28,7 +28,7 @@ mod venues;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use download::retrying;
 #[cfg(not(target_arch = "wasm32"))]
-pub use download::{download, download_to, fetch, fetch_named, sniff, Native};
+pub use download::{download, download_to, fetch, fetch_files, fetch_named, sniff, Native};
 pub use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
@@ -321,6 +321,11 @@ impl Resolver {
         self.link = self.alts.remove(0);
         self.hops = self.alt_hops;
         self.open()
+    }
+
+    /// The link it goes on with (the one it was made for, at first).
+    pub fn link(&self) -> &str {
+        &self.link
     }
 
     /// The host that opened the last link ("drive", "mega"...).

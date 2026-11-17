@@ -370,4 +370,47 @@ fn a_task_as_a_job() {
     assert!(run_job(&mut j, &d));
 }
 
+/// Files one after another: a mirror's as it is (a page too), an author's
+/// through the hosts; the first that does not come ends it.
+#[test]
+fn files_in_order() {
+    let sources = vec![
+        Source {
+            url: "http://author.test/a.zip".into(),
+            plain: false,
+        },
+        Source {
+            url: "http://mirror.test/b.mp4".into(),
+            plain: true,
+        },
+    ];
+    let d = Canned::default();
+    d.file("http://author.test/a.zip", zip_served());
+    d.file("http://mirror.test/b.mp4", page(None));
+    let mut j = Files::new(sources.clone(), "dl/.w".into(), &Context::default());
+    let got = run_job(&mut j, &d).unwrap();
+    let names: Vec<&str> = got.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(names, ["a.zip", "b.mp4"]);
+    assert_eq!(
+        Files::slot(Path::new("dl/.w"), 1),
+        Path::new("dl/.w-1.part")
+    );
+    // the first that does not come
+    let d = Canned::default();
+    d.file("http://author.test/a.zip", page(None));
+    let missed = run_job(
+        &mut Files::new(sources, "s".into(), &Context::default()),
+        &d,
+    );
+    assert_eq!(
+        missed.unwrap_err(),
+        Missed {
+            index: 0,
+            url: "http://author.test/a.zip".into(),
+            fetch: Fetch::Page
+        }
+    );
+    assert_eq!(steps(&d), ["download http://author.test/a.zip"]);
+}
+
 use std::path::Path;
