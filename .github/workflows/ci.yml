@@ -51,3 +51,44 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build ./...
+
+  # BMSeeker web (web/build.sh): the commands' wasm, its tests, and the GUI
+  # for js/wasm; pushes to main publish it to the gh-pages branch (GitHub
+  # Pages: https://vibebms.github.io/BMSeeker/, beside vibeBMS's /vibe/)
+  web:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: ${{ github.event_name == 'push' && 'web-pages' || format('web-{0}', github.run_id) }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: gui/go.mod
+          cache-dependency-path: gui/go.sum
+      - run: cargo fmt -p bmseeker-web --check
+      - run: cargo clippy -p bmseeker-web --all-targets -- -D warnings
+      - run: cargo clippy -p bmseeker-web --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test -p bmseeker-web
+      - run: GOOS=js GOARCH=wasm go vet ./...
+        working-directory: gui
+      - run: cargo install wasm-bindgen-cli --locked --version "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)"
+      - run: web/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: BMSeeker-web
+          path: web/dist
+      - name: publish to gh-pages
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./web/dist
+          commit_message: "web build ${{ github.sha }}"

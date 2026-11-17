@@ -1,17 +1,16 @@
 //! `library import`, `library place`, `library pending`, `library install`.
 
-use crate::{Run, SongArgs};
-use bmseeker::fs::Disk;
-use bmseeker::import::Imported;
-use bmseeker::install::{self, Done};
-use bmseeker::placement::{self, Located, Rules};
-use bmseeker::sources::{Query, Sources};
+use super::{Run, SongArgs};
+use crate::import::Imported;
+use crate::install::{self, Done};
+use crate::placement::{self, Located, Rules};
+use crate::sources::{Query, Sources};
 use clap::Subcommand;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
-pub enum Library {
+pub(super) enum Library {
     /// A downloaded file into the library: an archive unpacked, a chart
     /// into its song's folder.
     Import {
@@ -60,7 +59,7 @@ pub enum Library {
 
 /// What becomes of a song whose charts the library has.
 #[derive(clap::Args, Clone, Copy, Default)]
-pub struct Reinstall {
+pub(super) struct Reinstall {
     /// Bring its files in again, newer ones over those there (else only
     /// those its folder lacks).
     #[arg(long)]
@@ -69,35 +68,32 @@ pub struct Reinstall {
 
 /// `r`, songs whose charts the library has brought in again with
 /// `reinstall` (else as the settings say).
-pub fn reinstalling(r: &Run, reinstall: bool) -> Run {
-    let mut cx = r.cx.clone();
+pub(super) fn reinstalling<'a>(r: &Run<'a>, reinstall: bool) -> Run<'a> {
+    let mut r = r.clone();
     if reinstall {
-        let config = bmseeker::config::Config {
+        let config = crate::config::Config {
             reinstall: true,
-            ..(*cx.config).clone()
+            ..(*r.cx.config).clone()
         };
-        cx.config = std::sync::Arc::new(config);
+        r.cx.config = std::sync::Arc::new(config);
     }
-    Run {
-        out: r.out.clone(),
-        cx,
-    }
+    r
 }
 
-pub fn library(r: &Run, c: Library) -> Result<(), String> {
+pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
     match c {
         Library::Import {
             file,
             library,
             again,
         } => {
-            let req = bmseeker::install::Request {
+            let req = crate::install::Request {
                 reinstall: again.reinstall || r.config().reinstall,
                 naming: install::Naming::of(r.config(), Default::default()),
                 ..Default::default()
             };
-            let lib = &mut scan(&library, &r.config().downloads);
-            let got = bmseeker::import::import(&Disk, &file, lib, &req)?;
+            let lib = &mut scan(r, &library);
+            let got = crate::import::import(&*r.fs, &file, lib, &req)?;
             let (v, text) = match &got {
                 Imported::Unpacked(d, n) => (
                     json!({"state": "added", "path": d, "files": n}),
@@ -130,10 +126,6 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                     json!({"state": "other", "path": p}),
                     format!("{}: not a song", p.display()),
                 ),
-                other => (
-                    json!({"state": "other", "detail": format!("{other:?}")}),
-                    format!("{other:?}"),
-                ),
             };
             r.out.record(v, || text);
             Ok(())
@@ -145,7 +137,7 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
             min,
         } => {
             if let Some(dir) = to {
-                return match placement::bring(&Disk, &chart, &dir) {
+                return match placement::bring(r.fs.as_fs(), &chart, &dir) {
                     Ok(Some(at)) => {
                         r.out.record(json!({"state": "placed", "path": at}), || {
                             at.display().to_string()
@@ -166,9 +158,9 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
             let downloads = r.config().downloads.clone();
             let siblings = !chart.parent().is_some_and(|p| p.ends_with(&downloads));
             let (located, candidates) = placement::locate(
-                &Disk,
+                r.fs.as_fs(),
                 &chart,
-                &bmseeker::library::Library::new(&library),
+                &crate::library::Library::new(&library),
                 siblings,
                 rules,
             )
@@ -185,18 +177,19 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
         }
         Library::Pending { library } => {
             let waiting = library.join(&r.config().downloads);
-            let charts: Vec<PathBuf> = std::fs::read_dir(&waiting)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| placement::is_chart(p))
-                .collect();
+            let charts: Vec<PathBuf> =
+                r.fs.read_dir(&waiting)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|e| !e.is_dir && placement::is_chart(&e.path))
+                    .map(|e| e.path)
+                    .collect();
             // the library read once for all of them
-            let index = bmseeker::library::Library::new(&library);
+            let index = crate::library::Library::new(&library);
             for c in &charts {
-                let (located, best) = placement::locate(&Disk, c, &index, false, Rules::default())
-                    .unwrap_or((Located::NoSong, Vec::new()));
+                let (located, best) =
+                    placement::locate(r.fs.as_fs(), c, &index, false, Rules::default())
+                        .unwrap_or((Located::NoSong, Vec::new()));
                 let mut v = located_record(c, &located);
                 if let Some((b, l)) = best.first() {
                     v["best"] = json!({"folder": b.dir, "label": l, "coverage": b.coverage});
@@ -236,11 +229,9 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 ..Default::default()
             };
             let downloads = library.join(&r.config().downloads);
-            let lib = bmseeker::library::Library::new(&library);
-            let store = std::sync::Arc::new(Disk);
-            let job = install::job::Install::new(store, downloads, lib, q, links, &r.cx);
-            let native = bmseeker::native::Native::new(&r.cx);
-            let done = install::job::run_job(&mut job.sources(sources), &native).done;
+            let lib = crate::library::Library::new(&library);
+            let job = install::job::Install::new(r.fs.clone(), downloads, lib, q, links, &r.cx);
+            let done = install::job::run_job(&mut job.sources(sources), r.net).done;
             for d in &done {
                 r.out
                     .record(done_record(&song.title, d), || done_text(&song.title, d));
@@ -265,7 +256,7 @@ fn located_record(chart: &Path, l: &Located) -> Value {
 }
 
 /// What came of a song's download, as a record.
-pub fn done_record(title: &str, d: &Done) -> Value {
+pub(super) fn done_record(title: &str, d: &Done) -> Value {
     match d {
         Done::Added(dir, n) => json!({"title": title, "state": "added", "path": dir, "files": n}),
         Done::Owned(dir) => json!({"title": title, "state": "owned", "path": dir}),
@@ -275,11 +266,10 @@ pub fn done_record(title: &str, d: &Done) -> Value {
         Done::Failed(e) => {
             json!({"title": title, "state": "failed", "code": e.code(), "error": e.to_string()})
         }
-        other => json!({"title": title, "state": "other", "detail": format!("{other:?}")}),
     }
 }
 
-pub fn done_text(title: &str, d: &Done) -> String {
+pub(super) fn done_text(title: &str, d: &Done) -> String {
     match d {
         Done::Added(dir, n) => format!("{title}: added {} ({n} files)", dir.display()),
         Done::Owned(dir) => format!("{title}: in the library already: {}", dir.display()),
@@ -287,15 +277,14 @@ pub fn done_text(title: &str, d: &Done) -> String {
         Done::Waiting(p) => format!("{title}: {} waits for its song", p.display()),
         Done::Page(u) => format!("{title}: a page, download it in a browser: {u}"),
         Done::Failed(e) => format!("{title}: failed: {e}"),
-        other => format!("{title}: {other:?}"),
     }
 }
 
 /// The library below `dir`, every chart read (their MD5 and SHA-256), but
 /// those the last scan read as they are now (`downloads/scan.json`); not
 /// those waiting in its `downloads` folder.
-pub fn scan(dir: &Path, downloads: &str) -> bmseeker::library::Library {
-    let downloads = dir.join(downloads);
+pub(super) fn scan(r: &Run, dir: &Path) -> crate::library::Library {
+    let downloads = dir.join(&r.config().downloads);
     let cache = downloads.join("scan.json");
-    bmseeker::library::Library::scan_cached(&Disk, dir, &downloads, &cache)
+    crate::library::Library::scan_cached(&*r.fs, dir, &downloads, &cache)
 }

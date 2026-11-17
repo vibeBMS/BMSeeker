@@ -9,6 +9,10 @@ repository = "https://github.com/vibeBMS/BMSeeker"
 keywords = ["bms", "rhythm-game", "beatoraja", "lr2"]
 categories = ["command-line-utilities", "games"]
 
+# the web page's wasm (web/, built by web/build.sh)
+[workspace]
+members = [".", "web"]
+
 [lib]
 name = "bmseeker"
 path = "src/lib.rs"
@@ -65,3 +69,10 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# The web page's wasm (web/build.sh): wasm-bindgen reads the features
+# section a stripped build loses; smaller code, as a page downloads it.
+[profile.web]
+inherits = "release"
+strip = false
+opt-level = "s"

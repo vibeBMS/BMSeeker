@@ -10,17 +10,15 @@
 //!         "mirrored"?}        (a dead uploader's, checked through its mirrors)
 //! ```
 
-use crate::io::{read_text, records, s};
-use crate::Run;
-use bmseeker::hosts::Want;
-use bmseeker::manbow;
-use bmseeker::native::Native;
+use super::Run;
+use crate::hosts::Want;
+use crate::manbow;
 use clap::Subcommand;
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
-pub enum Event {
+pub(super) enum Event {
     /// An event's works (manbow's venue number), each with its links and
     /// which to take: the main archive, add-ons, mirrors.
     Works {
@@ -53,7 +51,7 @@ pub enum Event {
     },
 }
 
-pub fn event(r: &Run, c: Event) -> Result<(), String> {
+pub(super) fn event(r: &Run, c: Event) -> Result<(), String> {
     match c {
         Event::Works { venue, overrides } => works(r, venue, overrides),
         Event::Check {
@@ -67,9 +65,8 @@ pub fn event(r: &Run, c: Event) -> Result<(), String> {
 }
 
 fn works(r: &Run, venue: u32, overrides: Option<PathBuf>) -> Result<(), String> {
-    let native = Native::new(&r.cx);
     let base = &r.config().manbow;
-    let page = |u: String| native.get(&u).map(|b| manbow::decode(&b));
+    let page = |u: String| r.get(&u).map(|b| manbow::decode(&b));
     let works = manbow::works(
         base,
         venue,
@@ -134,8 +131,7 @@ fn check(
         Some(p) if p.exists() => records(&read_text(&p)?, "url")?,
         _ => Vec::new(),
     };
-    let sources = bmseeker::sources::Sources::from_config(r.config(), Vec::new());
-    let native = Native::new(&r.cx);
+    let sources = crate::sources::Sources::from_config(r.config(), Vec::new());
     let mut c = Checks {
         r,
         known: &known,
@@ -177,12 +173,12 @@ fn check(
             .filter(|k| k.get("num").and_then(|n| n.as_u64()) == Some(num))
             .map(|k| (s(k, "url"), s(k, "source")))
             .collect();
-        let q = bmseeker::sources::Query {
+        let q = crate::sources::Query {
             md5: String::new(),
             want: want.clone(),
             ..Default::default()
         };
-        for (source, url) in native.run(&mut sources.find_all(&q)) {
+        for (source, url) in r.task(&mut sources.find_all(&q)) {
             if !found.iter().any(|(u, _)| *u == url) {
                 found.push((url, source.to_string()));
             }
@@ -222,7 +218,7 @@ fn now() -> u64 {
 
 /// One check run: the links looked at, what was known of them.
 struct Checks<'a> {
-    r: &'a Run,
+    r: &'a Run<'a>,
     known: &'a [Map<String, Value>],
     days: u64,
     minutes: Option<u64>,
@@ -283,7 +279,7 @@ impl Checks<'_> {
         if time_up {
             return String::new();
         }
-        let c = bmseeker::probe::probe(url, Some(want.clone()), &self.tmp, &self.r.cx);
+        let c = crate::probe::probe(url, Some(want.clone()), &self.tmp, &self.r.cx);
         self.r.out.note(format!(
             "{}{} | {:?} {:?} {} MB {} charts {} | {url}",
             want.title,
@@ -312,5 +308,88 @@ impl Checks<'_> {
         let state = s(&rec, "state");
         self.r.out.json(&Value::Object(rec));
         state
+    }
+}
+
+/// `path`'s text, or stdin's for `-`.
+fn read_text(path: &Path) -> Result<String, String> {
+    if path == Path::new("-") {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| e.to_string())?;
+        Ok(s)
+    } else {
+        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// Records from `text`: JSON Lines, a JSON array of records, or a JSON
+/// object of records by `key` (`{"42": {...}}`: each gets `key` = its
+/// name, as a number if it is one).
+fn records(text: &str, key: &str) -> Result<Vec<Map<String, Value>>, String> {
+    let t = text.trim_start_matches('\u{feff}').trim();
+    if t.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(t) {
+        return match v {
+            Value::Array(a) => Ok(a
+                .into_iter()
+                .filter_map(|r| match r {
+                    Value::Object(o) => Some(o),
+                    _ => None,
+                })
+                .collect()),
+            Value::Object(o) if o.contains_key(key) => Ok(vec![o]),
+            Value::Object(o) => Ok(o
+                .into_iter()
+                .filter_map(|(k, r)| match r {
+                    Value::Object(r) => {
+                        // the key first, as a record of its own would have it
+                        let id = k.parse::<u64>().map(Value::from).unwrap_or(Value::from(k));
+                        let mut rec = Map::new();
+                        rec.insert(key.into(), id);
+                        rec.extend(r);
+                        Some(rec)
+                    }
+                    _ => None,
+                })
+                .collect()),
+            _ => Err("not records".into()),
+        };
+    }
+    t.lines()
+        .filter(|l| !l.trim().is_empty())
+        .enumerate()
+        .map(|(i, l)| match serde_json::from_str::<Value>(l) {
+            Ok(Value::Object(o)) => Ok(o),
+            Ok(_) => Err(format!("line {}: not a record", i + 1)),
+            Err(e) => Err(format!("line {}: {e}", i + 1)),
+        })
+        .collect()
+}
+
+/// A record's string field.
+fn s(r: &Map<String, Value>, k: &str) -> String {
+    r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_records() {
+        let lines = "{\"num\":1}\n\n{\"num\":2}\n";
+        assert_eq!(records(lines, "num").unwrap().len(), 2);
+        assert_eq!(
+            records("[{\"num\":1},{\"num\":2}]", "num").unwrap().len(),
+            2
+        );
+        let by_key = records(r#"{"15":{"note":"x"},"16":{}}"#, "num").unwrap();
+        assert_eq!(by_key[0]["num"], 15);
+        let by_url = records(r#"{"https://a/b.zip":{"state":"gone"}}"#, "url").unwrap();
+        assert_eq!(by_url[0]["url"], "https://a/b.zip");
+        assert_eq!(records(r#"{"num":3,"title":"t"}"#, "num").unwrap().len(), 1);
+        assert!(records("{\"num\":1}\nnot json\n", "num").is_err());
     }
 }

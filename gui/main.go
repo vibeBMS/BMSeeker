@@ -28,6 +28,7 @@ func main() {
 		}
 	}
 	a := newApp(library)
+	a.connect()
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "BMSeeker",

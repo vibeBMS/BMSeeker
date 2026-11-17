@@ -1,23 +1,21 @@
 //! `table show`, `table missing`, `table export`.
 
-use crate::library::{done_record, scan};
-use crate::link::fetch_list;
-use crate::Run;
-use bmseeker::export;
-use bmseeker::fs::Disk;
-use bmseeker::install::job::run_job;
-use bmseeker::install::{self, Batch, Entry, EntryJob};
-use bmseeker::links::Links;
-use bmseeker::native::Native;
-use bmseeker::sources::Sources;
-use bmseeker::table::{DifficultyTable, TableEntry, TableLoader};
+use super::library::{done_record, scan};
+use super::link::fetch_list;
+use super::Run;
+use crate::export;
+use crate::install::job::run_job;
+use crate::install::{self, Batch, Entry, EntryJob};
+use crate::links::Links;
+use crate::sources::Sources;
+use crate::table::{DifficultyTable, TableEntry, TableLoader};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[derive(Subcommand)]
-pub enum Table {
+pub(super) enum Table {
     /// A table's name and its levels, with how many charts each.
     Show { url: String },
     /// The table's charts a library lacks; --get downloads them.
@@ -52,14 +50,14 @@ pub enum Table {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-pub enum ExportTo {
+pub(super) enum ExportTo {
     Lr2,
     Bmt,
 }
 
 /// Where else charts' links are looked for, by MD5.
 #[derive(Args, Clone, Default)]
-pub struct LinkArgs {
+pub(super) struct LinkArgs {
     /// Other tables whose links count.
     #[arg(long = "also", value_name = "URL")]
     also: Vec<String>,
@@ -71,7 +69,7 @@ pub struct LinkArgs {
     own_links: bool,
 }
 
-pub fn table(r: &Run, c: Table) -> Result<(), String> {
+pub(super) fn table(r: &Run, c: Table) -> Result<(), String> {
     match c {
         Table::Show { url } => {
             let t = load(r, &url)?;
@@ -96,7 +94,7 @@ pub fn table(r: &Run, c: Table) -> Result<(), String> {
             reinstall,
             links,
         } => missing(
-            &crate::library::reinstalling(r, reinstall),
+            &super::library::reinstalling(r, reinstall),
             &url,
             &library,
             level.as_deref(),
@@ -111,18 +109,17 @@ pub fn table(r: &Run, c: Table) -> Result<(), String> {
         } => {
             let (t, _) = load_filled(r, &url, &links)?;
             let write = |p: &Path, b: &[u8]| {
-                if let Some(d) = p.parent() {
-                    std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-                }
-                std::fs::write(p, b).map_err(|e| format!("{}: {e}", p.display()))
+                r.fs.create(p, None)
+                    .and_then(|mut w| w.write_all(b).and_then(|()| w.flush()))
+                    .map_err(|e| format!("{}: {e}", p.display()))
             };
             match to {
                 ExportTo::Lr2 => {
                     let dir = out.join(install::safe_name(&t.header.name));
                     // the levels a table no longer has go
-                    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                        if e.path().extension().is_some_and(|x| x == "lr2folder") {
-                            let _ = std::fs::remove_file(e.path());
+                    for e in r.fs.read_dir(&dir).unwrap_or_default() {
+                        if !e.is_dir && e.path.extension().is_some_and(|x| x == "lr2folder") {
+                            let _ = r.fs.remove(&e.path);
                         }
                     }
                     let folders = export::lr2_folders(&t);
@@ -156,7 +153,7 @@ fn missing(
 ) -> Result<(), String> {
     let (t, links) = load_filled(r, url, args)?;
     // the library read once for the run (what comes in added to it)
-    let mut have = scan(library, &r.config().downloads);
+    let mut have = scan(r, library);
     let listed: Vec<&TableEntry> = t
         .entries
         .iter()
@@ -193,32 +190,30 @@ fn missing(
     // one batch: each file downloaded once; the charts it wants wait for
     // their songs
     let mut batch = Batch::new(missing.iter().map(|e| e.md5.clone()));
-    let native = Native::new(&r.cx);
     for e in missing {
         // an earlier one brought it, or its song (the chart first then)
         let entry = Entry::from_table(e, &links);
         let job = EntryJob::new(
-            Arc::new(Disk),
+            r.fs.clone(),
             downloads.clone(),
             have,
             entry,
             sources.clone(),
             &r.cx,
         );
-        let out = run_job(&mut job.batch(batch), &native);
+        let out = run_job(&mut job.batch(batch), r.net);
         (have, batch) = (out.lib, out.batch);
         for d in &out.done {
             r.out.record(done_record(&e.title, d), || {
-                crate::library::done_text(&e.title, d)
+                super::library::done_text(&e.title, d)
             });
         }
     }
     Ok(())
 }
 
-pub fn load(r: &Run, url: &str) -> Result<DifficultyTable, String> {
-    Native::new(&r.cx)
-        .run(&mut TableLoader::new(url))
+pub(super) fn load(r: &Run, url: &str) -> Result<DifficultyTable, String> {
+    r.task(&mut TableLoader::new(url))
         .map_err(|e| e.to_string())
 }
 

@@ -4,8 +4,9 @@ A library with no hard-coded places, a CLI whose commands write JSON Lines,
 and a GUI (Go, MyGo) on top of the CLI, in this one repository:
 
 ```
-Cargo.toml, src/        the library and the CLI (src/bin/bmseeker, feature `cli`)
-gui/                    the GUI: a Go module that embeds the CLI binary
+Cargo.toml, src/        the library and the CLI (src/cli, src/bin/bmseeker, feature `cli`)
+gui/                    the GUI: a Go module that embeds the CLI binary (or, for js/wasm, calls web/)
+web/                    the web page: bmseeker-web (the CLI's commands in a worker), its JS, build and test
 .github/workflows/      CI; releases build the CLI, then the GUI around it
 ```
 
@@ -28,7 +29,8 @@ library        the library's song folders, their files, the charts' hashes, titl
 placement      which song folder a chart of its own belongs in; the smart overwrite (clash)
 titles         titles and artists as the BeMusicSeeker fork compares them; same_song
 table, links, bmssearch, manbow, export, probe, naming, chart, text, config, progress, fs
-bin/bmseeker   the CLI: noun-verb commands, --json
+cli            the CLI's commands (noun-verb, --json) on a Run: a Store, a Driver, where lines go
+bin/bmseeker   the CLI natively: the disk, Native, stdout / stderr
 ```
 
 ### Tasks, jobs and drivers
@@ -163,3 +165,27 @@ command it runs as the CLI (same arguments, stdin/stdout, exit code); with
 no arguments or a path it opens the window. A link that needs a browser
 opens in a MyGo web view, which presses the page's Download button and
 hands the download back to the CLI.
+
+## Web page (`web/`)
+
+The GUI compiled to `js/wasm` (MyGo draws it on a canvas) and the CLI's
+commands (`cli`) compiled to wasm in `bmseeker-web`, which runs in a
+worker. The GUI's `cli_js.go` speaks the CLI's protocol to it: a command
+line in, JSON Lines records and notes out as they come, an exit code.
+
+The commands are synchronous; a browser's files and network are not,
+except in a worker: `FileReaderSync` reads a `File`, and synchronous
+`XMLHttpRequest` makes a request (`net::Xhr`, the job's `Driver`, through
+vibeBMS's CORS proxy). Listing and writing stay asynchronous, so the
+worker lists the target into a `Mirror` (each file's path, size and time;
+its bytes read when a command reads them), runs the command on it, then
+writes what changed (`Mirror::changes`: removed, moved, written) and
+settles the mirror. Targets: the vibeBMS library in OPFS (`bms/`,
+written with sync access handles as vibeBMS writes it; `bmseeker/` for
+downloads and the scan; nothing else writable), a folder from
+`showDirectoryPicker` (its handle kept in IndexedDB), or nothing (a zip of
+what came in). For vibeBMS: the writes hold the Web Lock
+`vibebms-library` alone (vibeBMS lists and reads its library holding it
+shared), a file vibeBMS has open is asked again a few times, and the song
+folders changed are posted on the `BroadcastChannel` `vibebms-library`,
+which open vibeBMS pages list and mount again.

@@ -3,9 +3,8 @@
 //! thread, ended by its progress' cancel or by [`STALL_MS`] of silence.
 
 use crate::hosts::{Target, STALL_MS};
-use crate::net::{percent_decode, Answer, NetError, Request};
+use crate::net::{disposition_name, Answer, NetError, Request};
 use crate::progress::Progress;
-use crate::text::safe_file_name;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -222,29 +221,6 @@ fn header_text(v: &[u8]) -> String {
         Ok(t) => t.to_string(),
         Err(_) => v.iter().map(|&b| b as char).collect(),
     }
-}
-
-/// The file name in a `Content-Disposition` header (`filename*=UTF-8''…`
-/// or `filename="…"`; UTF-8 sent as Latin-1 read back as UTF-8).
-pub(super) fn disposition_name(h: &str) -> Option<String> {
-    let lower = h.to_ascii_lowercase();
-    let value = |key: &str| {
-        let at = lower.find(key)? + key.len();
-        let v = h[at..].split(';').next()?.trim().trim_matches('"');
-        (!v.is_empty()).then(|| v.to_string())
-    };
-    let name = if let Some(v) = value("filename*=") {
-        let v = v
-            .split_once("''")
-            .map_or(v.as_str(), |(_, n)| n)
-            .to_string();
-        percent_decode(&v)
-    } else {
-        let v = value("filename=")?;
-        let latin1: Option<Vec<u8>> = v.chars().map(|c| u8::try_from(c as u32).ok()).collect();
-        latin1.and_then(|b| String::from_utf8(b).ok()).unwrap_or(v)
-    };
-    safe_file_name(&name)
 }
 
 /// Fill `buf` (short only at the end).

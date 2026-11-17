@@ -125,7 +125,7 @@ func (a *app) view(c *ui.Context) {
 			}
 		})
 		if a.settings.Library == "" {
-			ui.Text(c, "Choose your BMS folder in Settings first.")
+			ui.Text(c, noLibrary)
 		}
 		labels := []string{"Tables", "Link", "Waiting", "Settings"}
 		if len(a.pages) > 0 {
@@ -341,24 +341,7 @@ func (a *app) waitingView(c *ui.Context) {
 }
 
 func (a *app) settingsView(c *ui.Context) {
-	ui.Text(c, "BMS folder").Bold()
-	ui.Row(c).Gap(8).Children(func() {
-		lib := a.settings.Library
-		if lib == "" {
-			lib = "(none)"
-		}
-		ui.Text(c, lib).Grow(1).SingleLine()
-		if ui.Button(c, "Choose…").Clicked() {
-			go func() {
-				paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: a.win, Title: "BMS folder", Directory: true})
-				if err == nil && len(paths) > 0 {
-					a.update(func() {
-						a.settings.Library = paths[0]
-					})
-				}
-			}()
-		}
-	})
+	a.libraryView(c)
 	ui.Text(c, "Downloads").Bold()
 	ui.Checkbox(c, &a.settings.ThirdParty, "Third-party mirrors (darksabun.club, bms.hexlataia.xyz, the bms.kyouko.moe archive)")
 	ui.Text(c, "Other people's copies of dead sites and uploaders. What is found by name goes in only if it holds the chart (MD5).")
