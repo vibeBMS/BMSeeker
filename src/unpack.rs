@@ -1,6 +1,6 @@
 //! Archives (.zip, .7z, .rar, .lzh) unpacked: into a [`Store`] (a disk, a
 //! player's files: [`unpack`]) or handed over member by member
-//! ([`unpack_bytes`]). Members by their path (made safe: [`safe_rel`]),
+//! ([`unpack_bytes`]). Members by their path (made safe: `safe_rel`),
 //! within a budget (an archive can claim, or expand to, anything), with
 //! the archive's file times.
 

@@ -54,6 +54,18 @@ impl NetError {
     pub fn gone(&self) -> bool {
         matches!(self, NetError::Status(404 | 410) | NetError::Gone(_))
     }
+
+    /// What it is, for a program to read (its text is a person's):
+    /// `status`, `stalled`, `cancelled`, `gone`, `other`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            NetError::Status(_) => "status",
+            NetError::Stalled(_) => "stalled",
+            NetError::Cancelled => "cancelled",
+            NetError::Gone(_) => "gone",
+            NetError::Other(_) => "other",
+        }
+    }
 }
 
 impl std::fmt::Display for NetError {

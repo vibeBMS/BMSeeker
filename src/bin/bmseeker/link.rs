@@ -68,7 +68,8 @@ pub fn link(r: &Run, c: Link) -> Result<(), String> {
                         "name": t.name, "encrypted": t.mega_key.is_some()}),
                     Err(Fetch::Page) => json!({"link": l, "state": "page", "host": host}),
                     Err(Fetch::Failed(e)) => {
-                        json!({"link": l, "state": state_of(e), "host": host, "error": e.to_string()})
+                        json!({"link": l, "state": state_of(e), "host": host, "code": e.code(),
+                            "error": e.to_string()})
                     }
                 };
                 r.out.record(rec, || match got {

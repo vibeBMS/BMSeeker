@@ -7,7 +7,7 @@
 //! [`Config::stella_list`]: crate::config::Config::stella_list
 //!
 //! [`Links::fill`] fills a link only where the table has none, or one on a
-//! host known to be gone ([`is_dead`]); [`Links::song_links`] /
+//! host known to be gone (`is_dead`); [`Links::song_links`] /
 //! [`Links::chart_links`] give every link known for a chart, the table's own
 //! first, to try one after another.
 

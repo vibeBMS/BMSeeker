@@ -1,5 +1,5 @@
 //! Where else a song's (or its separate chart's) links are looked for when
-//! its own do not bring it: each place is a [`Source`] (link lists by MD5:
+//! its own do not bring it: each place is a `Source` (link lists by MD5:
 //! difficulty tables, the Stella uploader's list, TSV lists; BMS SEARCH by
 //! MD5, else by title and artist; mirrors of dead sites' charts by the file
 //! name BMS SEARCH knows; Ginger's and Konmai's packages by MD5; the

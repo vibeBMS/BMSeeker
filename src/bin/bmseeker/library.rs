@@ -272,7 +272,9 @@ pub fn done_record(title: &str, d: &Done) -> Value {
         Done::Placed(p) => json!({"title": title, "state": "placed", "path": p}),
         Done::Waiting(p) => json!({"title": title, "state": "waiting", "path": p}),
         Done::Page(u) => json!({"title": title, "state": "page", "link": u}),
-        Done::Failed(e) => json!({"title": title, "state": "failed", "error": e.to_string()}),
+        Done::Failed(e) => {
+            json!({"title": title, "state": "failed", "code": e.code(), "error": e.to_string()})
+        }
         other => json!({"title": title, "state": "other", "detail": format!("{other:?}")}),
     }
 }

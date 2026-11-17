@@ -2,7 +2,7 @@
 //! and which of each work's download links to take.
 //!
 //! An event's URL list has every work with its links; a link's label is
-//! the text on its line or the headings above it. [`pick`] guesses which
+//! the text on its line or the headings above it. `pick` guesses which
 //! link is the main archive (a high quality one over a low quality one,
 //! then ogg over wav, a file over a folder, the latest full package over
 //! patches for earlier downloads), which are separate add-on archives
@@ -232,7 +232,7 @@ fn score(label: &str, url: &str, versions: bool) -> i32 {
     s
 }
 
-/// What [`pick`] makes of a work's links.
+/// What `pick` makes of a work's links.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pick {
     /// The main archive's links, in the order to try (mirrors after).

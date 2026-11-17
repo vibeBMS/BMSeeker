@@ -3,12 +3,12 @@
 //! install destination. A song's folder is a folder holding charts; the
 //! files below it count by their path in it (a chart's `sound/kick.wav` is
 //! the song's `sound/kick.ogg`, not a `kick.ogg` beside its charts) and by
-//! their kind (an image never stands for a sound: [`Class`]). A folder is a
+//! their kind (an image never stands for a sound: `Class`). A folder is a
 //! candidate when, with the files the chart came with, it holds the sounds
 //! the chart uses ([`Rules`]: 80% to be listed, 99% to be chosen); the chart
 //! goes there without asking only when its charts are the same song (the
 //! same artist and a title alike, as the BeMusicSeeker fork compares them:
-//! [`crate::titles`]; two such folders: asked): numbered sound names
+//! `titles`; two such folders: asked): numbered sound names
 //! (`01.wav`, `02.wav`, ...) are common, so the file names alone prove
 //! nothing. Else the user picks among the best candidates (songs alike
 //! first).
@@ -230,7 +230,7 @@ pub fn same_title(a: &str, b: &str) -> bool {
     short.chars().count() >= 3 && long.starts_with(&short)
 }
 
-/// The same title, but for its brackets ("Song [ANOTHER]" is "Song").
+/// The same title, but for its brackets (`Song [ANOTHER]` is `Song`).
 pub fn same_name(a: &str, b: &str) -> bool {
     let a = strip_brackets(a);
     !a.is_empty() && a == strip_brackets(b)
@@ -300,10 +300,10 @@ pub struct Candidate {
     pub coverage: f32,
     /// How many of them the folder holds itself.
     pub own: usize,
-    /// The folder's song is the chart's ([`titles::Relation::Strong`]:
+    /// The folder's song is the chart's (`titles::Relation::Strong`:
     /// the same artist, the titles alike).
     pub same_song: bool,
-    /// Its title or artist is alike ([`titles::Relation::Related`]).
+    /// Its title or artist is alike (`titles::Relation::Related`).
     pub related: bool,
     /// The shares of its BGA images, movies, and stage file / banner /
     /// back image there (1 when it names none).
@@ -756,7 +756,7 @@ pub(crate) fn clash(
 }
 
 /// Move `file` into the folder `dir` (a chart, or a file it came with), by
-/// [`clash`]: a chart of the same name there is not replaced (it comes in
+/// `clash`: a chart of the same name there is not replaced (it comes in
 /// as `name_.bms`; the same chart again just goes); another file of the
 /// same name stays unless `file` is newer, and `file` goes (the one there
 /// set aside until it is in: a failure leaves it). Returns where it is now

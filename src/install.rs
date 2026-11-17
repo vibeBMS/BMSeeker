@@ -57,6 +57,20 @@ impl Failure {
     pub fn cancelled(&self) -> bool {
         matches!(self, Failure::Net(crate::net::NetError::Cancelled))
     }
+
+    /// What it is, for a program to read (its text is a person's): the
+    /// download's ([`NetError::code`](crate::net::NetError::code)),
+    /// `not_the_chart`, `no_chart_link`, `no_link`, `downloaded`, `other`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Failure::Net(e) => e.code(),
+            Failure::NotTheChart => "not_the_chart",
+            Failure::NoChartLink => "no_chart_link",
+            Failure::NoLink => "no_link",
+            Failure::Downloaded => "downloaded",
+            Failure::Other(_) => "other",
+        }
+    }
 }
 
 impl std::fmt::Display for Failure {

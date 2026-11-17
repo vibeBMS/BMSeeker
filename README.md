@@ -44,11 +44,13 @@ event check [works FILE|-] [--known FILE] [--days N] [--minutes M] [--search]
 
 With `--json`, every command writes JSON Lines (one record a line, as it goes). The `event` commands always do, and
 read records from a file or `-` (stdin): JSON Lines, a JSON array, or an object by key. Notes for people go to
-stderr only.
+stderr only. A record of a failure has its `"error"` for a person and a `"code"` for a program: `status`, `stalled`,
+`cancelled`, `gone`, `other` (the download), `not_the_chart`, `no_chart_link`, `no_link`, `downloaded` (the install),
+`unpack`.
 
 ```text
 work   {"num","title","artist","team","kind","size_kb","page","links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
-check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","charts","title"?,"error"?,"at",
+check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,"size","charts","title"?,"code"?,"error"?,"at",
         "num"?,"source"?,"mirrored"?}
 ```
 
@@ -65,17 +67,21 @@ The places other links are looked for (sources) are asked in the order of the `s
 gave; a separate chart not tied to a work is searched by title and artist).
 `--third-party` (setting `"third_party": true`; off by default) adds third parties' copies: mirrors of dead sites'
 separate charts (`mirrors`: by the chart's file name BMS SEARCH knows, in the `chart_mirrors` folders, by default
-darksabun's mirror of absolute), the community archive's "BMS Library" (`bmslibrary`: bms.kyouko.moe's
-`Title (by Artist).rar` by title and artist; asked for separate charts too, as a song's archive often holds them), and
-dead uploaders' files by number (`uploaders`). What is found by name (`mirrors`, `bmslibrary`) goes into the library
-only if it holds the chart (its MD5); a song's archive also when its charts are the song's (title and artist), the
-chart wanted being a separate one. `--own-links`: a song's own links only.
+darksabun's mirror of absolute), the package holding a chart by its MD5 as the BeMusicSeeker fork finds one
+(`ginger`: gingerrush.com's `downloadURL`, then `konmai`: bms.alvorna.com's `song_url`; settings `ginger`, `konmai`),
+the community archive's "BMS Library" (`bmslibrary`: bms.kyouko.moe's `Title (by Artist).rar` by title and artist;
+asked for separate charts too, as a song's archive often holds them), and dead uploaders' files by number
+(`uploaders`). What these sources bring goes into the library only if it holds the chart (its MD5); a song's archive
+also when its charts are the song's (title and artist), the chart wanted being a separate one. The sources are asked
+only for a chart whose MD5 is known, for its song or (the song in the library) for the chart itself.
+`--own-links`: a song's own links only.
 
 What a download holds is sorted before anything goes into the library:
 
 - **Packages.** An archive may hold several songs' folders and charts of their own; it is split by the BeMusicSeeker
-  fork's rules (a folder whose charts' files are there is one, with the folders below; a folder of one chart or one
-  song's charts is one; other charts are each one). Where those rules are not sure, the whole archive is one.
+  fork's rules (a folder whose charts' files are there is one, with the folders below; a folder of one chart, or of
+  charts of one title and artist as compared below, is one; other charts are each one). Where those rules are not
+  sure, the whole archive is one.
 - **What each package is.** A song new to the library (a folder of its own, named after the song's title or the
   archive, `name (2)` beside another song of that name); the library's already (state `owned`: nothing is downloaded
   into a second folder; only the files its folder lacks come in, or with `--reinstall` / `"reinstall": true` newer ones
@@ -90,7 +96,9 @@ What a download holds is sorted before anything goes into the library:
      name at the end of the title cut (`[ANOTHER]`, `-7EX-`, kept up to a `MIX`), the artist's credits for anything
      but the music removed (`/ obj:`, `feat.`, `BGA:`, `差分`; not `remix`, `作曲`). The same song when the artists are
      the same and the titles' Dice coefficient is at least 0.72, which a chart needs to go into a folder without
-     asking (two such folders: it waits); folders whose title or artist is alike (Dice 0.5) are offered first.
+     asking (two such folders: it waits); folders whose title or artist is alike (Dice 0.5) are offered first. This
+     is the one test of "the same song" everywhere: a song's folder reused, the library having a table entry's song,
+     what a download found by name holds.
 - **Waiting.** A separate chart whose song is not in the library yet waits in the downloads folder (of a pack of many,
   only the chart wanted; with `table missing --get`, the run's missing charts) and goes into the song's folder when the
   song comes.
@@ -101,7 +109,8 @@ What a download holds is sorted before anything goes into the library:
 - **Each file once a run**, whatever link leads to it (Google Drive's `gdrive:ID`, MediaFire's, MEGA's, Dropbox's, else
   the URL without its `#` part; a folder's link with the song looked for in it).
 - **Links on the way.** A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker knows (Dropbox, Google
-  Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) is tried again twice. Google
+  Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) on a download or a request
+  (a page, an API) is tried again twice, after 3 and 10 seconds. Google
   Drive's "Quota exceeded" (a file downloaded too often lately) is reported as such: it passes within a day.
 
 Dead uploaders' links (with `--third-party`) are downloaded from copies by number (`uploaders`). By default: gnqg
@@ -113,7 +122,8 @@ down `#sub/folder/file`.
 
 Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`) are JSON over the defaults:
 `user_agent`, `mirror_catalog` (the BMS event mirror's list; empty: not used), `manbow`, `bmssearch_api`,
-`stella_list`, `mega_api`, `sources`, `third_party`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`,
+`stella_list`, `mega_api`, `sources`, `third_party`, `ginger`, `konmai`, `uploaders`, `chart_mirrors`, `bms_library`,
+`tables`,
 `downloads` (the folder in a library where downloads wait), `min_coverage`, `reinstall`, `folder_naming`,
 `folder_name_format`, `sjis_only`.
 
@@ -163,28 +173,30 @@ Go 1.27+).
 | `hosts` | link → archive: direct links, Google Drive files and folders, Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
 | `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder, no archive bombs; the archive's file times kept; archives inside one holding no chart unpacked too) |
 | `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not; where file times mean nothing, as in a web page's storage, the one there stays) |
-| `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists, and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan`), folder by folder when first needed (`new`), or given by a player's own records of its charts (`from_catalog`: a web page cannot read its library's charts when it likes); what comes in is added to it (`add`, `add_folder`). |
+| `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists (by artist, as compared), and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan_cached`: in parallel, a chart the last scan read taken from its cache while its time and size are the same; the CLI keeps it in `<downloads>/scan.json`), folder by folder when first needed (`new`), or given by a player's own records of its charts (`from_catalog`: a web page cannot read its library's charts when it likes); what comes in is added to it (`add`, `add_folder`). |
 | `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
 | `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart); what arrives goes through `take` (on any `fs::Store`): unpacked into a folder of its own, planned without touching a file (`plan`), carried out (`apply`) |
-| `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, the community archive |
+| `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, Ginger's and Konmai's packages by MD5, the community archive |
 | `links` | other links by a chart's MD5 (the tables given, the Stella uploader's list): filling empty or dead links, trying them in turn when one does not download |
 | `manbow` | manbow events: works and their links (with labels) from the URL list and work list, and which link is the main archive (HQ > ogg > file, the newest package), an add-on (extra charts, BGA alone) or a mirror (the BMS event mirror's `works.json`; the links to download from a work page) |
 | `bmssearch` | the BMS SEARCH API: a chart's work and its download links |
 | `probe` | a link downloaded, unpacked and sorted: downloaded / page / gone (404, 410) / error; main (90% or more of its charts' sounds inside), add-on (separate charts), media (no charts) |
 | `export` | a difficulty table as an LR2 custom folder (`.lr2folder`) or a beatoraja cache (`.bmt`) |
 | `fs` | file access (`Disk`, or wherever a player keeps its library) |
+| `native` | the network natively: `Native` drives the jobs (one HTTP agent for every request, so a host's connection is kept; a download streamed to disk on the calling thread, ended by a cancel or a minute without data; a MEGA file decrypted as it comes); `fetch`, `fetch_files` |
 
 Everything that reads the network is a `net::Task` (an IO-free job that hands out requests and takes their answers):
-`hosts::Resolver` (a link through the `Host` strategies), `table::TableLoader`, `bmssearch::Lookup`, the sources.
-Natively `net::run` runs one blocking; the browser (vibeBMS's web build) runs the same job asynchronously. Where it
-reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`. The design:
+`hosts::Resolver` (a link through the `Host` strategies), `table::TableLoader`, `bmssearch::Lookup`, the sources. A
+download is an `install::job::Job` (requests, files and waits as effects), which tries a server's passing failure
+again itself. Natively `native::Native` drives either; the browser (vibeBMS's web build) drives the same jobs
+asynchronously. Where it reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`. The design:
 [DESIGN.md](DESIGN.md).
 
 ## Web (wasm32)
 
-The library builds for wasm32 too (the network is `net::Task`, so the browser makes the requests; `import`,
-`install::take` and `unpack` work on whatever `fs::Store` the page keeps its files in). `unrar-rs`, which unpacks RAR, builds for
-wasm32-unknown-unknown from 0.16.4; `delharc` (LHA) builds for it as it is.
+The library builds for wasm32 too (the network is `net::Task` and `install::job::Job`, so the browser makes the
+requests; `import`, `install::take` and `unpack` work on whatever `fs::Store` the page keeps its files in).
+`unrar-rs`, which unpacks RAR, builds for wasm32-unknown-unknown from 0.16.4; `delharc` (LHA) builds for it as it is.
 
 ## Credits
 

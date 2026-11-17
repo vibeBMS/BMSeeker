@@ -39,7 +39,7 @@ pub enum Naming {
     /// This name (the song's title, made a file name).
     Named(String),
     /// After its charts, as the BeMusicSeeker fork names one
-    /// ([`crate::naming::folder_name`]: `format` with `%ARTIST%` and
+    /// (`naming::folder_name`: `format` with `%ARTIST%` and
     /// `%TITLE%`; `sjis_only`: only characters Shift_JIS has); a folder the
     /// download wraps everything in left out; a folder of the library
     /// holding the song (by its charts' titles and artists, whatever its

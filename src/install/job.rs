@@ -2,7 +2,7 @@
 //! [`Effect`]: a request, a file downloaded, a wait) and is fed what came
 //! of it ([`Fed`]), until it is done; it does no I/O itself. A platform's
 //! driver does the effects: natively [`run_job`] with
-//! [`Native`](crate::native::Native); in a web page, through its fetch and
+//! `native::Native`; in a web page, through its fetch and
 //! proxy, asynchronously; in tests, canned. A [`Task`] (requests only) is a
 //! job too ([`TaskJob`]). A request or a download that meets a server's
 //! passing failure (busy; a gateway's error) is tried again here after a
@@ -404,7 +404,7 @@ impl Job for Acquire {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileLink {
     pub url: String,
-    /// The file's own link (a mirror's: [`Acquire::plain`]), else an
+    /// The file's own link (a mirror's: `Acquire::plain`), else an
     /// author's (through the hosts).
     pub plain: bool,
 }
@@ -527,7 +527,7 @@ enum Doing {
 /// then those each source finds (asked one after another, only while
 /// nothing has come in): each link's file ([`Acquire`]; a chart's own link
 /// as it is) into the library ([`super::take`]), until one brings it in
-/// ([`super::Tries`]). A file the batch has had is not downloaded again.
+/// (`Tries`). A file the batch has had is not downloaded again.
 /// Natively each download passes through a folder of its own in
 /// `downloads` (`.job-…`).
 pub struct Install {

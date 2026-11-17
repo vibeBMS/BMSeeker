@@ -1,18 +1,18 @@
 //! From a link where an author put a BMS archive to the archive's own URL,
 //! without a browser where that can be done.
 //!
-//! Each kind of link is a [`Host`]: Google Drive files and folders,
+//! Each kind of link is a `Host`: Google Drive files and folders,
 //! Dropbox, MediaFire, MEGA files and folders, a work's page on an event
 //! venue (manbow, BMS SEARCH), hosts that need a browser, and any server
 //! that sends the file itself. [`Hosts`] holds them in the order they are
 //! asked; the first that accepts a link opens it. A host's answer is a
-//! [`Resolved`]: the file ([`Target`]), another link to follow (a venue's
+//! `Resolved`: the file ([`Target`]), another link to follow (a venue's
 //! work page names the author's link), a page for a person, or a failure.
 //!
 //! [`Resolver`] walks a link through the hosts as a [`Task`]: it asks for
 //! requests and is fed the answers ([`crate::net`]), so it runs natively,
 //! in a web page and in tests alike. Downloading the file itself is the
-//! driver's ([`Native`](crate::native::Native) natively).
+//! driver's (`native::Native` natively).
 
 mod browser;
 pub(crate) mod drive;

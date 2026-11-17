@@ -137,7 +137,7 @@ pub(crate) fn entry_steps(e: &Entry, lib: &Library) -> Vec<EntryStep> {
 }
 
 /// What a batch of downloads (a table's missing charts) shares: the files
-/// it has had (by their [`DownloadKey`]), and the charts it wants (a
+/// it has had (by their `DownloadKey`), and the charts it wants (a
 /// separate chart's archive of many keeps those waiting for their songs).
 #[derive(Clone, Debug, Default)]
 pub struct Batch {
@@ -187,9 +187,9 @@ impl Batch {
     }
 }
 
-/// An entry's steps ([`entry_steps`], then its add-ons) one after another,
+/// An entry's steps (`entry_steps`, then its add-ons) one after another,
 /// each an [`Install`] into the library (what comes in added to it), the
-/// next one only when it is due ([`EntryStep::due`]). The sources are
+/// next one only when it is due (`EntryStep::due`). The sources are
 /// asked only with the chart's MD5, and only for the song or, with the
 /// song in the library, for the chart; never for an add-on. With the song
 /// in the library and none of the chart's links bringing it (nor leading

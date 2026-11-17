@@ -55,6 +55,10 @@ pub struct Checked {
     /// A chart's title (the first with the most sounds there).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    /// What the error is, for a program ([`NetError::code`], `unpack`,
+    /// `other`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub code: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
 }
@@ -63,6 +67,7 @@ impl Checked {
     fn state(state: State, error: String) -> Checked {
         Checked {
             state,
+            code: String::new(),
             kind: None,
             format: String::new(),
             size: 0,
@@ -125,7 +130,10 @@ pub(crate) fn classify(dir: &Path) -> (Kind, usize, String) {
 pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Context) -> Checked {
     let _ = std::fs::remove_dir_all(tmp);
     if let Err(e) = std::fs::create_dir_all(tmp) {
-        return Checked::state(State::Error, e.to_string());
+        return Checked {
+            code: "other".into(),
+            ..Checked::state(State::Error, e.to_string())
+        };
     }
     let file = tmp.join("download");
     let r = if crate::install::chart_link(link) {
@@ -142,7 +150,10 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
         Err(Fetch::Failed(e)) => {
             // (a host's word that it is gone counts here only as an error)
             let gone = matches!(e, NetError::Status(404 | 410));
-            Checked::state(if gone { State::Gone } else { State::Error }, e.to_string())
+            Checked {
+                code: e.code().into(),
+                ..Checked::state(if gone { State::Gone } else { State::Error }, e.to_string())
+            }
         }
         Ok(()) => {
             let size = std::fs::metadata(&file).map_or(0, |m| m.len());
@@ -176,12 +187,14 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
                             size,
                             charts,
                             title,
+                            code: String::new(),
                             error: String::new(),
                         }
                     }
                     Err(e) => Checked {
                         format,
                         size,
+                        code: "unpack".into(),
                         ..Checked::state(State::Error, format!("unpacking: {e}"))
                     },
                 }

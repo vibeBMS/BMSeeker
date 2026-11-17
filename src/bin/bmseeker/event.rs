@@ -5,7 +5,7 @@
 //! work   {"num","title","artist","team","kind","size_kb","page",
 //!         "links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
 //! check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
-//!         "size","charts","title"?,"error"?,"at",
+//!         "size","charts","title"?,"code"?,"error"?,"at",
 //!         "num"?,"source"?,   (a link a source found for work "num")
 //!         "mirrored"?}        (a dead uploader's, checked through its mirrors)
 //! ```
