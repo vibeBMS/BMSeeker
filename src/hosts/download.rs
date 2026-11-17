@@ -36,7 +36,7 @@ pub fn fetch(
 }
 
 /// The files of `links`, one after another, into files named after
-/// `slots` ([`Files::slot`]): all of them, or which did not come and why
+/// `slots` ([`job::Files::slot`]): all of them, or which did not come and why
 /// (the files that came are left for the caller to remove).
 pub fn fetch_files(
     links: Vec<job::FileLink>,
