@@ -235,6 +235,29 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
+/// The file name in a `Content-Disposition` header (`filename*=UTF-8''…`
+/// or `filename="…"`; UTF-8 sent as Latin-1 read back as UTF-8).
+pub fn disposition_name(h: &str) -> Option<String> {
+    let lower = h.to_ascii_lowercase();
+    let value = |key: &str| {
+        let at = lower.find(key)? + key.len();
+        let v = h[at..].split(';').next()?.trim().trim_matches('"');
+        (!v.is_empty()).then(|| v.to_string())
+    };
+    let name = if let Some(v) = value("filename*=") {
+        let v = v
+            .split_once("''")
+            .map_or(v.as_str(), |(_, n)| n)
+            .to_string();
+        percent_decode(&v)
+    } else {
+        let v = value("filename=")?;
+        let latin1: Option<Vec<u8>> = v.chars().map(|c| u8::try_from(c as u32).ok()).collect();
+        latin1.and_then(|b| String::from_utf8(b).ok()).unwrap_or(v)
+    };
+    crate::text::safe_file_name(&name)
+}
+
 /// `%XX` decoded (invalid UTF-8 replaced).
 pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -258,6 +281,25 @@ pub(crate) fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_names() {
+        assert_eq!(
+            disposition_name("attachment; filename=\"a b.zip\"").as_deref(),
+            Some("a b.zip")
+        );
+        assert_eq!(
+            disposition_name("attachment; filename=\"x.zip\"; filename*=UTF-8''%E6%9B%B2.zip")
+                .as_deref(),
+            Some("曲.zip")
+        );
+        // UTF-8 bytes sent as Latin-1
+        let latin1: String = "曲.rar".bytes().map(|b| b as char).collect();
+        assert_eq!(
+            disposition_name(&format!("attachment; filename=\"{latin1}\"")).as_deref(),
+            Some("曲.rar")
+        );
+    }
 
     /// Asks for two pages and gives their lengths.
     struct Two(Vec<usize>);

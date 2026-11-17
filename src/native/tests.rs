@@ -5,22 +5,6 @@ use crate::testkit::{serve, tmp, Reply};
 
 #[test]
 fn file_names() {
-    use http::disposition_name;
-    assert_eq!(
-        disposition_name("attachment; filename=\"a b.zip\"").as_deref(),
-        Some("a b.zip")
-    );
-    assert_eq!(
-        disposition_name("attachment; filename=\"x.zip\"; filename*=UTF-8''%E6%9B%B2.zip")
-            .as_deref(),
-        Some("曲.zip")
-    );
-    // UTF-8 bytes sent as Latin-1
-    let latin1: String = "曲.rar".bytes().map(|b| b as char).collect();
-    assert_eq!(
-        disposition_name(&format!("attachment; filename=\"{latin1}\"")).as_deref(),
-        Some("曲.rar")
-    );
     assert_eq!(
         crate::hosts::url_file_name("https://h.example/d/%E6%9B%B2%20x.7z?dl=1").as_deref(),
         Some("曲 x.7z")

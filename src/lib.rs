@@ -36,6 +36,9 @@
 
 mod bmssearch;
 mod chart;
+// the command-line tool's commands, on a platform's files and network
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod config;
 #[cfg(feature = "tools")]
 pub mod export;

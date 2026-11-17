@@ -1,16 +1,17 @@
 //! `link resolve`, `link get`, `song find`.
 
-use crate::{Run, SongArgs};
-use bmseeker::hosts::{Fetch, Resolver};
-use bmseeker::links::Links;
-use bmseeker::native::{self, Native};
-use bmseeker::sources::{Query, Sources};
+use super::{Run, SongArgs};
+use crate::hosts::{Fetch, Resolver};
+use crate::links::Links;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::native;
+use crate::sources::{Query, Sources};
 use clap::Subcommand;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Subcommand)]
-pub enum Link {
+pub(super) enum Link {
     /// What each link leads to: a file (its URL and name), a page for a
     /// browser, or an error. Nothing is downloaded.
     Resolve {
@@ -20,11 +21,12 @@ pub enum Link {
         song: SongArgs,
     },
     /// Download the file the links lead to, trying them in turn.
+    #[cfg(not(target_arch = "wasm32"))]
     Get {
         links: Vec<String>,
         /// A folder (the file keeps its own name) or a file. Default: here.
         #[arg(short, long, default_value = ".")]
-        out: PathBuf,
+        out: std::path::PathBuf,
         #[command(flatten)]
         song: SongArgs,
         /// Then the song's links from its sources (BMS SEARCH...).
@@ -38,7 +40,7 @@ pub enum Link {
 }
 
 #[derive(Subcommand)]
-pub enum Song {
+pub(super) enum Song {
     /// The links the sources know for a song (or its separate chart).
     Find {
         #[command(flatten)]
@@ -55,13 +57,12 @@ pub enum Song {
     },
 }
 
-pub fn link(r: &Run, c: Link) -> Result<(), String> {
+pub(super) fn link(r: &Run, c: Link) -> Result<(), String> {
     match c {
         Link::Resolve { links, song } => {
-            let native = Native::new(&r.cx);
             for l in links {
                 let mut res = Resolver::new(&l, Some(song.want()), &r.cx);
-                let got = native.run(&mut res);
+                let got = r.task(&mut res);
                 let host = res.host();
                 let rec = match &got {
                     Ok(t) => json!({"link": l, "state": "file", "host": host, "url": t.url,
@@ -84,6 +85,7 @@ pub fn link(r: &Run, c: Link) -> Result<(), String> {
             }
             Ok(())
         }
+        #[cfg(not(target_arch = "wasm32"))]
         Link::Get {
             links,
             out,
@@ -95,7 +97,7 @@ pub fn link(r: &Run, c: Link) -> Result<(), String> {
 }
 
 /// "gone" for a file that is no more (404 / 410, MEGA's -9), else "error".
-pub fn state_of(e: &bmseeker::net::NetError) -> &'static str {
+pub(super) fn state_of(e: &crate::net::NetError) -> &'static str {
     if e.gone() {
         "gone"
     } else {
@@ -103,6 +105,7 @@ pub fn state_of(e: &bmseeker::net::NetError) -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get(
     r: &Run,
     links: &[String],
@@ -155,7 +158,7 @@ fn get(
             want: song.want(),
             ..Default::default()
         };
-        let found = Native::new(&r.cx).run(&mut sources.find_all(&q));
+        let found = r.task(&mut sources.find_all(&q));
         if found.is_empty() {
             errors.push("the sources know no other link".into());
         }
@@ -177,7 +180,7 @@ fn get(
     } else {
         tmp
     };
-    let format = bmseeker::unpack::sniff_file(&file).map_or("file", |f| f.ext());
+    let format = crate::unpack::sniff_file(&file).map_or("file", |f| f.ext());
     r.out.record(
         json!({"file": file, "name": name, "format": format, "link": link, "errors": errors}),
         || format!("{} ({format}, from {link})", file.display()),
@@ -185,7 +188,7 @@ fn get(
     Ok(())
 }
 
-pub fn song(r: &Run, c: Song) -> Result<(), String> {
+pub(super) fn song(r: &Run, c: Song) -> Result<(), String> {
     let Song::Find {
         song,
         diff,
@@ -194,7 +197,7 @@ pub fn song(r: &Run, c: Song) -> Result<(), String> {
     } = c;
     let mut known = vec![("table", Links::default())];
     for t in &tables {
-        match crate::table::load(r, t) {
+        match super::table::load(r, t) {
             Ok(t) => known[0].1 = std::mem::take(&mut known[0].1).and(Links::from_tables([&t])),
             Err(e) => r.out.note(format!("{t}: {e}")),
         }
@@ -218,7 +221,7 @@ pub fn song(r: &Run, c: Song) -> Result<(), String> {
         diff,
         ..Default::default()
     };
-    for (source, url) in Native::new(&r.cx).run(&mut sources.find_all(&q)) {
+    for (source, url) in r.task(&mut sources.find_all(&q)) {
         r.out.record(json!({"source": source, "url": url}), || {
             format!("{source}\t{url}")
         });
@@ -227,11 +230,11 @@ pub fn song(r: &Run, c: Song) -> Result<(), String> {
 }
 
 /// A list's bytes: a URL or a file (a failure noted, not fatal).
-pub fn fetch_list(at: &str, r: &Run) -> Option<Vec<u8>> {
+pub(super) fn fetch_list(at: &str, r: &Run) -> Option<Vec<u8>> {
     let got = if at.starts_with("http") {
-        Native::new(&r.cx).get(at).map_err(|e| e.to_string())
+        r.get(at).map_err(|e| e.to_string())
     } else {
-        std::fs::read(at).map_err(|e| e.to_string())
+        r.fs.read(Path::new(at)).map_err(|e| e.to_string())
     };
     got.map_err(|e| r.out.note(format!("{at}: {e}"))).ok()
 }
