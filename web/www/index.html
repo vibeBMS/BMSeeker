@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BMSeeker</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { margin: 0; height: 100%; }
+      body { display: flex; align-items: center; justify-content: center; color: #8e8e93;
+        font: 13px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .error { max-width: 80%; white-space: pre-wrap; font: 12px ui-monospace, Menlo, monospace; }
+    </style>
+    <!-- the commands (bmseeker-web, in a worker), then the window (gui/, Go) -->
+    <script src="bmseeker.js"></script>
+    <script src="wasm_exec.js"></script>
+    <script>
+      const go = new Go();
+      WebAssembly.instantiateStreaming(fetch("gui.wasm"), go.importObject)
+        .then((r) => go.run(r.instance))
+        .catch((e) => {
+          const p = document.createElement("p");
+          p.className = "error";
+          p.textContent = "BMSeeker did not load: " + e;
+          document.body.replaceChildren(p);
+        });
+    </script>
+  </head>
+  <body>
+    <p>Loading BMSeeker…</p>
+  </body>
+</html>
