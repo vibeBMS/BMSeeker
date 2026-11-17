@@ -78,8 +78,8 @@ struct Target { url: String, mega_key: Option<Vec<u8>>, name: Option<String> }
 ```
 
 `Resolver` walks a registry (`Hosts::default()`: Google Drive file and
-folder, Dropbox, manbow work (the event mirror first), BMS SEARCH venue,
-MediaFire, MEGA file and folder, browser-only hosts, direct; dead
+folder, Dropbox, manbow work (the event mirror first), BMS SEARCH venue
+and chart page, MediaFire, MEGA file and folder, browser-only hosts, direct; dead
 uploaders' mirrors first with `third_party`). `Follow` goes on with the
 next link (at most a few hops). Adding a host is adding it to the registry.
 

@@ -189,6 +189,43 @@ impl Host for BmsSearchVenue {
     }
 }
 
+/// A chart's page on BMS SEARCH (`bmssearch.net/bmses/<id>`): its work's
+/// download links, as its API gives them.
+pub(crate) struct BmsSearchPage;
+
+impl Host for BmsSearchPage {
+    fn name(&self) -> &'static str {
+        "bmssearch-page"
+    }
+
+    fn accepts(&self, link: &Link) -> bool {
+        (link.host == "bmssearch.net" || link.host == "www.bmssearch.net") && bms_id(link).is_some()
+    }
+
+    fn open(&self, link: &Link, _: Option<&Want>, config: &Config) -> BoxTask<Resolved> {
+        let id = bms_id(link).unwrap_or_default();
+        let api = config.bmssearch_api.trim_end_matches('/');
+        get_then(format!("{api}/bmses/{id}"), |body| {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            match crate::bmssearch::work_links(&v) {
+                links if links.is_empty() => Resolved::Page,
+                links => Resolved::Follow(links),
+            }
+        })
+    }
+}
+
+/// The id in a `…/bmses/<id>` link.
+fn bms_id(link: &Link) -> Option<&str> {
+    let path = link.url.split(['?', '#']).next()?;
+    let id = path.split("/bmses/").nth(1)?.trim_end_matches('/');
+    (!id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(id)
+}
+
 /// `https://venue.bmssearch.net/<event>/<work>` without a query (the
 /// event's own page is no work).
 fn work_path(u: &str) -> Option<String> {
@@ -344,6 +381,13 @@ mod tests {
             )],
         );
         assert!(t.unwrap().url.contains("id=O"));
+        // a chart's page on BMS SEARCH: its work's links
+        let bms = br#"{"downloads":[{"url":"https://drive.google.com/file/d/D/view"}]}"#;
+        let t = resolve(
+            "https://bmssearch.net/bmses/A1b-2?x=1",
+            &[("https://api.bmssearch.net/v1/bmses/A1b-2", bms)],
+        );
+        assert!(t.unwrap().url.contains("id=D"));
         // the venue's list of works is no work
         assert_eq!(
             resolve("https://venue.bmssearch.net/bmsshuin3", &[]),

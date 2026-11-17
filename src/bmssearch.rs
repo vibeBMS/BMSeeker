@@ -37,7 +37,7 @@ enum Wait {
 const VENUES: &[&str] = &["manbow.nothing.sh", "venue.bmssearch.net"];
 
 /// A work's links: its downloads, then its venue pages.
-fn work_links(bms: &Value) -> Vec<String> {
+pub(crate) fn work_links(bms: &Value) -> Vec<String> {
     let urls = |k: &str| -> Vec<String> {
         bms.get(k)
             .and_then(|v| v.as_array())

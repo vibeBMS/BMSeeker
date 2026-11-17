@@ -1,7 +1,8 @@
 //! Google Drive: a file downloads from its id (`confirm=t` skips the virus
 //! scan page of big files); a folder's listing (`embeddedfolderview`)
 //! names its archives, the best of which is taken. A folder link ending in
-//! `#sub/folder/file` names goes down to that file.
+//! `#sub/folder/file` names goes down to that file. A link's `resourcekey`
+//! (a file shared by link before 2021 needs it) goes with its requests.
 
 use super::{between, get_then, pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
@@ -24,8 +25,9 @@ impl Host for Drive {
         let Some(id) = drive_id(&link.url) else {
             return Ready::boxed(Resolved::Page);
         };
+        let key = resource_key(&link.url);
         if !link.lower.contains("/folders/") {
-            return Ready::boxed(Resolved::File(Target::url(file_url(&id))));
+            return Ready::boxed(Resolved::File(Target::url(file_url(&id) + &key)));
         }
         if let Some((_, path)) = link.url.split_once('#') {
             let names: Vec<String> = path
@@ -37,25 +39,20 @@ impl Host for Drive {
                 return Box::new(Walk { folder: id, names });
             }
         }
-        get_then(
-            format!("https://drive.google.com/embeddedfolderview?id={id}"),
-            |body| {
-                let page = String::from_utf8_lossy(&body);
-                let files = folder_entries(&page);
-                let best = pick_file(
-                    files
-                        .iter()
-                        .filter(|(name, _)| is_archive(Path::new(name)))
-                        .map(|(n, i)| (n.as_str(), (n, i))),
-                );
-                match best {
-                    Some((name, id)) => {
-                        Resolved::File(Target::named(file_url(id), Some(name.clone())))
-                    }
-                    None => Resolved::Page,
-                }
-            },
-        )
+        get_then(listing_url(&id) + &key, |body| {
+            let page = String::from_utf8_lossy(&body);
+            let files = folder_entries(&page);
+            let best = pick_file(
+                files
+                    .iter()
+                    .filter(|(name, _)| is_archive(Path::new(name)))
+                    .map(|(n, i)| (n.as_str(), (n, i))),
+            );
+            match best {
+                Some((name, id)) => Resolved::File(Target::named(file_url(id), Some(name.clone()))),
+                None => Resolved::Page,
+            }
+        })
     }
 }
 
@@ -70,6 +67,21 @@ pub(crate) fn drive_id(u: &str) -> Option<String> {
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     (!id.is_empty()).then_some(id)
+}
+
+/// A link's `resourcekey`, as `&resourcekey=…` (empty: none).
+fn resource_key(u: &str) -> String {
+    let query = u
+        .split('#')
+        .next()
+        .unwrap_or(u)
+        .split_once('?')
+        .map_or("", |(_, q)| q);
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("resourcekey="))
+        .filter(|k| !k.is_empty())
+        .map_or(String::new(), |k| format!("&resourcekey={k}"))
 }
 
 fn file_url(id: &str) -> String {
@@ -210,7 +222,15 @@ mod tests {
     #[test]
     fn files_and_folders() {
         let t = resolve("https://drive.google.com/file/d/X/view", &[]).unwrap();
-        assert!(t.url.contains("id=X"));
+        assert!(t.url.contains("id=X") && !t.url.contains("resourcekey"));
+        let t = resolve(
+            "https://drive.google.com/file/d/X/view?usp=sharing&resourcekey=0-k_Y",
+            &[],
+        )
+        .unwrap();
+        assert!(t
+            .url
+            .ends_with("id=X&export=download&confirm=t&resourcekey=0-k_Y"));
         let page = br#"<div class="flip-entry" id="entry-A"><a href="https://drive.google.com/file/d/A/view?usp=drive_web"><div class="flip-entry-title">song.zip</div></a></div>
             <div class="flip-entry" id="entry-S"><a href="https://drive.google.com/drive/folders/S"><div class="flip-entry-title">sub</div></a></div>
             <div class="flip-entry" id="entry-B"><a href="https://drive.google.com/file/d/B/view?usp=drive_web"><div class="flip-entry-title">song_ogg.zip</div></a></div>
