@@ -31,7 +31,7 @@ func main() {
 	a.connect()
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
-			Title:     "BMSeeker",
+			Title:     name(),
 			Width:     980,
 			Height:    720,
 			MinWidth:  640,
@@ -42,4 +42,21 @@ func main() {
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// name and version are the app's, which build.sh links in as `mygo build`
+// does: BMSeeker or a channel's ("BMSeeker Nightly"), and the CLI's version.
+// A plain go build has neither.
+func name() string {
+	if mygo.App.IsPackaged() {
+		return mygo.App.Name()
+	}
+	return "BMSeeker"
+}
+
+func version() string {
+	if v := mygo.App.Version(); v != "" {
+		return v
+	}
+	return "dev"
 }

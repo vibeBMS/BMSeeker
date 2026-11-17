@@ -113,7 +113,7 @@ func (a *app) cli(args []string, onRecord func(Record)) error {
 func (a *app) view(c *ui.Context) {
 	ui.Column(c).Fill().Padding(12).Gap(10).Children(func() {
 		ui.Row(c).Gap(8).Children(func() {
-			ui.Text(c, "BMSeeker").FontSize(18).Bold()
+			ui.Text(c, name()).FontSize(18).Bold()
 			ui.Spacer(c)
 			if len(a.busy) > 0 {
 				ui.Spinner(c)
@@ -361,6 +361,8 @@ func (a *app) settingsView(c *ui.Context) {
 			a.newTable = ""
 		}
 	})
+	ui.Text(c, "About").Bold()
+	ui.Text(c, name()+" "+version())
 }
 
 func toF(v any) float64 {

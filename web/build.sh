@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # BMSeeker web into web/dist (or $OUT), a static site: the page and its
 # script (web/www), the commands' wasm (bmseeker-web, with wasm-bindgen's
-# glue) and the window's (gui/, Go's js/wasm, with Go's loader). Needs the
+# glue) and the window's (gui/, Go's js/wasm, with Go's loader), with the
+# version (gui/identity.sh) at the page's foot. Needs the
 # wasm32-unknown-unknown target and wasm-bindgen-cli of the version in
 # Cargo.lock.
 set -euo pipefail
@@ -13,6 +14,8 @@ rm -rf "$out"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 cp web/www/* "$out/"
+. gui/identity.sh
+perl -pi -e "s/\@VERSION\@/$name $version/" "$out/index.html"
 wasm-bindgen --target web --no-typescript --remove-name-section --remove-producers-section \
   --out-dir "$out/pkg" \
   "$target/wasm32-unknown-unknown/web/bmseeker_web.wasm"
@@ -22,6 +25,6 @@ fi
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/"
 # (as `mygo build -platform web` builds: production, no inspector)
 (cd gui && GOOS=js GOARCH=wasm go build -trimpath \
-  -ldflags "-s -w -X github.com/egoist/mygo.production=1" \
+  -ldflags "-s -w -X github.com/egoist/mygo.production=1 $identity" \
   -tags mygo_noinspector,mygo_nodownload -o "$out/gui.wasm" .)
 echo "$out"
