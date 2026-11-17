@@ -81,7 +81,12 @@ already (state `owned`: nothing is downloaded into a second folder; only the fil
 `placed`). Such a package goes into its song's folder as it is laid out (its `sound/` folder there too); which folder
 is decided first by its own charts the library has (each votes for its folder; two folders with as many votes, as
 when the library holds a chart twice, are never picked between: the chart waits), then by the song's own charts a
-table names (`org_md5`), then by the files the charts use and their title and artist. What a song's link brings is a
+table names (`org_md5`), then by the files the charts use and their title and artist (as the BeMusicSeeker fork
+compares them: NFKC, the chart's name at the end of the title cut (`[ANOTHER]`, `-7EX-`, kept up to a `MIX`), the
+artist's credits for anything but the music removed (`/ obj:`, `feat.`, `BGA:`, `差分`; not `remix`, `作曲`); the same
+song when the artists are the same and the titles' Dice coefficient is at least 0.72, which a chart needs to go into
+a folder without asking (two such folders: it waits); folders whose title or artist is alike, Dice 0.5, are offered
+first). What a song's link brings is a
 folder of its own unless where it goes is sure. A separate chart whose song is not in the library yet waits in the
 downloads folder (of a pack of many, only the chart wanted; with `table missing --get`, the run's missing charts) and
 goes into the song's folder when the song comes. `table missing --get` takes each missing chart in turn: one the run

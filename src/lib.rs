@@ -6,7 +6,8 @@
 //!   (Google Drive, Dropbox, MediaFire, MEGA, event venues, ...);
 //! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar) into the library
 //!   (a [`fs::Store`]), with their files' times;
-//! - [`placement`]: which song's folder a chart of its own (差分) belongs in;
+//! - [`placement`]: which song's folder a chart of its own (差分) belongs in
+//!   (its title and artist compared as [`titles`] does);
 //! - [`library`]: the library's songs' folders, their files and the charts'
 //!   hashes, read once or given by a player's own records;
 //! - [`package`]: what a download holds: songs' folders and charts of their
@@ -48,6 +49,7 @@ pub mod progress;
 pub mod sources;
 pub mod table;
 pub mod text;
+pub mod titles;
 pub mod unpack;
 
 /// A file name from an archive: UTF-8, else Shift_JIS / EUC-KR as BMS packs

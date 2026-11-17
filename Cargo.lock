@@ -176,6 +176,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2 0.10.9",
+ "unicode-normalization",
  "unrar-rs",
  "ureq",
  "url",

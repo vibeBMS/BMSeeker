@@ -6,12 +6,15 @@
 //! their kind (an image never stands for a sound: [`Class`]). A folder is a
 //! candidate when, with the files the chart came with, it holds the sounds
 //! the chart uses ([`Rules`]: 80% to be listed, 99% to be chosen); the chart
-//! goes there without asking only when one of its charts is the same song
-//! (title and artist): numbered sound names (`01.wav`, `02.wav`, ...) are
-//! common, so the file names alone prove nothing. Else the user picks among
-//! the best candidates.
+//! goes there without asking only when its charts are the same song (the
+//! same artist and a title alike, as the BeMusicSeeker fork compares them:
+//! [`crate::titles`]; two such folders: asked): numbered sound names
+//! (`01.wav`, `02.wav`, ...) are common, so the file names alone prove
+//! nothing. Else the user picks among the best candidates (songs alike
+//! first).
 
 use crate::fs::Fs;
+use crate::titles;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -271,8 +274,11 @@ pub struct Candidate {
     pub coverage: f32,
     /// How many of them the folder holds itself.
     pub own: usize,
-    /// One of the folder's charts has the same title and artist.
+    /// The folder's song is the chart's ([`titles::Relation::Strong`]:
+    /// the same artist, the titles alike).
     pub same_song: bool,
+    /// Its title or artist is alike ([`titles::Relation::Related`]).
+    pub related: bool,
     /// The shares of its BGA images, movies, and stage file / banner /
     /// back image there (1 when it names none).
     pub images: f32,
@@ -301,8 +307,8 @@ impl Candidate {
 
 /// The folders among `folders` for `chart`, which came with the files
 /// `bundled` (paths beside it): those holding at least one of its sounds,
-/// the best first (the same song; then more of its sounds, more of them in
-/// the folder itself; then more of its images, movies, stage file / banner
+/// the best first (the same song; then a song alike; then more of its
+/// sounds, more of them in the folder itself; then more of its images, movies, stage file / banner
 /// / back image; then fewer other sounds).
 pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Vec<Candidate> {
     let need = Needs::of(chart);
@@ -311,6 +317,13 @@ pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Ve
     }
     let brought = Keys::of(bundled);
     let sounds = need.audio.total();
+    // the files it came with hold most of its sounds: they say little, so
+    // a folder is related only by both its title and artist
+    let rule = match need.audio.share(Class::Audio, &brought, &Keys::default()) >= 0.9 {
+        true => titles::Rule::Both,
+        false => titles::Rule::Either,
+    };
+    let target = titles::Profile::one(&chart.title, &chart.artist);
     let mut out: Vec<Candidate> = folders
         .iter()
         .filter_map(|f| {
@@ -319,13 +332,14 @@ pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Ve
             if own == 0 {
                 return None;
             }
+            let profile = titles::Profile::of(f.charts.iter().map(|c| (&*c.title, &*c.artist, "")));
+            let relation = target.relation(&profile, rule);
             Some(Candidate {
                 dir: f.dir.clone(),
                 coverage: all as f32 / sounds as f32,
                 own,
-                same_song: f.charts.iter().any(|c| {
-                    same_song_title(&c.title, &chart.title) && same_artist(&c.artist, &chart.artist)
-                }),
+                same_song: relation == titles::Relation::Strong,
+                related: relation >= titles::Relation::Related,
                 images: need.images.share(Class::Image, &have, &brought),
                 movies: need.movies.share(Class::Movie, &have, &brought),
                 extras: need.extras.share(Class::Image, &have, &brought),
@@ -337,6 +351,7 @@ pub fn rank(chart: &ChartInfo, bundled: &[String], folders: &[FolderInfo]) -> Ve
     let order = |c: &Candidate| {
         (
             c.same_song,
+            c.related,
             c.coverage,
             c.own,
             c.images,
@@ -845,6 +860,43 @@ mod tests {
         // no folder has every sound: it stays
         let more = chart("Song B", "beta", &["01.wav", "03.wav"]);
         assert_eq!(place(&more, &picked, &[a]), Placement::Stay);
+    }
+
+    /// The fork's matching: the same artist and a title alike is the same
+    /// song; two such folders are not picked between; a song alike comes
+    /// before one that is not.
+    #[test]
+    fn same_song_by_the_forks_rules() {
+        let diff = chart("Song (HYPER) [X]", "alpha / obj: x", &["01.wav", "02.wav"]);
+        let picked = folder("picked", &["x.bme"], vec![diff.clone()]);
+        let song = |dir: &str, title: &str, artist: &str| {
+            folder(
+                dir,
+                &["01.ogg", "02.ogg", "n.bms"],
+                vec![chart(title, artist, &[])],
+            )
+        };
+        let a = song("A", "Song [NORMAL]", "alpha");
+        assert_eq!(
+            place(&diff, &picked, std::slice::from_ref(&a)),
+            Placement::Move("A".into())
+        );
+        // another artist: asked, not moved
+        let b = song("B", "Song [NORMAL]", "beta");
+        assert_eq!(
+            place(&diff, &picked, std::slice::from_ref(&b)),
+            Placement::Ask(vec!["B".into()])
+        );
+        // two folders of the same song (a tie): asked
+        let a2 = song("A2", "Song [HYPER]", "alpha feat. y");
+        assert_eq!(
+            place(&diff, &picked, &[a.clone(), a2]),
+            Placement::Ask(vec!["A".into(), "A2".into()])
+        );
+        // a song alike first among those asked
+        let r = rank(&diff, &[], &[song("Z", "Zzz", "q"), b]);
+        assert_eq!((r[0].dir.as_path(), r[0].related), (Path::new("B"), true));
+        assert!(!r[1].related && !r[1].same_song);
     }
 
     #[test]
