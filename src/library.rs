@@ -146,11 +146,6 @@ impl Library {
         &self.root
     }
 
-    /// The folder below which it is (as [`Library::root`]).
-    pub fn library(&self) -> &Path {
-        &self.root
-    }
-
     /// Whether it holds the chart of this MD5 or SHA-256 (hex).
     pub fn owns(&self, hash: &str) -> bool {
         hash_key(hash).is_some_and(|h| self.by_hash.contains_key(&h))
