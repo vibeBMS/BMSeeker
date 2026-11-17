@@ -106,7 +106,7 @@ fn tidy(s: &str) -> String {
 
 /// The longest part `strings` (charts' titles, or artists) begin with
 /// alike: of each two, the start they share (the first's chart name cut);
-/// none of two letters: each one, its chart name cut. Tidied ([`tidy`]),
+/// none of two letters: each one, its chart name cut. Tidied (prefixes, credits, level tails),
 /// the best is the one with the most of length^0.65 × count.
 pub fn longest_common(strings: &[&str]) -> String {
     let given: Vec<&str> = strings

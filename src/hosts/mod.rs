@@ -28,7 +28,7 @@ mod venues;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use download::retrying;
 #[cfg(not(target_arch = "wasm32"))]
-pub use download::{download, download_to, fetch, fetch_named, sniff};
+pub use download::{download, download_to, fetch, fetch_named, sniff, Native};
 pub use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
@@ -441,6 +441,26 @@ pub fn sniff_bytes(h: &[u8]) -> Option<&'static str> {
 }
 
 pub use crate::net::url_encode;
+
+/// Google Drive's answer for a file downloaded too often lately.
+pub const DRIVE_QUOTA: &str =
+    "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
+
+/// Whether a page's first bytes are Google Drive's "Quota exceeded".
+pub(crate) fn drive_quota(head: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&head[..head.len().min(4096)]);
+    head.contains("<title>Google Drive") && head.contains("Quota exceeded")
+}
+
+/// The last part of a URL's path, decoded (a file's name).
+pub(crate) fn url_file_name(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next()?.trim_end_matches('/');
+    let last = path.rsplit('/').next()?;
+    if path.matches('/').count() < 3 {
+        return None; // just the host
+    }
+    crate::text::safe_file_name(&crate::net::percent_decode(last))
+}
 
 /// Whether a file name is an archive's.
 fn archive_name(n: &str) -> bool {

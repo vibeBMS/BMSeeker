@@ -8,6 +8,7 @@ use crate::library::Library;
 use std::path::{Path, PathBuf};
 
 pub mod entry;
+pub mod job;
 pub mod plan;
 
 pub use entry::{entry_steps, Batch, Entry, Step, When};

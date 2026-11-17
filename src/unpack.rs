@@ -19,6 +19,7 @@ pub const BUDGET: u64 = if cfg!(target_arch = "wasm32") {
 };
 
 /// An archive: a file in the store, or bytes.
+#[derive(Debug)]
 pub enum Blob {
     File(PathBuf),
     Bytes(Vec<u8>),

@@ -25,8 +25,10 @@
 //! memory). Whatever reads the network is a [`net::Task`] (it asks for
 //! requests and is fed the answers): [`hosts::Resolver`] (a link through
 //! its [`hosts::Host`] strategies), [`table::TableLoader`],
-//! [`bmssearch::Lookup`]; [`net::run`] runs one natively. Every place read
-//! from is in [`config::Config`].
+//! [`bmssearch::Lookup`]; [`net::run`] runs one natively. A download is an
+//! [`install::job::Job`] (requests, files downloaded, waits as effects a
+//! platform's driver does): [`install::job::Acquire`] takes a link to its
+//! file. Every place read from is in [`config::Config`].
 
 pub mod bmssearch;
 pub mod chart;

@@ -3,10 +3,12 @@
 //! an hour) but a limit on silence ([`STALL_MS`]) and the context's
 //! [`Progress`](crate::progress::Progress) able to cancel it.
 
-use super::{sniff_bytes, Context, Fetch, MegaCipher, Resolver, Want, STALL_MS};
-use crate::net::{percent_decode, run, Client, NetError};
-use crate::progress::{Progress, Stage};
+use super::{sniff_bytes, Context, Fetch, MegaCipher, Want, STALL_MS};
+use crate::install::job::{self, run_job, Acquire, Driver, Effect, Fed};
+use crate::net::{percent_decode, Client, NetError};
+use crate::progress::Progress;
 use crate::text::safe_file_name;
+use crate::unpack::Blob;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -18,7 +20,8 @@ pub fn fetch(link: &str, want: Option<Want>, out: &Path, cx: &Context) -> Result
 /// [`fetch`], and the file's name where it came from (the folder's
 /// listing, MEGA, the mirror, the server, the link). With `any`, a file
 /// that is not an archive is kept too if it is not a page: a chart or a
-/// movie posted on its own (an event's add-on).
+/// movie posted on its own (an event's add-on). [`Acquire`] run with the
+/// native transport ([`Native`]).
 pub fn fetch_named(
     link: &str,
     want: Option<Want>,
@@ -26,93 +29,82 @@ pub fn fetch_named(
     any: bool,
     cx: &Context,
 ) -> Result<String, Fetch> {
-    cx.stage(Stage::Finding);
-    let http = Client::in_context(cx);
-    let mut r = Resolver::new(link, want.clone(), cx);
-    let mut moves = 0;
-    loop {
-        let mut moved = None;
-        let got = run(&mut r, &http).and_then(|t| get_target(t, out, any, cx, &mut moved));
-        let cancelled = cx.cancelled();
-        // a page reached through redirects (a short link) on a host that
-        // knows its way to the file: from there
-        let rehost = moved.filter(|u| {
-            let host = super::Link::parse(u, 0).and_then(|l| cx.hosts.find(&l).map(|h| h.name()));
-            host.is_some_and(|h| h != "direct" && h != r.host())
-        });
-        match (got, rehost) {
-            (Err(Fetch::Page), Some(u)) if !cancelled && moves < 2 => {
-                moves += 1;
-                r = Resolver::new(&u, want.clone(), cx);
+    let mut job = Acquire::new(link, want, any, out.to_path_buf(), cx);
+    match run_job(&mut job, &Native::new(cx)) {
+        Ok(got) => Ok(got.name),
+        Err(e) => {
+            // (a page, or what did not come)
+            let _ = std::fs::remove_file(out);
+            Err(e)
+        }
+    }
+}
+
+/// The native transport, as a job's [`Driver`]: requests through the
+/// [`Client`] (tried again after a passing failure), a file streamed to
+/// its slot on a thread of its own (ended by the progress' cancel or
+/// [`STALL_MS`] of silence; a MEGA file decrypted after), waits slept.
+pub struct Native {
+    http: Client,
+    user_agent: String,
+    progress: Option<std::sync::Arc<Progress>>,
+}
+
+impl Native {
+    /// With `cx`'s settings and progress.
+    pub fn new(cx: &Context) -> Native {
+        Native {
+            http: Client::in_context(cx),
+            user_agent: cx.config.user_agent.clone(),
+            progress: cx.progress(),
+        }
+    }
+}
+
+impl Driver for Native {
+    fn perform(&self, effect: Effect) -> Fed {
+        let p = self.progress.as_deref();
+        match effect {
+            Effect::Http(r) => Fed::Http(crate::net::Http::send(&self.http, &r)),
+            Effect::Sleep(d) => {
+                std::thread::sleep(d);
+                Fed::Woke
             }
-            // a mirror the page named, when this file did not come
-            (Err(_), _) if !cancelled && r.try_next() => cx.stage(Stage::Finding),
-            (got, _) => return got,
+            Effect::Download { target, slot, .. } => {
+                let got = match &target.mega_key {
+                    None => stream(&target.url, &slot, &self.user_agent, p),
+                    Some(key) => {
+                        let enc = slot.with_extension("mega");
+                        let s = stream(&target.url, &enc, &self.user_agent, p);
+                        let d =
+                            s.and_then(|_| mega_decrypt(&enc, &slot, key).map_err(NetError::Other));
+                        let _ = std::fs::remove_file(&enc);
+                        // (MEGA names its files itself; no redirects)
+                        d.map(|_| Served {
+                            name: None,
+                            at: None,
+                        })
+                    }
+                };
+                Fed::Downloaded(match got {
+                    Ok(s) => {
+                        let mut head = vec![0u8; 4096];
+                        let n = std::fs::File::open(&slot)
+                            .and_then(|mut f| read_full(&mut f, &mut head))
+                            .unwrap_or(0);
+                        head.truncate(n);
+                        Ok(job::Served {
+                            blob: Blob::File(slot),
+                            name: s.name,
+                            at: s.at,
+                            head,
+                        })
+                    }
+                    Err(e) => Err(e.into()),
+                })
+            }
         }
     }
-}
-
-/// `t`'s file into `out`: its name. A page that redirects led to elsewhere:
-/// that place in `moved`.
-fn get_target(
-    t: super::Target,
-    out: &Path,
-    any: bool,
-    cx: &Context,
-    moved: &mut Option<String>,
-) -> Result<String, Fetch> {
-    let (ua, progress) = (&cx.config.user_agent, cx.progress());
-    let p = progress.as_deref();
-    let served = match &t.mega_key {
-        None => {
-            let s = retrying(p, || stream(&t.url, out, ua, p))?;
-            *moved = s.at.filter(|u| u != &t.url);
-            s.name
-        }
-        Some(key) => {
-            let enc = out.with_extension("mega");
-            retrying(p, || stream(&t.url, &enc, ua, p))?;
-            let d = mega_decrypt(&enc, out, key);
-            let _ = std::fs::remove_file(&enc);
-            d.map_err(NetError::Other)?;
-            None
-        }
-    };
-    let name = t
-        .name
-        .or(served)
-        .or_else(|| url_file_name(&t.url))
-        .unwrap_or_else(|| "download".into());
-    let page = || {
-        let mut head = [0u8; 512];
-        let n = std::fs::File::open(out)
-            .and_then(|mut f| f.read(&mut head))
-            .unwrap_or(0);
-        n == 0 || head[..n].trim_ascii_start().starts_with(b"<")
-    };
-    if sniff(out).is_none() && !(any && !page()) {
-        let quota = drive_quota(out);
-        let _ = std::fs::remove_file(out);
-        return Err(match quota {
-            true => Fetch::Failed(NetError::Other(DRIVE_QUOTA.into())),
-            false => Fetch::Page,
-        });
-    }
-    Ok(name)
-}
-
-/// Google Drive's answer for a file downloaded too often lately.
-pub const DRIVE_QUOTA: &str =
-    "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
-
-/// Whether the page in `p` is Google Drive's "Quota exceeded".
-fn drive_quota(p: &Path) -> bool {
-    let mut head = vec![0u8; 4096];
-    let n = std::fs::File::open(p)
-        .and_then(|mut f| f.read(&mut head))
-        .unwrap_or(0);
-    let head = String::from_utf8_lossy(&head[..n]);
-    head.contains("<title>Google Drive") && head.contains("Quota exceeded")
 }
 
 /// The file name in a `Content-Disposition` header (`filename*=UTF-8''…`
@@ -136,16 +128,6 @@ fn disposition_name(h: &str) -> Option<String> {
         latin1.and_then(|b| String::from_utf8(b).ok()).unwrap_or(v)
     };
     safe_file_name(&name)
-}
-
-/// The last part of a URL's path, decoded.
-fn url_file_name(url: &str) -> Option<String> {
-    let path = url.split(['?', '#']).next()?.trim_end_matches('/');
-    let last = path.rsplit('/').next()?;
-    if path.matches('/').count() < 3 {
-        return None; // just the host
-    }
-    safe_file_name(&percent_decode(last))
 }
 
 /// The archive format of a file from its first bytes.
@@ -346,10 +328,10 @@ mod tests {
             Some("曲.rar")
         );
         assert_eq!(
-            url_file_name("https://h.example/d/%E6%9B%B2%20x.7z?dl=1").as_deref(),
+            super::super::url_file_name("https://h.example/d/%E6%9B%B2%20x.7z?dl=1").as_deref(),
             Some("曲 x.7z")
         );
-        assert_eq!(url_file_name("https://h.example/"), None);
+        assert_eq!(super::super::url_file_name("https://h.example/"), None);
         assert_eq!(safe_file_name("../a/b.zip").as_deref(), Some("_a_b.zip"));
     }
 
