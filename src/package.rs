@@ -11,8 +11,9 @@ use crate::chart::ChartInfo;
 use crate::fs::Fs;
 use crate::install::plan::Role;
 use crate::library::Library;
-use crate::placement::{class_of, covers, is_chart, key, rel, same_artist, same_song_title};
+use crate::placement::{class_of, covers, is_chart, key, rel};
 use crate::placement::{Class, Rules};
+use crate::titles::Song;
 use crate::unpack::Member;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -201,25 +202,21 @@ fn preview_sound(s: &Staged, files: &[usize]) -> bool {
     })
 }
 
-/// The charts are one song's: one chart, or one title (but for each
-/// chart's name) and artist.
+/// The charts are one work's: one chart, or every chart of one title and
+/// artist as compared ([`Song`]: exactly, as the fork has it, so that two
+/// songs alike never become one).
 fn one_song(s: &Staged, charts: &[usize]) -> bool {
-    let infos: Vec<&ChartInfo> = charts
-        .iter()
-        .filter_map(|&c| s.charts[c].info.as_ref())
-        .collect();
     if charts.len() == 1 {
         return true;
     }
-    let Some(first) = infos.first() else {
+    let mut songs = charts.iter().map(|&c| {
+        let i = s.charts[c].info.as_ref()?;
+        Some(Song::of(&i.title, &i.artist)).filter(|s| !s.title.is_empty())
+    });
+    let Some(Some(first)) = songs.next() else {
         return false;
     };
-    infos.len() == charts.len()
-        && infos.iter().all(|c| {
-            !c.title.trim().is_empty()
-                && same_song_title(&first.title, &c.title)
-                && same_artist(&first.artist, &c.artist)
-        })
+    songs.all(|s| s.as_ref() == Some(&first))
 }
 
 /// The download's packages, by the fork's rules for a folder holding

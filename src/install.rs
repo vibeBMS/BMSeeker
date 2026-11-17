@@ -175,18 +175,6 @@ pub fn place_waiting(fs: &dyn Fs, downloads: &Path, lib: &mut Library) -> Vec<Pa
     out
 }
 
-/// Whether the chart `c` is of the song `want`: its title but for the
-/// chart's name, and its artist.
-pub(crate) fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) -> bool {
-    use crate::bmssearch::base_title;
-    use crate::placement::{same_artist, same_name};
-    let title = base_title(&want.title);
-    title.chars().count() >= 2
-        && !want.artist.trim().is_empty()
-        && same_name(&base_title(&c.title), &title)
-        && same_artist(&c.artist, &want.artist)
-}
-
 /// Whether a link's outcome brought the song (or its chart) in, or found
 /// it in the library already.
 pub fn got(done: &[Done]) -> bool {
@@ -239,27 +227,6 @@ impl Tries {
 mod tests {
     use super::*;
     use crate::net::NetError;
-
-    /// A chart of a song whose chart wanted is a separate one: its title
-    /// but for the chart's name, and its artist.
-    #[test]
-    fn charts_of_a_song() {
-        let want = |title: &str, artist: &str| crate::hosts::Want {
-            title: title.into(),
-            artist: artist.into(),
-        };
-        let chart = crate::chart::ChartInfo {
-            title: "Caelumize [SPA]".into(),
-            artist: "void".into(),
-            ..Default::default()
-        };
-        assert!(is_song(
-            &chart,
-            &want("Caelumize [SP Cloudy]", "void obj.Cloudy Boy")
-        ));
-        assert!(!is_song(&chart, &want("Caelum", "void")));
-        assert!(!is_song(&chart, &want("Caelumize", "someone")));
-    }
 
     /// `BMSEEKER_SONG=URL BMSEEKER_DIFF=URL [BMSEEKER_TITLE=… BMSEEKER_ARTIST=…]
     /// cargo test -p bmseeker song_links -- --ignored`

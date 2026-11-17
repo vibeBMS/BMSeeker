@@ -198,6 +198,10 @@ impl Needs {
     }
 }
 
+// Names (an archive's in a pack, a search's results) matched to a song's
+// title and artist by what they start with. Whether two charts are of one
+// song is `titles::same_song`.
+
 /// `name` without bracketed parts (`[ANOTHER]`, `(obj: ...)`, `【...】`),
 /// lower case, spaces collapsed.
 fn strip_brackets(name: &str) -> String {
@@ -224,14 +228,6 @@ pub fn same_title(a: &str, b: &str) -> bool {
         (b, a)
     };
     short.chars().count() >= 3 && long.starts_with(&short)
-}
-
-/// Titles of one song's charts: [`same_title`], or the same once the
-/// chart's name is gone ("CG901B -7EX-[Short Ver.]" and "CG901B -5-").
-pub(crate) fn same_song_title(a: &str, b: &str) -> bool {
-    use crate::bmssearch::base_title;
-    let (x, y) = (base_title(a), base_title(b));
-    same_title(a, b) || (x.chars().count() >= 2 && same_name(&x, &y))
 }
 
 /// The same title, but for its brackets ("Song [ANOTHER]" is "Song").
@@ -699,10 +695,14 @@ fn free_folder(
     charts: &[ChartInfo],
     below: impl Fn(&Path) -> Vec<ChartInfo>,
 ) -> PathBuf {
+    use crate::titles::{same_song, Song};
+    let songs: Vec<Song> = charts
+        .iter()
+        .map(|c| Song::of(&c.title, &c.artist))
+        .collect();
     let same = |c: &ChartInfo| {
-        charts
-            .iter()
-            .any(|n| same_song_title(&c.title, &n.title) && same_artist(&c.artist, &n.artist))
+        let c = Song::of(&c.title, &c.artist);
+        songs.iter().any(|n| same_song(&c, n))
     };
     (1..)
         .map(|n| match n {
@@ -833,13 +833,6 @@ mod tests {
         assert!(same_title("Mirage Garden [ANOTHER]", "Mirage Garden"));
         assert!(!same_title("X (虎のANOTHER)", "X [7KEYS]")); // too short to tell
         assert!(!same_title("Love Story", "Lovely Day"));
-        // one song's charts, each named after the title
-        assert!(same_song_title(
-            "CG901B -7EX-[Short Ver.]BGA+",
-            "CG901B -7light-[Short Ver.] BGA+"
-        ));
-        assert!(!same_song_title("X (虎のANOTHER)", "X [7KEYS]"));
-        assert!(!same_song_title("Love Story -A-", "Lovely Day -A-"));
         assert!(same_artist(
             "ねこみみ魔法使い / obj:秘密",
             "ねこみみ魔法使い"

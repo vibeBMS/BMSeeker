@@ -478,9 +478,15 @@ fn new_item(
     }
 }
 
-/// Whether the chart `c` is of the song `want`.
+/// Whether the chart `c` is of the song `want` ([`same_song`](crate::titles::same_song)).
 fn of_song(c: &Option<ChartInfo>, want: &Want) -> bool {
-    c.as_ref().is_some_and(|c| super::is_song(c, want))
+    use crate::titles::{same_song, Song};
+    c.as_ref().is_some_and(|c| {
+        same_song(
+            &Song::of(&want.title, &want.artist),
+            &Song::of(&c.title, &c.artist),
+        )
+    })
 }
 
 /// What becomes of the staged download `s` in the library `lib` (read

@@ -1,5 +1,7 @@
-//! Titles and artists compared as the BeMusicSeeker fork compares them to
-//! tell whether a library folder is a chart's song: both normalized
+//! Titles and artists compared as the BeMusicSeeker fork compares them, to
+//! tell whether two charts are of one song ([`same_song`]: whether a
+//! library folder or a table's entry is a chart's song) and whether a
+//! folder's charts are one work ([`Song`] alike): both normalized
 //! ([`title_key`]: NFKC, the trailing group of brackets / `-…-` / `~…~`
 //! cut, keeping up to its last `MIX`; [`artist_key`]: the credits of chart
 //! makers, BGA, 差分, feat. ... removed, but not those for the music:
@@ -12,8 +14,6 @@
 //!
 //! Derived from the BeMusicSeeker unofficial fork (MIT; copyright notices
 //! and licence text in THIRD_PARTY_NOTICES.md).
-
-use std::collections::HashMap;
 
 /// How a folder's song stands to a chart's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -449,16 +449,14 @@ fn trim_separators(t: &[char], start: usize, mut end: usize) -> usize {
     end
 }
 
-/// The two-letter pieces of `s`, counted (one letter: itself).
-fn bigrams(s: &str) -> HashMap<(char, char), usize> {
+/// The two-letter pieces of `s`, sorted (one letter: itself).
+fn bigrams(s: &str) -> Vec<(char, char)> {
     let c: Vec<char> = s.chars().collect();
-    let mut out = HashMap::new();
-    if c.len() == 1 {
-        out.insert((c[0], '\0'), 1);
-    }
-    for w in c.windows(2) {
-        *out.entry((w[0], w[1])).or_default() += 1;
-    }
+    let mut out: Vec<(char, char)> = match c[..] {
+        [one] => vec![(one, '\0')],
+        _ => c.windows(2).map(|w| (w[0], w[1])).collect(),
+    };
+    out.sort_unstable();
     out
 }
 
@@ -472,32 +470,57 @@ pub(crate) fn dice(a: &str, b: &str) -> f64 {
         return 1.0;
     }
     let (x, y) = (bigrams(a), bigrams(b));
-    let overlap: usize = x
-        .iter()
-        .map(|(k, n)| (*n).min(*y.get(k).unwrap_or(&0)))
-        .sum();
-    let total: usize = x.values().sum::<usize>() + y.values().sum::<usize>();
-    2.0 * overlap as f64 / total as f64
+    // the pieces both have, each as often as the one that has it less
+    let (mut i, mut j, mut overlap) = (0, 0, 0);
+    while i < x.len() && j < y.len() {
+        match x[i].cmp(&y[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => (i, j, overlap) = (i + 1, j + 1, overlap + 1),
+        }
+    }
+    2.0 * overlap as f64 / (x.len() + y.len()) as f64
+}
+
+/// A chart's title and artist as compared ([`title_key`], [`artist_key`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Song {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+}
+
+impl Song {
+    pub(crate) fn of(title: &str, artist: &str) -> Song {
+        Song {
+            title: title_key(title),
+            artist: artist_key(artist),
+        }
+    }
+}
+
+/// Whether `a` and `b` are one song's charts ([`Relation::Strong`]): a
+/// title, the same artist, and the titles alike (Dice ≥ [`STRONG`]).
+pub(crate) fn same_song(a: &Song, b: &Song) -> bool {
+    !a.title.is_empty() && a.artist == b.artist && dice(&a.title, &b.title) >= STRONG
 }
 
 /// The (title, artist) pairs of a song's charts, as compared: the most
 /// common first (then by path, then as given).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Profile {
-    pub(crate) pairs: Vec<(String, String)>,
+    pub(crate) pairs: Vec<Song>,
 }
 
 impl Profile {
     /// Of charts' (title, artist, path); charts without a title count not.
     pub(crate) fn of<'a>(charts: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) -> Profile {
         // (pair, count, first path, first index)
-        let mut groups: Vec<((String, String), usize, String, usize)> = Vec::new();
+        let mut groups: Vec<(Song, usize, String, usize)> = Vec::new();
         for (i, (title, artist, path)) in charts.into_iter().enumerate() {
-            let t = title_key(title);
-            if t.is_empty() {
+            let pair = Song::of(title, artist);
+            if pair.title.is_empty() {
                 continue;
             }
-            let pair = (t, artist_key(artist));
             match groups.iter_mut().find(|g| g.0 == pair) {
                 Some(g) => {
                     g.1 += 1;
@@ -524,7 +547,7 @@ impl Profile {
     }
 
     /// The most common pair.
-    pub(crate) fn dominant(&self) -> Option<&(String, String)> {
+    pub(crate) fn dominant(&self) -> Option<&Song> {
         self.pairs.first()
     }
 
@@ -533,14 +556,15 @@ impl Profile {
     /// [`Relation::Related`] when any of `other`'s pairs is alike by
     /// `rule`.
     pub(crate) fn relation(&self, other: &Profile, rule: Rule) -> Relation {
-        let (Some((t, a)), Some((ot, oa))) = (self.dominant(), other.dominant()) else {
+        let (Some(s), Some(o)) = (self.dominant(), other.dominant()) else {
             return Relation::Unavailable;
         };
-        if a == oa && dice(t, ot) >= STRONG {
+        if same_song(s, o) {
             return Relation::Strong;
         }
-        let related = other.pairs.iter().any(|(ot, oa)| {
-            let (x, y) = (dice(t, ot) >= RELATED, dice(a, oa) >= RELATED);
+        let related = other.pairs.iter().any(|o| {
+            let x = dice(&s.title, &o.title) >= RELATED;
+            let y = dice(&s.artist, &o.artist) >= RELATED;
             match rule {
                 Rule::Either => x || y,
                 Rule::Both => x && y,
@@ -552,13 +576,6 @@ impl Profile {
             Relation::Unrelated
         }
     }
-}
-
-/// Whether two charts are of one song by [`Relation::Strong`].
-#[cfg(test)]
-pub(crate) fn same_song(title: &str, artist: &str, other_title: &str, other_artist: &str) -> bool {
-    Profile::one(title, artist).relation(&Profile::one(other_title, other_artist), Rule::Either)
-        == Relation::Strong
 }
 
 #[cfg(test)]
@@ -617,7 +634,7 @@ mod tests {
             ("Song [HYPER]", "alpha", "h.bms"),
             ("Song [B]", "beta", "b.bms"),
         ]);
-        assert_eq!(folder.dominant().unwrap(), &("song".into(), "alpha".into()));
+        assert_eq!(folder.dominant().unwrap(), &Song::of("song", "alpha"));
         assert_eq!(chart.relation(&folder, Rule::Either), Relation::Strong);
         // another artist's song of a like title: related
         let other = Profile::one("Songs", "gamma");
@@ -629,8 +646,258 @@ mod tests {
             chart.relation(&Profile::default(), Rule::Either),
             Relation::Unavailable
         );
-        assert!(same_song("Song [X]", "alpha / obj: b", "Song", "alpha"));
-        assert!(!same_song("Song", "alpha", "Song", "beta"));
-        assert!(!same_song("Love Story", "a", "Lovely Day", "a"));
+        let same = |t: &str, a: &str, u: &str, b: &str| same_song(&Song::of(t, a), &Song::of(u, b));
+        assert!(same("Song [X]", "alpha / obj: b", "Song", "alpha"));
+        assert!(!same("Song", "alpha", "Song", "beta"));
+        assert!(!same("Love Story", "a", "Lovely Day", "a"));
+        assert!(!same("", "a", "", "a"));
+    }
+
+    /// Real titles and artists (difficulty tables' charts and their songs),
+    /// as compared: whether they are one song's ([`same_song`]: a library
+    /// folder or a table's entry is a chart's song) and one work's (equal
+    /// [`Song`]s: a download's folder of charts is one package).
+    #[test]
+    fn real_titles() {
+        #[rustfmt::skip]
+        let pairs: &[(&str, &str, &str, &str, bool, bool)] = &[
+            // one song's charts
+            ("Mirage Garden [ANOTHER]", "Gom / obj: x", "Mirage Garden", "Gom", true, true),
+            ("Born [29Another]", "Ninja Action Team / 29", "Born [ANOTHER]", "Ninja Action Team", true, true),
+            ("BRILLIANT STAR ～煌星の雫～ [WHITE ANOTHER]", "shimizushi BGA :vol-t & a.a / obj:DJ.END", "BRILLIANT STAR ～煌星の雫～ [Shooting Star]", "shimizushi BGA : vol-t & a.a / obj : monaka", true, true),
+            ("Lily [KOCHITHER]", "tolz feat.音街ウナ obj:東風谷早苗", "Lily [S-]", "tolz feat. 音街ウナ obj:S", true, true),
+            ("QSHELL －拒色のシェルル－ [ZOI]", "Se-U-Ra obj:SUZUKAZEΛ", "QSHELL -拒色のシェルル- [Geraeusch]", "Se-U-Ra / И", true, true),
+            ("Name of oath [SP BEGINNER]", "void feat. コツキミヤ , Gt. えば BGA : Photonskyto", "Name of oath [yumether]", "void feat. コツキミヤ , Gt. えば BGA:Photonskyto / OBJ:夢瑠", true, true),
+            ("X (AFOTHER)", "sasakure.UK / black train", "X (虎のANOTHER)", "sasakure.UK / black train", true, true),
+            ("F", "bubbles", "F [F]", "bubbles obj:Fender", true, true),
+            ("S [ANOTHER]", "D.J.Nero", "S [HARDEST]", "D.J.Nero /差分 赤い人", true, true),
+            ("Caelumize [SPA]", "void", "Caelumize [SP Cloudy]", "void obj.Cloudy Boy", true, true),
+            // titles alike: one song, not one work
+            ("AltMirrorBell Another", "Grand thaw", "AltMirrorBell HYPER", "Grand thaw", true, false),
+            ("Imperishable Night 2006 for D", "篠螺悠那 feat. 鯛の小骨", "Imperishable Night 2006 -SP ANOTHER-", "篠螺悠那 feat. 鯛の小骨", true, false),
+            ("Angelic layer -ANOTHER-", "SHIKI (obj.mp)", "Angelic delayer", "SHIKI / 水素", true, false),
+            ("the lost dedicated [nostalgia]", "哀愁マニア / obj.siokaze", "the lost delaycated (distant memory)", "哀愁マニア obj: qtp13", true, false),
+            ("Caelumize [SPA]", "void", "Caelum", "void", true, false),
+            // two songs of an artist, alike
+            ("MARENOL[HARD]", "LeaF Movie:Optie&Fiz/obj:赤い人", "MARENOIA [INSANE]", "LeaF Movie:Optie&Fiz", true, false),
+            ("プナイプナイせんそう -Luna-", "立秋 feat.ちょこ / selene.", "プナイプナイげんそう -LAST BOSS-", "立秋 feat.ちょこ / obj:七海", true, false),
+            ("E.V.E [ANOTHER]", "SOMON", "E.V.E.R [MARYTHER]", "SOMON / obj: Mary_Sue", true, false),
+            ("Love Story", "a", "Lovely Day", "a", false, false),
+            // a remix is a song of its own
+            ("JUMMER (HARD+)", "momo★yama　　(BGA:アカツキユウ) obj:LAPIS", "JUMMER (LASER PSY REMIX) [3X]", "momo★yama obj:trainer", false, false),
+            ("Toki (Sound piercer's Timesucker Remix) [Personality]", "puru twk. sound piercer (feat.Hee Bun.D) /obj:BAECON vs みっと", "Toki [ClockWise]", "puru / kkkfff2 obj.sialua", false, false),
+            // one song's charts whose artists differ as compared: a name
+            // after a `/` without spaces, a word, a music credit
+            ("Trinity [Maniac]", "TAK/A-zert", "Trinity -GOD-", "TAK / selene.", false, false),
+            ("硬核機動 [Maniac]", "しらいし / obj.siokaze", "硬核機動 [EX]", "しらいし/さ", false, false),
+            ("BB BLOW (7key another)", "onoken", "BB BLOW -EX-", "onoken/y", false, false),
+            ("Meaning of Existence [OVERHEAT]", "TKR/obj_jakko BGA:seizan", "Meaning of Existence [magical]", "TKR/obj.もにもに BGA:seizan", false, false),
+            ("Blooming Jump! [ugdther]", "卯月 obj:ugd", "Blooming Jump! [Maneuver]", "卯月 改", false, false),
+            ("Whispers from a Mirror", "Quint", "Whispers from a Mirror", "Quint SubAtrist", false, false),
+            ("Dreadnought [LastMoment]", "Mastermind(xi+nora2r) iimo / obj:秘密", "Dreadnought [Lagoon]", "Mastermind(xi+nora2r) / obj : LindBlum iimo", false, false),
+            ("tinnitus [Intense]", "SP-# arr:魔女 obj:potechang", "tinnitus -7 Minether-", "SP-# obj:MineC24", false, false),
+            ("アズール <ANOTHER>", "メスクラ (エヴァたん＆メコたん)", "アズール <鬼畜>", "メスクラ (エヴァたん＆メコたん)/yokosuka", false, false),
+            // a chart's name not in brackets
+            ("Air ANOTHER", "SHIKI / rio", "Air [Myth]", "SHIKI obj:1008", false, false),
+            // no title
+            ("", "a", "", "a", false, false),
+        ];
+        let mut wrong = Vec::new();
+        for &(t, a, u, b, song, work) in pairs {
+            let (x, y) = (Song::of(t, a), Song::of(u, b));
+            let got = (same_song(&x, &y), !x.title.is_empty() && x == y);
+            if got != (song, work) || same_song(&y, &x) != song {
+                wrong.push(format!("{t} | {a} ~ {u} | {b}: {got:?} ({x:?} {y:?})"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The BeMusicSeeker fork's test vectors (its
+    /// `InstallEstimationMetadataNormalizerTests`, MIT).
+    #[test]
+    fn fork_vectors() {
+        let same = |t: &str, a: &str, u: &str, b: &str| same_song(&Song::of(t, a), &Song::of(u, b));
+        let mut wrong = Vec::new();
+        #[rustfmt::skip]
+        let titles: &[(&str, &str)] = &[
+        ("Ark (remix/5keys)", "Ark (remix"),
+        ("Ark (remix/10lines)", "Ark (remix"),
+        ("Ark (mixed)", "Ark (mix"),
+        ("夏草の線路 -J-Trance remix-", "夏草の線路 -J-Trance remix"),
+        ("夏草の線路 -J-Trance remix- [Another]", "夏草の線路 -J-Trance remix"),
+        ("Air -GOD-", "Air"),
+        ("Air -Revolutionary.Himix- [7keys ANOTHER]", "Air -Revolutionary.Himix"),
+        ("Toki (Sound piercer's Timesucker Remix) [SP ANOTHER]", "Toki (Sound piercer's Timesucker Remix"),
+        ("VIEW [Portable Disco Mix] [H14]", "VIEW [Portable Disco Mix"),
+        ("Lamellibrachia [laner+]", "Lamellibrachia"),
+        ("Lamellibrachia [athlete]", "Lamellibrachia"),
+        ("Lamellibrachia [robo]", "Lamellibrachia"),
+        ("new earth [ZOI]", "new earth"),
+        ("[主題] [差分]", "[主題]"),
+        ("【Freak《Show】Down》 [Another]", "【Freak《Show】Down》"),
+        ("【Freak《Show】Down》", "【Freak《Show】Down》"),
+        ("Nothingness[7A(LN)]", "Nothingness"),
+        ("Title (A) 続き [差分]", "Title (A) 続き"),
+        ("Title [差分] 追加表記", "Title"),
+        ("~メッセージ~ [Another]", "~メッセージ~"),
+        ("Title (未閉鎖", "Title"),
+        ("Title ]", "Title"),
+        ("Title 【差分】 《追加》", "Title"),
+        ("Title <差分> 〜追加〜", "Title"),
+        (" Ｔｉｔｌｅ　（Ａｎｏｔｈｅｒ） ", "Title"),
+        ("Title-Another", "Title-Another"),
+        ("(Wrapped Title)", "(Wrapped Title)"),
+        ("Title [mix A remix B]", "Title [mix A remix"),
+        ];
+        for (raw, shown) in titles {
+            if title_display(raw) != *shown {
+                wrong.push(format!("title {raw:?}: {:?}", title_display(raw)));
+            }
+        }
+        // other credits than the music's left out; a credit for the music
+        // where the comparing starts again
+        #[rustfmt::skip]
+        let alike: &[(&str, &str)] = &[
+        ("", ""),
+        ("obj: diffuser", ""),
+        ("  ＳＫＹ．　ＯＢＪ ：；／ Diff  ", "SKY."),
+        ("SKY.obj:M1CH1", "SKY."),
+        ("Artist ; .: NoTeS: Diff", "Artist"),
+        ("Artist;notes:Diff", "Artist;"),
+        ("Artist ;/; notes:Diff", "Artist"),
+        ("Music:わかどり | Movie:もがみ", "Music:わかどり"),
+        ("Artist|obj:Diff", "Artist|"),
+        ("GU-Note / obj: Mary_Sue", "GU-Note"),
+        ("Frontier Lyric / obj.Diff", "Frontier Lyric"),
+        ("Frontier Lyric/ obj.Diff", "Frontier Lyric"),
+        ("Raver -feat: Guest-", "Raver"),
+        ("Artist feat: Guest-remix: A", "Artist"),
+        ("Music:Musi_chan / BMS:G&P", "Music:Musi_chan"),
+        ("Artist obj:Diff & BGA:Visual", "Artist"),
+        ("Lalot. feat. 翠京 (BGA:SENALI × Frill OBJ: LuvTek ×", "Lalot."),
+        ("源屋feat.ユスラ", "源屋"),
+        ("Artist featuring Guest", "Artist"),
+        ("Artist ft. Guest", "Artist"),
+        ("Artist Vo.: Guest", "Artist"),
+        ("Artist vocals Guest", "Artist"),
+        ("Artist obj Guest", "Artist"),
+        ("Artist objected by Diff", "Artist"),
+        ("Artist note by Diff", "Artist"),
+        ("Artist pmsobj=Diff", "Artist"),
+        ("MIPSYLE odj.ユ / BGA: ジンジャー塚原", "MIPSYLE"),
+        ("Nota BGI:雪椿", "Nota"),
+        ("Nota/obj:みあ BGI:雪椿", "Nota"),
+        ("あとぅす // 差分: Eri BGI:りーふぱいザウルス", "あとぅす"),
+        ("Artist 譜面: Diff", "Artist"),
+        ("Artist 差分 Diff", "Artist"),
+        ("AKITO / #050C1B", "AKITO"),
+        ("Artist//Diff", "Artist"),
+        ("Artist/ Diff", "Artist"),
+        ("Abel (Mov.Siesphere Illust.suisou)", "Abel"),
+        ("kanone[BGI:TAKA.S", "kanone"),
+        ("Artist ( [\nfeat. Guest", "Artist"),
+        ("Artist <Movie: Visual>", "Artist"),
+        ("Artist 【《illust.:. Visual》】", "Artist"),
+        ("yoayua (yoa + yuayua) Movie:自動車 原付 & うまるつふり", "yoayua (yoa + yuayua)"),
+        ("AKITO chart:exclusion", "AKITO"),
+        ("Artist BMS:Chart_Generator,obj:Diff", "Artist"),
+        ("Artist Graphic : Visual", "Artist"),
+        ("牧野 Sliced by И / obj: Diff", "牧野"),
+        ("Artist (Guitar: Player, Vocal: Singer)", "Artist"),
+        ("Artist PMS by Diff", "Artist"),
+        ("Artist Pattern By Diff", "Artist"),
+        ("Artist Sequence: Diff", "Artist"),
+        ("Artist Lyrics: Guest", "Artist"),
+        ("Artist image: Visual", "Artist"),
+        ("Artist Artwork: Visual", "Artist"),
+        ("Artist Visual: Visual", "Artist"),
+        ("Artist Illust&obj:JURUMA", "Artist"),
+        ("Artist BGA&obj:Diff", "Artist"),
+        ("Artist obj + BGA:Diff obj:Tail", "Artist"),
+        ("Artist (bga/obj.: Diff)", "Artist"),
+        ("Artist feat. Guest / BGA & obj:Diff", "Artist"),
+        ("Artist Bms＆Bga:Diff", "Artist"),
+        ("Artist obj.better music seter", "Artist"),
+        ("MiKaDo feat. はらもりよしな Guitar:裸(ﾗｵｳ)王 BGA:MiKaDo Illust&obj:JURUMA", "MiKaDo"),
+        ("Aliesrite* (Ym1024 feat. GuestA)", "Aliesrite* (Ym1024 feat. GuestB)"),
+        ("Aliesrite* (Ym1024 feat. Guest)", "Aliesrite* (Ym1024)"),
+        ("A (B [C feat. X", "A (B [C)"),
+        ("A (B] feat. X", "A (B]"),
+        ("Zris Remixed by Daily BG by Rosa1100", "Zris Remixed by Daily"),
+        ("plastic / Remix: AYhaz / BGI: Loni", "plastic / Remix: AYhaz"),
+        ("(C)Nintendo / Arranged by Y.W", "(C)Nintendo / Arranged by Y.W"),
+        ("AKITO // mixed by TOSH", "AKITO // mixed by TOSH"),
+        ("株式会社タカラ / Covered by はろるど", "株式会社タカラ / Covered by はろるど"),
+        ("ねこみりん feat.みゆ Remixed by Ras", "ねこみりん Remixed by Ras"),
+        ("DJ obelisk feat.axia /remixed.Pino obj:Diff", "DJ obelisk remixed.Pino"),
+        ("Artist / Remix: A / Arr. B / obj: Diff", "Artist Remix: A Arr. B"),
+        ("Artist feat GuestA Remixed by X", "Artist feat GuestB Remixed by X"),
+        ("Artist feat G (Remixed by X)", "Artist (Remixed by X)"),
+        ("Artist -remix: A obj:Diff", "Artist -remix: A"),
+        ("Symphonian feat.kei_iwata rmx bbangsami, illust CAPOKI", "Symphonian rmx bbangsami,"),
+        ("SC.Kanata feat.ORI(composed:OKAYAN)", "SC.Kanata composed:OKAYAN"),
+        ("Midi:sawa Bms＆Bga:くだみつ", "Midi:sawa"),
+        ("Music/BMS/BGA - A obj:Diff", "Music/BMS/BGA - A"),
+        ("Artist feat G music & movie: A", "Artist music & movie: A"),
+        ("BMS:ChartAuthor MIDI:Composer", "MIDI:Composer"),
+        ("BMS/GYAON 作曲/井上⊿ chart:Diff", "作曲/井上⊿"),
+        ("Artist feat G Remix / Pino", "Artist Remix / Pino"),
+        ];
+        for (a, b) in alike {
+            if !same("  Ｓｏｎｇ [ANOTHER]  ", a, "Song", b) {
+                wrong.push(format!(
+                    "alike {a:?} {b:?}: {:?} {:?}",
+                    artist_key(a),
+                    artist_key(b)
+                ));
+            }
+        }
+        // a name is no credit
+        #[rustfmt::skip]
+        let apart: &[(&str, &str)] = &[
+        ("Key Note Team", "Key"),
+        ("Object", ""),
+        ("FT 718", ""),
+        ("Vo Team", ""),
+        ("BGAキャラ水着ガチャ", ""),
+        ("ZizhiRFeather", "ZizhiR"),
+        ("Artist_feat.Guest", "Artist"),
+        ("PakPiano-Note , DJ Demadosa", "PakPiano"),
+        ("Frontier Lyric / obj.Diff", "Frontier"),
+        ("q/stol", "q"),
+        ("Dango/Dx", "Dango"),
+        ("1/8", "1"),
+        ("π/3", "π"),
+        ("/指紋", ""),
+        ("AcuticNotes(An/レク)", "AcuticNotes(An)"),
+        ("A (B / C)", "A (B)"),
+        ("sasakure.UK", "sasakure."),
+        ("Re:gats&", "Re"),
+        ("A & B + C vs D", "A"),
+        ("Artist | Other", "Artist"),
+        ];
+        for (a, b) in apart {
+            if same("Song", a, "Song", b) {
+                wrong.push(format!("apart {a:?} {b:?}: {:?}", artist_key(a)));
+            }
+        }
+        #[rustfmt::skip]
+        let songs: &[(&str, &str, &str, &str, bool)] = &[
+        ("Ice Festival", "Nota BGI:雪椿", "Ice Festival[札幌雪祭り]", "Nota/obj:みあ BGI:雪椿", true),
+        ("I believe", "Gun string", "I believe...", "Gun string", true),
+        ("Midnight BEAST", "AKITO", "Midnight BEAST -deep azure mix-", "AKITO / #050C1B", false),
+        ("Song", "Zris Remixed by Daily天利 BG by Rosa", "Song", "Zris Remixed by Daily BG by Rosa", false),
+        ("Song", "Origin / Remixed by A", "Song", "Origin / Remixed by B", false),
+        ("Song", "Artist feat GuestA Remixed by X", "Song", "Artist feat GuestB Remixed by Y", false),
+        ("Song", "Artist obj:Same", "Song", "Other obj:Same", false),
+        ("Song", "q/stol", "Song", "q/other", false),
+        ];
+        for &(t, a, u, b, want) in songs {
+            if same(t, a, u, b) != want {
+                wrong.push(format!("song {t:?} {a:?} {u:?} {b:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }
