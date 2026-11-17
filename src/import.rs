@@ -9,6 +9,7 @@ use crate::install::Done;
 use crate::library::Library;
 use crate::placement;
 use crate::unpack::{is_archive, safe_rel, unpack, Blob, BUDGET};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// What became of a downloaded file.
@@ -90,24 +91,28 @@ pub fn import(
         .unwrap_or_else(|| "nothing came of it".into()))
 }
 
-/// Put `file` (published as `name`) into folder `dest` of `store`: an
-/// archive is unpacked there (with the archives in it, if it holds no
-/// chart), anything else (an add-on chart or movie) is copied in. Returns
-/// the number of files written.
+/// Put `blob` (published as `name`: a file, or its bytes in memory) into
+/// the folder `dest` of `store`: an archive is unpacked there (with the
+/// archives in it, if it holds no chart), anything else (an add-on chart
+/// or movie) is put in as it is. Returns the number of files written.
 pub fn unpack_into(
     store: &dyn Store,
-    file: &Path,
+    blob: Blob,
     name: &str,
     dest: &Path,
 ) -> Result<usize, String> {
     store.create_dir_all(dest);
     if is_archive(Path::new(name)) {
-        return unpack(Blob::File(file.to_path_buf()), store, dest, BUDGET).map(|m| m.len());
+        return unpack(blob, store, dest, BUDGET).map(|m| m.len());
     }
     let to = dest.join(safe_rel(name).unwrap_or_else(|| PathBuf::from("download")));
-    store
-        .copy(file, &to)
-        .map_err(|e| format!("{}: {e}", to.display()))?;
+    let put = match blob {
+        Blob::File(file) => store.copy(&file, &to),
+        Blob::Bytes(bytes) => store
+            .create(&to, None)
+            .and_then(|mut w| w.write_all(&bytes)),
+    };
+    put.map_err(|e| format!("{}: {e}", to.display()))?;
     Ok(1)
 }
 
@@ -120,6 +125,26 @@ mod tests {
     /// [`import`] into the library below `library`, as by hand.
     fn import_to(store: &dyn Store, file: &Path, library: &Path) -> Result<Imported, String> {
         import(store, file, &mut Library::new(library), &Request::default())
+    }
+
+    /// A file or its bytes: an archive unpacked, anything else put in.
+    #[test]
+    fn files_and_bytes_into_a_folder() {
+        use crate::fs::Fs;
+        let m = crate::fs::Mem::default();
+        let dest = Path::new("skins/x");
+        let z = zip(&[("a/b.txt", "b"), ("c.png", "c")]);
+        assert_eq!(unpack_into(&m, Blob::Bytes(z), "x.zip", dest), Ok(2));
+        assert_eq!(m.read(&dest.join("a/b.txt")).unwrap(), b"b");
+        assert_eq!(
+            unpack_into(&m, Blob::Bytes(b"#TITLE x".to_vec()), "../x.bms", dest),
+            Ok(1)
+        );
+        assert_eq!(m.read(&dest.join("x.bms")).unwrap(), b"#TITLE x");
+        m.put(Path::new("dl/movie"), b"mp4", 0);
+        let file = Blob::File("dl/movie".into());
+        assert_eq!(unpack_into(&m, file, "m.mp4", dest), Ok(1));
+        assert_eq!(m.read(&dest.join("m.mp4")).unwrap(), b"mp4");
     }
 
     const CHART: &str = "#TITLE Song\n#ARTIST someone\n#BPM 120\n#WAV01 01.wav\n#00111:01\n";

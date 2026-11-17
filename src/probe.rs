@@ -162,7 +162,7 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
                 let dir: PathBuf = tmp.join("unpacked");
                 match crate::import::unpack_into(
                     &crate::fs::Disk,
-                    &file,
+                    crate::unpack::Blob::File(file.clone()),
                     &format!("a.{format}"),
                     &dir,
                 ) {
