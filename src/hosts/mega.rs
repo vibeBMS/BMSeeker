@@ -203,6 +203,11 @@ fn mega_folder(u: &str) -> Option<(String, Vec<u8>, Option<String>)> {
     Some((h.to_string(), key, node))
 }
 
+/// A MEGA folder link's handle and the node in it (as [`mega_folder`]).
+pub(crate) fn folder_handle(u: &str) -> Option<(String, Option<String>)> {
+    mega_folder(u).map(|(h, _, n)| (h, n))
+}
+
 /// A file in a MEGA folder.
 #[derive(Clone)]
 struct MegaFile {

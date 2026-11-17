@@ -62,6 +62,9 @@ pub struct Request {
     /// replacing those of their names when newer (else only those the
     /// song's folder lacks).
     pub reinstall: bool,
+    /// Other charts wanted (MD5s: a batch's, a table's missing charts):
+    /// from a separate chart's archive they wait for their songs too.
+    pub also: Vec<String>,
 }
 
 /// What a package comes to.
@@ -436,8 +439,9 @@ fn of_song(c: &Option<ChartInfo>, want: &Want) -> bool {
 /// there: into it ([`Outcome::Into`]), or waiting for their song, or
 /// asked. What a song's link (or a file brought by hand) brought goes in
 /// as a song of its own unless where it goes is sure. What waits from a
-/// separate chart's archive is only the chart `md5` (a pack of many songs'
-/// charts keeps no others): nothing at all, [`Failure::NotTheChart`].
+/// separate chart's archive is only the chart `md5` and those of `also` (a
+/// pack of many songs' charts keeps no others): nothing at all,
+/// [`Failure::NotTheChart`].
 pub fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> {
     let md5 = req.md5.as_deref().and_then(md5_key);
     if let Some(m) = md5.as_deref().filter(|_| req.check) {
@@ -502,8 +506,10 @@ pub fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> 
     if !new.is_empty() {
         items.push(new_item(fs, s, lib, &new, &packages, req));
     }
-    // a separate chart's archive: only the chart wanted waits
+    // a separate chart's archive: only the charts wanted wait
     if let (Some(m), true) = (md5.as_deref(), req.role == Role::Diff && !s.loose) {
+        let also: HashSet<String> = req.also.iter().filter_map(|m| md5_key(m)).collect();
+        let wanted = |c: &str| c == m || also.contains(c);
         items.retain_mut(|i| {
             if !matches!(i.outcome, Outcome::Waiting | Outcome::Ask(_)) {
                 return true;
@@ -511,7 +517,7 @@ pub fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> 
             i.moves.retain(|(from, _)| {
                 s.charts
                     .iter()
-                    .any(|c| c.md5 == m && s.root.join(&s.members[c.member].rel) == *from)
+                    .any(|c| wanted(&c.md5) && s.root.join(&s.members[c.member].rel) == *from)
             });
             !i.moves.is_empty()
         });
@@ -692,9 +698,12 @@ pub(crate) fn taken(
     let s = Staged::read(fs, &stage, members, loose.is_some());
     let items = plan(fs, &s, lib, &req);
     let mut out = applied(store, items, downloads, lib);
+    // (a song added, or the files its folder lacked brought in)
     if place_waiting {
-        if let Some((_, done)) = out.iter_mut().find(|(o, d)| {
-            matches!(o, Outcome::New(_)) && matches!(d.as_slice(), [Done::Added(..)])
+        if let Some((_, done)) = out.iter_mut().find(|(o, d)| match o {
+            Outcome::New(_) => matches!(d.as_slice(), [Done::Added(..)]),
+            Outcome::Owned(_) => true,
+            _ => false,
         }) {
             let placed = super::place_waiting_in(fs, downloads, lib);
             done.extend(placed.into_iter().map(Done::Placed));

@@ -4,12 +4,11 @@ use crate::library::{done_record, scan};
 use crate::link::fetch_list;
 use crate::Run;
 use bmseeker::export;
-use bmseeker::fs::Disk;
 use bmseeker::hosts::Want;
-use bmseeker::install::{self, Done};
+use bmseeker::install::{self, Batch, Entry};
 use bmseeker::links::Links;
 use bmseeker::net::Client;
-use bmseeker::sources::{Query, Sources};
+use bmseeker::sources::Sources;
 use bmseeker::table::{fetch_table, DifficultyTable, TableEntry};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
@@ -27,7 +26,8 @@ pub enum Table {
         /// One level only.
         #[arg(short, long)]
         level: Option<String>,
-        /// Download them (each song, then its separate chart).
+        /// Download them (each song, then its separate chart; with the song
+        /// in the library, the chart first; each file once).
         #[arg(long)]
         get: bool,
         /// A download whose charts the library has: its files again, newer
@@ -188,35 +188,38 @@ fn missing(
         Sources::from_config(r.config(), Vec::new())
     };
     let downloads = library.join(&r.config().downloads);
+    // one batch: each file downloaded once; the charts it wants wait for
+    // their songs
+    let mut batch = Batch::new(missing.iter().map(|e| e.md5.clone()));
     for e in missing {
-        let want = Want {
-            title: e.title.clone(),
-            artist: e.artist.clone(),
+        let entry = Entry {
+            md5: e.md5.clone(),
+            sha256: e.sha256.clone(),
+            want: Want {
+                title: e.title.clone(),
+                artist: e.artist.clone(),
+            },
+            // (the song's own charts: where its separate chart goes)
+            org_md5: e.org_md5.clone(),
+            song: links.song_links(e),
+            chart: links.chart_links(e),
         };
-        let mut song: Vec<Done> = Vec::new();
-        for (own, diff) in [(links.song_links(e), false), (links.chart_links(e), true)] {
-            // the song brought the chart: no separate chart to get
-            let has = install::added(&song).any(|dir| install::holds_chart(&Disk, dir, &e.md5));
-            if diff && (has || own.is_empty()) {
-                break;
-            }
-            let q = Query {
-                md5: e.md5.clone(),
-                want: want.clone(),
-                diff,
-                // (the song's own charts: where its separate chart goes)
-                org_md5: e.org_md5.clone(),
-            };
-            let done = install::links_in(&downloads, &mut have, &q, &own, &sources, &r.cx);
-            for d in &done {
-                r.out.record(done_record(&e.title, d), || {
-                    crate::library::done_text(&e.title, d)
-                });
-            }
-            if !diff {
-                song = done;
-            }
-        }
+        // an earlier one brought it, or its song (the chart first then)
+        install::entry::entry_in(
+            &downloads,
+            &mut have,
+            &entry,
+            &sources,
+            &mut batch,
+            &r.cx,
+            |_, done| {
+                for d in done {
+                    r.out.record(done_record(&e.title, d), || {
+                        crate::library::done_text(&e.title, d)
+                    });
+                }
+            },
+        );
     }
     Ok(())
 }

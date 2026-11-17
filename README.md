@@ -83,7 +83,13 @@ is decided first by its own charts the library has (each votes for its folder; t
 when the library holds a chart twice, are never picked between: the chart waits), then by the song's own charts a
 table names (`org_md5`), then by the files the charts use and their title and artist. What a song's link brings is a
 folder of its own unless where it goes is sure. A separate chart whose song is not in the library yet waits in the
-downloads folder (of a pack of many, only the chart wanted) and goes into the song's folder when the song comes. A short link (`db.tt`, `bit.ly`) whose redirects
+downloads folder (of a pack of many, only the chart wanted; with `table missing --get`, the run's missing charts) and
+goes into the song's folder when the song comes. `table missing --get` takes each missing chart in turn: one the run
+has brought in already is skipped; when the library has its song (one of the song's charts the table names, or a
+chart of its title and artist), its separate chart is downloaded first and the song only if the chart is left waiting
+(the song is never downloaded into a second folder); else the song, then its separate chart unless the song brought
+it. A file is downloaded once a run, whatever link leads to it (Google Drive's `gdrive:ID`, MediaFire's, MEGA's,
+Dropbox's, else the URL without its `#` part; a folder's link with the song looked for in it). A short link (`db.tt`, `bit.ly`) whose redirects
 end at a host bmseeker knows (Dropbox, Google Drive...) is opened from there. A server's passing failure (HTTP 429,
 502, 503, 504) is tried again twice. Google Drive's "Quota exceeded" (a file downloaded too often lately) is reported
 as such: it passes within a day.

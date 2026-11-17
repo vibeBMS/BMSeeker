@@ -7,12 +7,14 @@ use crate::fs::Fs;
 use crate::library::Library;
 use std::path::{Path, PathBuf};
 
+pub mod entry;
 pub mod plan;
 
+pub use entry::{entry_steps, Batch, Entry, Step, When};
 pub use plan::{apply, take, Item, Naming, Outcome, Request, Role};
 
 /// What became of one link.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Done {
     /// Unpacked into this folder (files written).
@@ -49,6 +51,10 @@ pub enum Failure {
 
 /// A download found by name that does not hold the chart wanted.
 pub const NOT_THE_CHART: &str = "what it brought does not hold the chart";
+
+/// A link whose file this batch of downloads has had already (and what
+/// it brought is in the library, or waits).
+pub const DOWNLOADED: &str = "downloaded already in this run";
 
 /// What a chart's download comes to when its song is in the library
 /// already and none of the chart's links brought it (nor led to a page).
@@ -223,10 +229,11 @@ pub fn link_in(
         diff,
         org_md5: Vec::new(),
     };
-    link_for(downloads, lib, &q, link, check.is_some(), cx)
+    link_for(downloads, lib, &q, link, check.is_some(), &[], cx)
 }
 
-/// [`link_in`] for `q` (`check`: what it brings must hold `q.md5`).
+/// [`link_in`] for `q` (`check`: what it brings must hold `q.md5`;
+/// `also`: other charts wanted, [`Request::also`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn link_for(
     downloads: &Path,
@@ -234,6 +241,7 @@ fn link_for(
     q: &crate::sources::Query,
     link: &str,
     check: bool,
+    also: &[String],
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
     // this download's own folder for what passes through (two songs of
@@ -242,7 +250,7 @@ fn link_for(
     if let Err(e) = std::fs::create_dir_all(&job) {
         return vec![Done::Failed(e.to_string().into())];
     }
-    let out = link_job(&job, downloads, lib, q, link, check, cx);
+    let out = link_job(&job, downloads, lib, q, link, check, also, cx);
     let _ = std::fs::remove_dir_all(&job);
     out
 }
@@ -280,11 +288,13 @@ pub fn request(
         naming: Naming::Named(safe_name(&q.want.title)),
         file,
         reinstall: config.reinstall,
+        also: Vec::new(),
     }
 }
 
 /// [`link_for`], what passes through in `job`.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn link_job(
     job: &Path,
     downloads: &Path,
@@ -292,6 +302,7 @@ fn link_job(
     q: &crate::sources::Query,
     link: &str,
     check: bool,
+    also: &[String],
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
     use crate::unpack::Blob;
@@ -319,7 +330,8 @@ fn link_job(
         }
     };
     cx.stage(crate::progress::Stage::Unpacking);
-    let req = request(q, check, file, &cx.config);
+    let mut req = request(q, check, file, &cx.config);
+    req.also = also.to_vec();
     take(&crate::fs::Disk, blob, &req, downloads, lib)
 }
 
@@ -433,7 +445,7 @@ pub fn archive_holds_chart(bytes: Vec<u8>, md5: &str, song: Option<&crate::hosts
 
 /// Whether the chart `c` is of the song `want`: its title but for the
 /// chart's name, and its artist.
-fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) -> bool {
+pub(crate) fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) -> bool {
     use crate::bmssearch::base_title;
     use crate::placement::{same_artist, same_name};
     let title = base_title(&want.title);
@@ -567,21 +579,43 @@ pub fn links_in(
     sources: &crate::sources::Sources,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
+    links_seen(downloads, lib, q, own, sources, &mut Batch::default(), cx)
+}
+
+/// [`links_in`] as one of a batch's downloads: a file `batch` has had
+/// already (by its [`DownloadKey`](crate::hosts::DownloadKey)) is not
+/// downloaded again; the charts the batch wants wait too.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn links_seen(
+    downloads: &Path,
+    lib: &mut Library,
+    q: &crate::sources::Query,
+    own: &[String],
+    sources: &crate::sources::Sources,
+    batch: &mut Batch,
+    cx: &crate::hosts::Context,
+) -> Vec<Done> {
     let cancelled = || cx.cancelled();
     let mut tries = Tries::default();
-    let mut tried: Vec<String> = Vec::new();
+    let mut tried = std::collections::HashSet::new();
     let check = (q.md5.trim().len() == 32).then_some(());
     let mut try_all = |links: Vec<String>, checked: bool, tries: &mut Tries| -> Option<Vec<Done>> {
         for l in links {
             if cancelled() {
                 return Some(vec![Done::Failed(crate::net::NetError::Cancelled.into())]);
             }
-            if tried.contains(&l) {
+            let key = Batch::key(&l, q);
+            if !tried.insert(key.clone()) {
                 continue;
             }
-            tried.push(l.clone());
+            if batch.has(&key) {
+                tries.record(vec![Done::Failed(DOWNLOADED.into())]);
+                continue;
+            }
             let check = check.is_some() && checked;
-            if let Some(done) = tries.record(link_for(downloads, lib, q, &l, check, cx)) {
+            let done = link_for(downloads, lib, q, &l, check, &batch.also(q), cx);
+            batch.tried(key, &done);
+            if let Some(done) = tries.record(done) {
                 return Some(done);
             }
         }

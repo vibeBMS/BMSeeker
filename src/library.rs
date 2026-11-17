@@ -168,6 +168,22 @@ impl Library {
             .map_or(&[], |v| v.as_slice())
     }
 
+    /// The folders holding a chart of the song `want` (its title but for
+    /// the chart's name, and its artist), among the charts given or read so
+    /// far (all of them once [`Library::scan`]ned).
+    pub fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self
+            .charts
+            .borrow()
+            .iter()
+            .filter(|(_, c)| c.as_ref().is_some_and(|c| crate::install::is_song(c, want)))
+            .filter_map(|(p, _)| p.parent().map(Path::to_path_buf))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// `file` is in the library now (moved there; `md5`: a chart's): the
     /// song's folder it is in holds it (a chart in a folder that was none:
     /// a song's of its own).
