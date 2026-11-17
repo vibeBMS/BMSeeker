@@ -775,4 +775,92 @@ mod tests {
             .flatten()
             .all(|e| !crate::placement::is_chart(&e.path())));
     }
+
+    /// Ginger then Konmai, by the chart's MD5: Ginger's package without
+    /// the chart is not taken; Konmai's brings it. A chart without a known
+    /// MD5 asks neither.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn packages_by_md5() {
+        use crate::config::Config;
+        use crate::fs::Disk;
+        use crate::testkit::{serve, Reply};
+        let ours = "#TITLE Ours\n#ARTIST a\n#WAV01 01.wav\n";
+        let md5 = md5_hex(ours.as_bytes());
+        let files = serve(vec![
+            ("/other.zip", Reply::ok(zip(&[("o/o.bms", "#TITLE Other")]))),
+            (
+                "/ours.zip",
+                Reply::ok(zip(&[("s/s.bms", ours), ("s/01.ogg", "1")])),
+            ),
+        ]);
+        let f = &files.url;
+        let api = serve(vec![
+            (
+                &*format!("/ginger/{md5}"),
+                Reply::ok(format!(r#"{{"downloadURL":"{f}/other.zip"}}"#)),
+            ),
+            (
+                &*format!("/konmai?md5={md5}"),
+                Reply::ok(format!(
+                    r#"{{"result":"success","data":{{"song_url":"{f}/ours.zip"}}}}"#
+                )),
+            ),
+        ]);
+        let cx = Context::new(Config {
+            third_party: true,
+            sources: vec!["ginger".into(), "konmai".into()],
+            ginger: format!("{}/ginger/", api.url),
+            konmai: format!("{}/konmai?md5=", api.url),
+            ..Config::default()
+        });
+        let sources = Sources::from_config(&cx.config, Vec::new());
+        let root = crate::testkit::tmp("packages");
+        let run = |e: Entry| {
+            let lib = Library::scan(&Disk, &root.join("bms"));
+            let job = EntryJob::new(
+                Arc::new(Disk),
+                root.join("dl"),
+                lib,
+                e,
+                sources.clone(),
+                &cx,
+            );
+            crate::install::job::run_job(&mut { job }, &crate::native::Native::new(&cx))
+        };
+        let want = Want {
+            title: "Ours".into(),
+            artist: "a".into(),
+        };
+        // no MD5: nothing to ask
+        let e = Entry {
+            want: want.clone(),
+            ..Default::default()
+        };
+        assert!(EntryJob::new(
+            Arc::new(Disk),
+            root.join("dl"),
+            Library::new(&root),
+            e,
+            sources.clone(),
+            &cx
+        )
+        .is_empty());
+        let out = run(Entry {
+            md5: md5.clone(),
+            want,
+            ..Default::default()
+        });
+        assert!(
+            matches!(&out.done[..], [Done::Added(_, 2)]),
+            "{:?}",
+            out.done
+        );
+        assert!(out.lib.owns(&md5));
+        assert_eq!(
+            api.asked(),
+            [format!("/ginger/{md5}"), format!("/konmai?md5={md5}")]
+        );
+        assert_eq!(files.asked(), ["/other.zip", "/ours.zip"]);
+    }
 }

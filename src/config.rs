@@ -23,14 +23,22 @@ pub struct Config {
     /// Where else a song's links are looked for, in order: `table` (the
     /// difficulty tables given), `stella`, `tsv` (link lists given),
     /// `bmssearch`, `mirrors` (a separate chart in [`Config::chart_mirrors`]),
-    /// `bmslibrary` (the community archive's songs: [`Config::bms_library`]).
-    /// The last two only with [`Config::third_party`].
+    /// `ginger` and `konmai` (a chart's package by its MD5:
+    /// [`Config::ginger`], [`Config::konmai`]), `bmslibrary` (the community
+    /// archive's songs: [`Config::bms_library`]). The last four only with
+    /// [`Config::third_party`].
     pub sources: Vec<String>,
     /// Whether third parties' copies are used: other people's mirrors of
     /// dead sites and uploaders, and the community archive
     /// ([`Config::uploaders`], the `mirrors` and `bmslibrary` sources). Not
     /// the authors' own links, nor the event mirror of manbow works.
     pub third_party: bool,
+    /// Ginger's lookup of a chart's package (the MD5 after it): the
+    /// `ginger` source.
+    pub ginger: String,
+    /// Konmai's lookup of a chart's package (the MD5 after it): the
+    /// `konmai` source.
+    pub konmai: String,
     /// Dead uploaders' files, numbered, kept elsewhere: a link to one goes
     /// to its mirrors (with [`Config::third_party`]).
     pub uploaders: Vec<Uploader>,
@@ -67,7 +75,7 @@ pub struct Config {
 }
 
 /// The [`Config::sources`] that are third parties' copies.
-pub(crate) const THIRD_PARTY_SOURCES: &[&str] = &["mirrors", "bmslibrary"];
+pub(crate) const THIRD_PARTY_SOURCES: &[&str] = &["mirrors", "ginger", "konmai", "bmslibrary"];
 
 /// A dead uploader whose files are kept elsewhere by number.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,11 +169,15 @@ impl Default for Config {
                 "tsv",
                 "bmssearch",
                 "mirrors",
+                "ginger",
+                "konmai",
                 "bmslibrary",
             ]
             .map(String::from)
             .to_vec(),
             third_party: false,
+            ginger: "https://gingerrush.com/download/package/".into(),
+            konmai: "https://bms.alvorna.com/api/hash?md5=".into(),
             uploaders: vec![
                 Uploader {
                 site: "gnqg.rosx.net".into(),
@@ -255,12 +267,16 @@ mod tests {
         assert!(c.uses("bmssearch") && !c.uses("stella"));
         // third parties' only when allowed
         let c = Config::default();
-        assert!(!c.uses("mirrors") && !c.uses("bmslibrary"));
+        assert!(!["mirrors", "ginger", "konmai", "bmslibrary"]
+            .iter()
+            .any(|s| c.uses(s)));
         let c = Config {
             third_party: true,
             ..c
         };
-        assert!(c.uses("mirrors") && c.uses("bmslibrary"));
+        assert!(["mirrors", "ginger", "konmai", "bmslibrary"]
+            .iter()
+            .all(|s| c.uses(s)));
         assert_eq!(c.manbow, Config::default().manbow);
         assert!(serde_json::from_str::<Config>("{").is_err());
     }

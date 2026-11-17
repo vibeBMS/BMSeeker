@@ -27,9 +27,9 @@ struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
     /// Also third parties' copies: other people's mirrors of dead sites and
-    /// uploaders (darksabun.club, bms.hexlataia.xyz), the community archive
-    /// (bms.kyouko.moe). What they bring is checked for the chart's MD5
-    /// where it was found by name.
+    /// uploaders (darksabun.club, bms.hexlataia.xyz), packages by a chart's
+    /// MD5 (Ginger, Konmai), the community archive (bms.kyouko.moe). What
+    /// their sources bring is checked for the chart's MD5.
     #[arg(long, global = true)]
     third_party: bool,
     /// A song new to the library: its folder named after its charts

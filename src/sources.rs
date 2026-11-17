@@ -2,8 +2,9 @@
 //! its own do not bring it: each place is a [`Source`] (link lists by MD5:
 //! difficulty tables, the Stella uploader's list, TSV lists; BMS SEARCH by
 //! MD5, else by title and artist; mirrors of dead sites' charts by the file
-//! name BMS SEARCH knows; the community archive's songs by title and
-//! artist), and [`Sources`] asks them in the order
+//! name BMS SEARCH knows; Ginger's and Konmai's packages by MD5; the
+//! community archive's songs by title and artist), and [`Sources`] asks
+//! them in the order
 //! [`Config::sources`] gives. A source answers with a [`Task`], so one that
 //! reads the network runs anywhere a task does.
 //!
@@ -151,6 +152,81 @@ impl Source for ChartMirrors {
                         crate::net::url_encode(name)
                     )
                 })
+                .collect()
+        })
+    }
+}
+
+/// A service that names the package (a song's archive) holding a chart,
+/// by the chart's MD5: Ginger ([`Config::ginger`]: `downloadURL`), Konmai
+/// ([`Config::konmai`]: `data.song_url` of a `"result": "success"`). Third
+/// parties' copies, so what one brings is checked for the chart. A URL is
+/// taken only when its path names an archive or a chart.
+///
+/// [`Config::ginger`]: crate::config::Config::ginger
+/// [`Config::konmai`]: crate::config::Config::konmai
+pub(crate) struct Package {
+    name: &'static str,
+    /// The lookup's URL, the MD5 after it.
+    api: String,
+    url: fn(&serde_json::Value) -> Option<&str>,
+}
+
+impl Package {
+    pub(crate) fn ginger(config: &Config) -> Package {
+        Package {
+            name: "ginger",
+            api: config.ginger.clone(),
+            url: |v| v["downloadURL"].as_str(),
+        }
+    }
+
+    pub(crate) fn konmai(config: &Config) -> Package {
+        Package {
+            name: "konmai",
+            api: config.konmai.clone(),
+            url: |v| {
+                let ok = v["result"].as_str()?.eq_ignore_ascii_case("success");
+                v["data"]["song_url"].as_str().filter(|_| ok)
+            },
+        }
+    }
+}
+
+/// Whether `url` is an http(s) link to an archive or a chart (by its path).
+fn file_link(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or("");
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && (crate::install::chart_link(path)
+            || crate::unpack::is_archive(std::path::Path::new(path)))
+}
+
+impl Source for Package {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn checked(&self) -> bool {
+        true
+    }
+
+    fn find(&self, q: &Query) -> BoxTask<Vec<String>> {
+        let Some(md5) = crate::chart::md5_key(&q.md5).filter(|_| !self.api.is_empty()) else {
+            return Ready::boxed(Vec::new());
+        };
+        let url = self.url;
+        crate::net::get_then(format!("{}{md5}", self.api), move |answer| {
+            // (nothing when it fails: not found is a 404)
+            let v: serde_json::Value = answer
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            url(&v)
+                .map(str::trim)
+                .filter(|u| file_link(u))
+                .map(String::from)
+                .into_iter()
                 .collect()
         })
     }
@@ -385,6 +461,10 @@ impl Sources {
                 out.push(Box::new(BmsSearch::new(config)));
             } else if name == "mirrors" {
                 out.push(Box::new(ChartMirrors::new(config)));
+            } else if name == "ginger" {
+                out.push(Box::new(Package::ginger(config)));
+            } else if name == "konmai" {
+                out.push(Box::new(Package::konmai(config)));
             } else if name == "bmslibrary" {
                 out.push(Box::new(BmsLibrary::new(config)));
             } else if let Some(i) = lists.iter().position(|(n, _)| n == name) {
@@ -528,6 +608,70 @@ mod tests {
         assert_eq!(
             run(&mut sources.find_all(&q), &http),
             [("stella", "https://s.example/diff.zip".to_string())]
+        );
+    }
+
+    /// Ginger's and Konmai's packages, by MD5, in their answers' shapes.
+    #[test]
+    fn packages_by_md5() {
+        let md5 = "176c2b2db4efd66cf186caae7923d477";
+        let config = Config::default();
+        let (ginger, konmai) = (Package::ginger(&config), Package::konmai(&config));
+        let (g, k) = (
+            format!("https://gingerrush.com/download/package/{md5}"),
+            format!("https://bms.alvorna.com/api/hash?md5={md5}"),
+        );
+        let found = |http: Canned, md5: &str| {
+            let q = Query {
+                md5: md5.into(),
+                ..Default::default()
+            };
+            (
+                run(&mut ginger.find(&q), &http),
+                run(&mut konmai.find(&q), &http),
+            )
+        };
+        let http = Canned(vec![
+            (
+                g.clone(),
+                Ok(br#"{"id":2420,"fileName":"x.7z","downloadURL":"https://pixeldrain.net/api/filesystem/x9/%EF%BC%82F%EF%BC%82.7z","songs":[]}"#.to_vec()),
+            ),
+            (
+                k.clone(),
+                Ok(br#"{"result":"success","msg":"","data":{"song_name":"F","song_url":"https://bms.alvorna.com/bms/zipped/F.7z"}}"#.to_vec()),
+            ),
+        ]);
+        assert_eq!(
+            found(http, &md5.to_uppercase()),
+            (
+                vec!["https://pixeldrain.net/api/filesystem/x9/%EF%BC%82F%EF%BC%82.7z".to_string()],
+                vec!["https://bms.alvorna.com/bms/zipped/F.7z".to_string()]
+            )
+        );
+        // not found (a 404; Konmai's says so too), a page, no MD5
+        let http = Canned(vec![
+            (g.clone(), Err(crate::net::NetError::Status(404))),
+            (
+                k.clone(),
+                Ok(br#"{"result":"fail","msg":"No chart found in database","data":{"song_url":"https://x/a.zip"}}"#.to_vec()),
+            ),
+        ]);
+        assert_eq!(found(http, md5), (vec![], vec![]));
+        let http = Canned(vec![(
+            g,
+            Ok(br#"{"downloadURL":"https://example.com/share/page"}"#.to_vec()),
+        )]);
+        assert_eq!(found(http, md5).0, Vec::<String>::new());
+        assert_eq!(found(Canned(vec![]), "").0, Vec::<String>::new());
+        assert!(ginger.checked() && konmai.checked());
+        let all = Config {
+            third_party: true,
+            ..Config::default()
+        };
+        let names = Sources::from_config(&all, Vec::new()).names();
+        assert_eq!(
+            names,
+            ["bmssearch", "mirrors", "ginger", "konmai", "bmslibrary"]
         );
     }
 
