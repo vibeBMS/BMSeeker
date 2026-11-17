@@ -367,9 +367,9 @@ impl Task for Library {
     }
 }
 
-/// The sources, asked in order.
-#[derive(Default)]
-pub struct Sources(Vec<Box<dyn Source>>);
+/// The sources, asked in order (a copy shares them).
+#[derive(Clone, Default)]
+pub struct Sources(Vec<std::sync::Arc<dyn Source>>);
 
 impl Sources {
     /// The sources [`Config::sources`] names, in its order: the link lists
@@ -396,7 +396,7 @@ impl Sources {
     }
 
     pub fn push(&mut self, source: Box<dyn Source>) {
-        self.0.push(source);
+        self.0.push(source.into());
     }
 
     pub fn names(&self) -> Vec<&'static str> {

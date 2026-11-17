@@ -230,30 +230,53 @@ pub fn link_in(
         diff,
         org_md5: Vec::new(),
     };
-    link_for(downloads, lib, &q, link, check.is_some(), &[], cx)
+    let none = crate::sources::Sources::default();
+    let own = [link.to_string()];
+    let mut job = install_job(downloads, lib, &q, &own, &none, Batch::default(), cx);
+    if check.is_some() {
+        job = job.own_checked();
+    }
+    run_install(job, lib, &mut Batch::default(), cx)
 }
 
-/// [`link_in`] for `q` (`check`: what it brings must hold `q.md5`;
-/// `also`: other charts wanted, [`Request::also`]).
+/// An [`job::Install`] on a disk, `lib` lent to it (given back by
+/// [`run_install`]).
 #[cfg(not(target_arch = "wasm32"))]
-fn link_for(
+fn install_job(
     downloads: &Path,
     lib: &mut Library,
     q: &crate::sources::Query,
-    link: &str,
-    check: bool,
-    also: &[String],
+    own: &[String],
+    sources: &crate::sources::Sources,
+    batch: Batch,
+    cx: &crate::hosts::Context,
+) -> job::Install {
+    let lent = std::mem::replace(lib, Library::new(lib.root()));
+    job::Install::new(
+        std::sync::Arc::new(crate::fs::Disk),
+        downloads.to_path_buf(),
+        lent,
+        batch,
+        q.clone(),
+        own.to_vec(),
+        sources.clone(),
+        cx,
+    )
+}
+
+/// Run `job` with the native transport; the library and batch it was lent
+/// back into `lib` and `batch`.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_install(
+    mut job: job::Install,
+    lib: &mut Library,
+    batch: &mut Batch,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
-    // this download's own folder for what passes through (two songs of
-    // one title, or two downloads at once, do not meet)
-    let job = downloads.join(format!(".job-{}", unique()));
-    if let Err(e) = std::fs::create_dir_all(&job) {
-        return vec![Done::Failed(e.to_string().into())];
-    }
-    let out = link_job(&job, downloads, lib, q, link, check, also, cx);
-    let _ = std::fs::remove_dir_all(&job);
-    out
+    let out = job::run_job(&mut job, &crate::hosts::Native::new(cx));
+    *lib = out.lib;
+    *batch = out.batch;
+    out.done
 }
 
 /// A name no other download of this process or another has (a web
@@ -291,49 +314,6 @@ pub fn request(
         reinstall: config.reinstall,
         also: Vec::new(),
     }
-}
-
-/// [`link_for`], what passes through in `job`.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn link_job(
-    job: &Path,
-    downloads: &Path,
-    lib: &mut Library,
-    q: &crate::sources::Query,
-    link: &str,
-    check: bool,
-    also: &[String],
-    cx: &crate::hosts::Context,
-) -> Vec<Done> {
-    use crate::unpack::Blob;
-    let (blob, file) = if chart_link(link) {
-        cx.stage(crate::progress::Stage::Finding);
-        let name = chart_name(link);
-        let file = job.join(&name);
-        if let Err(e) = crate::hosts::download(link, &file, cx) {
-            return vec![Done::Failed(e.into())];
-        }
-        // a page where a chart was expected
-        let bytes = std::fs::read(&file).unwrap_or_default();
-        if bytes.trim_ascii_start().starts_with(b"<") {
-            return vec![Done::Page(link.to_string())];
-        }
-        (Blob::File(file), Some(name))
-    } else {
-        let tmp = job.join("download");
-        // the song's own link may be a pack of many songs: its archive
-        let want = (!q.diff).then(|| q.want.clone());
-        match crate::hosts::fetch(link, want, &tmp, cx) {
-            Ok(()) => (Blob::File(tmp), Some("download".to_string())),
-            Err(crate::hosts::Fetch::Page) => return vec![Done::Page(link.to_string())],
-            Err(crate::hosts::Fetch::Failed(e)) => return vec![Done::Failed(e.into())],
-        }
-    };
-    cx.stage(crate::progress::Stage::Unpacking);
-    let mut req = request(q, check, file, &cx.config);
-    req.also = also.to_vec();
-    take(&crate::fs::Disk, blob, &req, downloads, lib)
 }
 
 /// A separate chart's archive, unpacked into `dir` (to be removed after):
@@ -585,7 +565,8 @@ pub fn links_in(
 
 /// [`links_in`] as one of a batch's downloads: a file `batch` has had
 /// already (by its [`DownloadKey`](crate::hosts::DownloadKey)) is not
-/// downloaded again; the charts the batch wants wait too.
+/// downloaded again; the charts the batch wants wait too. A
+/// [`job::Install`] run with the native transport.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn links_seen(
     downloads: &Path,
@@ -596,46 +577,9 @@ pub fn links_seen(
     batch: &mut Batch,
     cx: &crate::hosts::Context,
 ) -> Vec<Done> {
-    let cancelled = || cx.cancelled();
-    let mut tries = Tries::default();
-    let mut tried = std::collections::HashSet::new();
-    let check = (q.md5.trim().len() == 32).then_some(());
-    let mut try_all = |links: Vec<String>, checked: bool, tries: &mut Tries| -> Option<Vec<Done>> {
-        for l in links {
-            if cancelled() {
-                return Some(vec![Done::Failed(crate::net::NetError::Cancelled.into())]);
-            }
-            let key = Batch::key(&l, q);
-            if !tried.insert(key.clone()) {
-                continue;
-            }
-            if batch.has(&key) {
-                tries.record(vec![Done::Failed(DOWNLOADED.into())]);
-                continue;
-            }
-            let check = check.is_some() && checked;
-            let done = link_for(downloads, lib, q, &l, check, &batch.also(q), cx);
-            batch.tried(key, &done);
-            if let Some(done) = tries.record(done) {
-                return Some(done);
-            }
-        }
-        None
-    };
-    if let Some(done) = try_all(own.to_vec(), false, &mut tries) {
-        return done;
-    }
-    let http = crate::net::Client::in_context(cx);
-    for source in sources.iter() {
-        if cancelled() {
-            break;
-        }
-        let found = crate::net::run(&mut source.find(q), &http);
-        if let Some(done) = try_all(found, source.checked(), &mut tries) {
-            return done;
-        }
-    }
-    tries.end()
+    let lent = std::mem::take(batch);
+    let job = install_job(downloads, lib, q, own, sources, lent, cx);
+    run_install(job, lib, batch, cx)
 }
 
 #[cfg(test)]

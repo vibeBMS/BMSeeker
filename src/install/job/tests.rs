@@ -413,4 +413,190 @@ fn files_in_order() {
     assert_eq!(steps(&d), ["download http://author.test/a.zip"]);
 }
 
-use std::path::Path;
+/// A source that knows these links (found by name, if `checked`).
+struct Known(Vec<String>, bool);
+
+impl crate::sources::Source for Known {
+    fn name(&self) -> &'static str {
+        "known"
+    }
+    fn find(&self, _: &crate::sources::Query) -> BoxTask<Vec<String>> {
+        Ready::boxed(self.0.clone())
+    }
+    fn checked(&self) -> bool {
+        self.1
+    }
+}
+
+fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut out);
+        for (n, b) in files {
+            z.start_file(*n, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(b.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    out.into_inner()
+}
+
+const SONG: &str = "#TITLE Song\n#ARTIST x\n#WAV01 01.wav\n";
+
+fn install(
+    m: &Arc<crate::fs::Mem>,
+    q: &crate::sources::Query,
+    own: &[&str],
+    sources: crate::sources::Sources,
+    batch: crate::install::Batch,
+    cx: &Context,
+    d: &Canned,
+) -> Installed {
+    let store: Arc<dyn crate::fs::Store + Send + Sync> = m.clone();
+    let lib = crate::library::Library::scan(&**m, Path::new("bms"));
+    let own = own.iter().map(|s| s.to_string()).collect();
+    let mut job = Install::new(store, "dl".into(), lib, batch, q.clone(), own, sources, cx);
+    run_job(&mut job, d)
+}
+
+fn song_query(md5: &str) -> crate::sources::Query {
+    crate::sources::Query {
+        md5: md5.into(),
+        want: Want {
+            title: "Song".into(),
+            artist: "x".into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// Its own links in order, then the sources' (found by name: checked);
+/// the first that brings it in ends it; what passed through goes.
+#[test]
+fn install_tries_links_in_order() {
+    use crate::install::{md5_hex, Batch, Done, Failure};
+    let m = Arc::new(crate::fs::Mem::default());
+    let d = Canned::default();
+    // its own: a page, then nothing there
+    d.file("http://e.test/page", page(None));
+    // a source's, found by name: another song's archive, then the song's
+    let other = zip_of(&[("o.bms", "#TITLE Other\n#ARTIST y\n"), ("01.ogg", "x")]);
+    d.file(
+        "http://found.test/other.zip",
+        Ok(Served::bytes(other, None, None)),
+    );
+    let song = zip_of(&[("Song/a.bms", SONG), ("Song/01.ogg", "x")]);
+    d.file(
+        "http://found.test/song.zip",
+        Ok(Served::bytes(song, None, None)),
+    );
+    let mut sources = crate::sources::Sources::default();
+    sources.push(Box::new(Known(
+        vec![
+            "http://found.test/other.zip".into(),
+            "http://found.test/song.zip".into(),
+        ],
+        true,
+    )));
+    let q = song_query(&md5_hex(SONG.as_bytes()));
+    let own = ["http://e.test/page", "http://e.test/gone.zip"];
+    let out = install(
+        &m,
+        &q,
+        &own,
+        sources,
+        Batch::default(),
+        &Context::default(),
+        &d,
+    );
+    assert!(
+        matches!(&out.done[..], [Done::Added(p, 2)] if p == Path::new("bms/Song")),
+        "{:?}",
+        out.done
+    );
+    assert!(out.lib.owns(&q.md5));
+    let left: Vec<PathBuf> = m.0.lock().unwrap().keys().cloned().collect();
+    assert!(!left.iter().any(|p| p.starts_with("dl")), "{left:?}");
+    // nothing brings it: the first page
+    let d = Canned::default();
+    d.file("http://e.test/page", page(None));
+    let out = install(
+        &Arc::new(crate::fs::Mem::default()),
+        &q,
+        &own,
+        Default::default(),
+        Batch::default(),
+        &Context::default(),
+        &d,
+    );
+    assert!(matches!(&out.done[..], [Done::Page(u)] if u == "http://e.test/page"));
+    // a chart's own link that is a page
+    let d = Canned::default();
+    d.file("http://e.test/x.bms", page(None));
+    let mut diff = q.clone();
+    diff.diff = true;
+    let out = install(
+        &Arc::new(crate::fs::Mem::default()),
+        &diff,
+        &["http://e.test/x.bms"],
+        Default::default(),
+        Batch::default(),
+        &Context::default(),
+        &d,
+    );
+    assert!(matches!(&out.done[..], [Done::Page(_)]), "{:?}", out.done);
+    // no link at all
+    let out = install(
+        &Arc::new(crate::fs::Mem::default()),
+        &q,
+        &[],
+        Default::default(),
+        Batch::default(),
+        &Context::default(),
+        &Canned::default(),
+    );
+    assert!(matches!(&out.done[..], [Done::Failed(Failure::NoLink)]));
+}
+
+/// A file the batch has had is not downloaded again; a cancel ends it.
+#[test]
+fn install_in_a_batch_and_cancelled() {
+    use crate::install::{Batch, Done};
+    let q = song_query("");
+    let d = Canned::default();
+    let link = "https://drive.google.com/file/d/ID9/view";
+    let mut batch = Batch::default();
+    batch.tried(Batch::key(link, &q), &[Done::Added("bms/S".into(), 1)]);
+    let other = "https://drive.google.com/uc?id=ID9";
+    let out = install(
+        &Arc::new(crate::fs::Mem::default()),
+        &q,
+        &[other],
+        Default::default(),
+        batch,
+        &Context::default(),
+        &d,
+    );
+    assert!(steps(&d).is_empty());
+    assert!(
+        matches!(&out.done[..], [Done::Failed(f)] if f.to_string() == crate::install::DOWNLOADED)
+    );
+    assert!(out.batch.has(&Batch::key(link, &q)));
+    let p = Progress::new();
+    p.cancel();
+    let cx = Context::default().with_progress(p);
+    let out = install(
+        &Arc::new(crate::fs::Mem::default()),
+        &q,
+        &["http://e.test/a.zip"],
+        Default::default(),
+        Batch::default(),
+        &cx,
+        &Canned::default(),
+    );
+    assert!(matches!(&out.done[..], [Done::Failed(f)] if f.cancelled()));
+}
+
+use std::path::{Path, PathBuf};
