@@ -9,17 +9,23 @@
 //! (added charts, a BGA on its own), and which are mirrors of the same
 //! archive (kept as fallbacks).
 
+use crate::text::pattern::Pattern;
 use crate::text::unescape;
-use regex::Regex;
 use std::sync::LazyLock;
 
-fn re(p: &str) -> Regex {
-    Regex::new(&format!("(?i){p}")).expect("a valid pattern")
+// an event's works (the command-line tool's)
+#[cfg(feature = "tools")]
+mod works;
+#[cfg(feature = "tools")]
+pub use works::*;
+
+fn re(p: &str) -> Pattern {
+    Pattern::new(&format!("(?i){p}"))
 }
 
 macro_rules! pattern {
     ($name:ident, $p:expr) => {
-        static $name: LazyLock<Regex> = LazyLock::new(|| re($p));
+        static $name: LazyLock<Pattern> = LazyLock::new(|| re($p));
     };
 }
 
@@ -64,7 +70,7 @@ pattern!(BGA, r"bga");
 
 /// Weights of what a label says. HQ / LQ marks outweigh the audio format:
 /// an HQ wav beats an LQ ogg.
-static GOOD: LazyLock<Vec<(Regex, i32)>> = LazyLock::new(|| {
+static GOOD: LazyLock<Vec<(Pattern, i32)>> = LazyLock::new(|| {
     vec![
         // the newer of an old and a new version
         (
@@ -78,7 +84,7 @@ static GOOD: LazyLock<Vec<(Regex, i32)>> = LazyLock::new(|| {
         (re(r"high|beatoraja|mp4|full|完全"), 2),
     ]
 });
-static BAD: LazyLock<Vec<(Regex, i32)>> = LazyLock::new(|| {
+static BAD: LazyLock<Vec<(Pattern, i32)>> = LazyLock::new(|| {
     vec![
         (re(r"lq|低画質|低品質|low ?quality"), -6),
         (re(r"wav|flac"), -4),
@@ -95,13 +101,13 @@ static BAD: LazyLock<Vec<(Regex, i32)>> = LazyLock::new(|| {
     ]
 });
 
-fn hq() -> &'static Regex {
+fn hq() -> &'static Pattern {
     &GOOD[1].0
 }
-fn lq() -> &'static Regex {
+fn lq() -> &'static Pattern {
     &BAD[0].0
 }
-fn old() -> &'static Regex {
+fn old() -> &'static Pattern {
     &BAD[3].0
 }
 
@@ -116,8 +122,8 @@ fn is_folder(url: &str) -> bool {
 /// The label without host names and mirror words: mirrors of one archive
 /// share it.
 fn variant(label: &str) -> String {
-    let v = MIRROR.replace_all(label, "");
-    let v = HOSTS.replace_all(&v, " ");
+    let v = MIRROR.replace_all(label, |_| String::new());
+    let v = HOSTS.replace_all(&v, |_| " ".into());
     v.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -126,22 +132,24 @@ fn variant(label: &str) -> String {
 
 /// A cell's text: tags dropped, references decoded, trimmed.
 fn text(s: &str) -> String {
-    static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").expect("pattern"));
-    unescape(&TAG.replace_all(s, "")).trim().to_string()
+    static TAG: LazyLock<Pattern> = LazyLock::new(|| Pattern::new(r"<[^>]+>"));
+    unescape(&TAG.replace_all(s, |_| String::new()))
+        .trim()
+        .to_string()
 }
 
 /// `[(label, url)]` of a URL list's address cell: a line's own text, or the
 /// last heading lines above it.
 pub fn links_of(cell: &str) -> Vec<(String, String)> {
-    static BR: LazyLock<Regex> = LazyLock::new(|| re(r"<br\s*/?>"));
-    static HREF: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"href="(https?://[^"]+)""#).expect("pattern"));
+    static BR: LazyLock<Pattern> = LazyLock::new(|| re(r"<br\s*/?>"));
+    static HREF: LazyLock<Pattern> = LazyLock::new(|| Pattern::new(r#"href="https?://[^"]+""#));
     let mut out: Vec<(String, String)> = Vec::new();
     let mut heading: Vec<String> = Vec::new();
     for raw in BR.split(cell) {
+        // (`href="…"`: what is between the quotes)
         let urls: Vec<&str> = HREF
-            .captures_iter(raw)
-            .filter_map(|c| c.get(1).map(|m| m.as_str()))
+            .find_iter(raw)
+            .map(|m| &raw[m.start + 6..m.end - 1])
             .collect();
         let mut t = text(raw);
         for u in &urls {
@@ -192,8 +200,9 @@ fn file_part(url: &str) -> String {
 /// Whether the links are one package with a low and a high quality BGA
 /// ("(高画質BGA)" and "(低画質BGA)"), not an archive and its BGA.
 fn bga_versions(links: &[(String, String)]) -> bool {
-    let only =
-        |q: &Regex, other: &Regex, l: &str| q.is_match(l) && !other.is_match(l) && BGA.is_match(l);
+    let only = |q: &Pattern, other: &Pattern, l: &str| {
+        q.is_match(l) && !other.is_match(l) && BGA.is_match(l)
+    };
     links.iter().any(|(l, _)| only(lq(), hq(), l)) && links.iter().any(|(l, _)| only(hq(), lq(), l))
 }
 
@@ -333,84 +342,6 @@ pub fn pick(links: &[(String, String)]) -> Pick {
         extra: extra.into_iter().map(|g| g.1).collect(),
         review: why.join("; "),
     }
-}
-
-/// A work of an event.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Work {
-    pub num: u32,
-    pub title: String,
-    pub artist: String,
-    pub team: String,
-    /// "Original", "Arrange", "Disq" (disqualified)... from the work list.
-    pub kind: String,
-    pub size_kb: Option<u64>,
-    /// The work's page on the venue.
-    pub page: String,
-    pub links: Vec<(String, String)>,
-    pub pick: Pick,
-}
-
-/// The event's URL list (every work and its links).
-pub fn url_list_url(base: &str, event: u32) -> String {
-    format!("{base}?action=URLList&event={event}&start=0&end=9999")
-}
-
-/// The event's work list (each work's kind).
-pub fn work_list_url(base: &str, event: u32) -> String {
-    format!("{base}?action=List_def&event={event}")
-}
-
-/// A manbow page's text (Shift_JIS).
-pub fn decode(page: &[u8]) -> String {
-    encoding_rs::SHIFT_JIS.decode(page).0.into_owned()
-}
-
-/// The works of event `event` from its URL list and work list (`base`:
-/// the venue's `event.cgi`, [`Config::manbow`](crate::config::Config::manbow)).
-pub fn works(base: &str, event: u32, url_list: &str, work_list: &str) -> Vec<Work> {
-    static KIND: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"No\.(\d+) / (\w+)").expect("pattern"));
-    static ROW: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)<tr\s*>(.*?)</tr>").expect("pattern"));
-    static TD: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?s)<td>(.*?)</td>").expect("pattern"));
-    static SIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\s*KB").expect("pattern"));
-    let kinds: std::collections::HashMap<u32, String> = KIND
-        .captures_iter(work_list)
-        .filter_map(|c| Some((c[1].parse().ok()?, c[2].to_string())))
-        .collect();
-    let mut out = Vec::new();
-    for row in ROW.captures_iter(url_list) {
-        let mut tds: Vec<&str> = TD
-            .captures_iter(row.get(1).map_or("", |m| m.as_str()))
-            .filter_map(|c| c.get(1).map(|m| m.as_str()))
-            .collect();
-        if tds.len() == 5 {
-            // events up to 2005 have no team column
-            tds.insert(2, "");
-        }
-        if tds.len() < 6 {
-            continue;
-        }
-        let Ok(num) = text(tds[0]).parse::<u32>() else {
-            continue;
-        };
-        let links = links_of(tds[5]);
-        out.push(Work {
-            num,
-            title: text(tds[3]),
-            artist: text(tds[1]),
-            team: text(tds[2]),
-            kind: kinds.get(&num).cloned().unwrap_or_default(),
-            size_kb: SIZE.captures(&text(tds[4])).and_then(|c| c[1].parse().ok()),
-            page: format!("{base}?action=More_def&num={num}&event={event}"),
-            pick: pick(&links),
-            links,
-        });
-    }
-    out.sort_by_key(|w| w.num);
-    out
 }
 
 /// A work's page on the venue: (event, work number).

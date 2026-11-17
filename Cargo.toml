@@ -19,15 +19,17 @@ name = "bmseeker"
 required-features = ["cli"]
 
 [features]
-cli = ["dep:clap"]
+cli = ["dep:clap", "tools", "serde_json/preserve_order"]
+# what only the command-line tool does: an event's works, probing a link,
+# exporting a table
+tools = []
 # archives and folders for tests (a player's too)
 testkit = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-# works.json keeps its keys in order
-serde_json = { version = "1", features = ["preserve_order"] }
-regex = "1"
+# (the command-line tool's works.json keeps its keys in order: `cli`)
+serde_json = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"
 encoding_rs = "0.8"

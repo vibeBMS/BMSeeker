@@ -6,6 +6,7 @@
 //! decoding produces errors but EUC-KR does not.
 
 mod entities;
+pub(crate) mod pattern;
 
 use encoding_rs::{EUC_KR, SHIFT_JIS, UTF_8};
 use entities::ENTITIES;

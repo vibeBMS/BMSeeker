@@ -9,7 +9,7 @@
 //! and licence text in THIRD_PARTY_NOTICES.md).
 
 use crate::chart::ChartInfo;
-use regex::Regex;
+use crate::text::pattern::Pattern;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -22,33 +22,33 @@ pub const MAX_NAME: usize = 128;
 /// Bytes (Shift_JIS) a folder's whole path may have.
 pub const MAX_PATH: usize = 250;
 
-fn re(s: &str) -> Regex {
-    Regex::new(s).expect("a valid pattern")
+fn re(s: &str) -> Pattern {
+    Pattern::new(s)
 }
 
 // The fork's patterns (BMSLibrary.cs).
-static TRIM_START: LazyLock<Regex> =
+static TRIM_START: LazyLock<Pattern> =
     LazyLock::new(|| re(r"(?i)^(\d+(S|D)P|midi|bms|music)[.:・\s]+"));
-static TRIM_END: LazyLock<Regex> =
+static TRIM_END: LazyLock<Pattern> =
     LazyLock::new(|| re(r##"(^|\s+)[\-!"#$%&`'(,./:;<=>?@\[^_~|]+$"##));
-static TRIM_END_LEVEL: LazyLock<Regex> =
+static TRIM_END_LEVEL: LazyLock<Pattern> =
     LazyLock::new(|| re(r"(?i)\s?[\[(](\d+|H|SP?|\d+key[^\s]*|hard])?$"));
-static CREDITS: LazyLock<Regex> = LazyLock::new(|| {
+static CREDITS: LazyLock<Pattern> = LazyLock::new(|| {
     re(
         r"(?i)(^|[\[［/(（<＜\s]+)((.?obj|mov&obj|bga|midi|movie|object|mov|image|bgi|illust(ration|rated)?|差分|LYRICS|イラスト|絵|#include)([.:・\s]+.*$|$)|(bms|layer|visual):.*$)",
     )
 });
-static SPACED_MARKS: LazyLock<Regex> = LazyLock::new(|| {
+static SPACED_MARKS: LazyLock<Pattern> = LazyLock::new(|| {
     re("\\s+[\u{3000}！“”＃＄％＆‘’（）＊＋，－．／：；＜＝＞？＠［￥］\u{ff3e}\u{ff3f}\u{ffe3}]+\\s+")
 });
-static TORTOISE: LazyLock<Regex> = LazyLock::new(|| re("〔(.*)〕"));
-static SPACES: LazyLock<Regex> = LazyLock::new(|| re(r"\s{2,}"));
-static END_BRACKETS: LazyLock<Regex> = LazyLock::new(|| {
+static TORTOISE: LazyLock<Pattern> = LazyLock::new(|| re("〔(.*)〕"));
+static SPACES: LazyLock<Pattern> = LazyLock::new(|| re(r"\s{2,}"));
+static END_BRACKETS: LazyLock<Pattern> = LazyLock::new(|| {
     re(
         r#"\s*([-].*[-]|[`'].*[`']|["].*["]|[～].*[～]|[－].*[－]|[‘’].*[‘’]|[“”].*[“”]|[<].*[>]|[{].*[}]|[\(].*[\)]|[\[].*[\]]|[＜].*[＞]|[（].*[）]|[「].*[」]|[【].*[】]|[『].*[』]|[［].*[］]|[〈].*[〉]|[《].*[》]|[〔].*[〕]|[｛].*[｝])$"#,
     )
 });
-static LEVEL_WORDS: LazyLock<Regex> = LazyLock::new(|| {
+static LEVEL_WORDS: LazyLock<Pattern> = LazyLock::new(|| {
     re(
         r"(?i)(PMS|SP|ANOTHER|HYPER|NORMAL|EMPTY|DP|BGA|4[^\d]|5[^\d]|7[^\d]|9[^\d]|10[^\d]|14[^\d])[^\w]+",
     )
@@ -70,8 +70,8 @@ fn natural(s: &str) -> String {
 /// `(7keys)`).
 fn cut_chart_name(s: &str) -> String {
     if let Some(m) = END_BRACKETS.find(s) {
-        if LEVEL_WORDS.is_match(m.as_str()) {
-            return s[..m.start()].to_string();
+        if LEVEL_WORDS.is_match(&s[m.clone()]) {
+            return s[..m.start].to_string();
         }
     }
     s.to_string()
@@ -89,10 +89,10 @@ fn common_start(a: &str, b: &str) -> String {
 /// A candidate tidied: prefixes, credits and level tails trimmed, the
 /// characters a file name cannot have made wide.
 fn tidy(s: &str) -> String {
-    let s = TRIM_START.replace(s, "");
-    let s = CREDITS.replace(s.trim(), "");
-    let s = TRIM_END.replace(&s, "");
-    let s = TRIM_END_LEVEL.replace(&s, "");
+    let s = TRIM_START.remove_first(s);
+    let s = CREDITS.remove_first(s.trim());
+    let s = TRIM_END.remove_first(&s);
+    let s = TRIM_END_LEVEL.remove_first(&s);
     let s: String = s
         .chars()
         .filter_map(|c| match c {
@@ -102,9 +102,10 @@ fn tidy(s: &str) -> String {
             c => Some(c),
         })
         .collect();
-    let s = SPACED_MARKS.replace_all(&s, |m: &regex::Captures| m[0].trim().to_string());
-    let s = TORTOISE.replace_all(&s, |m: &regex::Captures| format!("[{}]", m[1].trim()));
-    SPACES.replace_all(&s, " ").trim().to_string()
+    let s = SPACED_MARKS.replace_all(&s, |m| m.trim().to_string());
+    // (〔…〕)
+    let s = TORTOISE.replace_all(&s, |m| format!("[{}]", m[3..m.len() - 3].trim()));
+    SPACES.replace_all(&s, |_| " ".into()).trim().to_string()
 }
 
 /// The longest part `strings` (charts' titles, or artists) begin with

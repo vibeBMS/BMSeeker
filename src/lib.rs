@@ -33,6 +33,7 @@
 pub mod bmssearch;
 pub mod chart;
 pub mod config;
+#[cfg(feature = "tools")]
 pub mod export;
 pub mod fs;
 pub mod hosts;
@@ -46,7 +47,7 @@ pub mod net;
 pub mod package;
 pub mod placement;
 // downloads and unpacks to a disk
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "tools", not(target_arch = "wasm32")))]
 pub mod probe;
 pub mod progress;
 pub mod sources;
