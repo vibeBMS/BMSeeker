@@ -2,6 +2,7 @@ use super::*;
 use crate::hosts::{Host, Hosts, Resolved};
 use crate::net::{BoxTask, Ready};
 use crate::progress::Progress;
+use crate::testkit::zip;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -343,23 +344,9 @@ fn acquired_then_taken() {
     use crate::fs::Mem;
     use crate::install::{take, Done, Request, Role};
     use crate::library::Library;
-    use std::io::Write;
-    let mut out = std::io::Cursor::new(Vec::new());
-    {
-        let mut z = zip::ZipWriter::new(&mut out);
-        let o = zip::write::SimpleFileOptions::default();
-        z.start_file("Song/a.bms", o).unwrap();
-        z.write_all(b"#TITLE Song\n#ARTIST x\n#WAV01 01.wav\n")
-            .unwrap();
-        z.start_file("Song/01.ogg", o).unwrap();
-        z.write_all(b"x").unwrap();
-        z.finish().unwrap();
-    }
+    let z = zip(&[("Song/a.bms", SONG), ("Song/01.ogg", "x")]);
     let d = Canned::default();
-    d.file(
-        "http://e.test/song.zip",
-        Ok(Served::bytes(out.into_inner(), None, None)),
-    );
+    d.file("http://e.test/song.zip", Ok(Served::bytes(z, None, None)));
     let got = acquire("http://e.test/song.zip", &Context::default(), &d).unwrap();
     let m = Mem::default();
     let mut lib = Library::scan(&m, Path::new("bms"));
@@ -445,21 +432,6 @@ impl crate::sources::Source for Known {
     }
 }
 
-fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
-    use std::io::Write;
-    let mut out = std::io::Cursor::new(Vec::new());
-    {
-        let mut z = zip::ZipWriter::new(&mut out);
-        for (n, b) in files {
-            z.start_file(*n, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            z.write_all(b.as_bytes()).unwrap();
-        }
-        z.finish().unwrap();
-    }
-    out.into_inner()
-}
-
 const SONG: &str = "#TITLE Song\n#ARTIST x\n#WAV01 01.wav\n";
 
 fn install(
@@ -499,12 +471,12 @@ fn install_tries_links_in_order() {
     // its own: a page, then nothing there
     d.file("http://e.test/page", page(None));
     // a source's, found by name: another song's archive, then the song's
-    let other = zip_of(&[("o.bms", "#TITLE Other\n#ARTIST y\n"), ("01.ogg", "x")]);
+    let other = zip(&[("o.bms", "#TITLE Other\n#ARTIST y\n"), ("01.ogg", "x")]);
     d.file(
         "http://found.test/other.zip",
         Ok(Served::bytes(other, None, None)),
     );
-    let song = zip_of(&[("Song/a.bms", SONG), ("Song/01.ogg", "x")]);
+    let song = zip(&[("Song/a.bms", SONG), ("Song/01.ogg", "x")]);
     d.file(
         "http://found.test/song.zip",
         Ok(Served::bytes(song, None, None)),

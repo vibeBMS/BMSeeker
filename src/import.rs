@@ -113,25 +113,18 @@ pub fn unpack_into(
 mod tests {
     use super::*;
     use crate::fs::Disk;
-    use std::io::Write;
+    use crate::testkit::{tmp, zip};
 
     /// [`import`] into the library below `library`, as by hand.
     fn import_to(store: &dyn Store, file: &Path, library: &Path) -> Result<Imported, String> {
         import(store, file, &mut Library::new(library), &Request::default())
     }
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("bmseeker-import-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
     const CHART: &str = "#TITLE Song\n#ARTIST someone\n#BPM 120\n#WAV01 01.wav\n#00111:01\n";
 
     #[test]
     fn unpacks_a_zip_and_places_its_chart_later() {
-        let root = tmp("zip");
+        let root = tmp("import-zip");
         let (library, downloads) = (root.join("bms"), root.join("downloads"));
         std::fs::create_dir_all(&library).unwrap();
         std::fs::create_dir_all(&downloads).unwrap();
@@ -144,17 +137,12 @@ mod tests {
         );
         // the song, zipped with a folder inside and an escaping name
         let pack = downloads.join("Song.zip");
-        let mut z = zip::ZipWriter::new(std::fs::File::create(&pack).unwrap());
-        let opts = zip::write::SimpleFileOptions::default();
-        for (name, data) in [
-            ("Song/song.bms", CHART.as_bytes()),
-            ("Song/01.ogg", b"ogg".as_slice()),
-            ("../evil.txt", b"x".as_slice()),
-        ] {
-            z.start_file(name, opts).unwrap();
-            z.write_all(data).unwrap();
-        }
-        z.finish().unwrap();
+        let files = [
+            ("Song/song.bms", CHART),
+            ("Song/01.ogg", "ogg"),
+            ("../evil.txt", "x"),
+        ];
+        std::fs::write(&pack, zip(&files)).unwrap();
         let dest = library.join("Song");
         assert_eq!(
             import_to(&Disk, &pack, &library).unwrap(),
@@ -167,26 +155,19 @@ mod tests {
             crate::install::place_waiting(&Disk, &downloads, &mut Library::new(&library)),
             vec![dest.join("Song/song_insane.bme")]
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Two songs of one title: the second gets a folder of its own; the
     /// same song again goes into its folder.
     #[test]
     fn same_title_other_song() {
-        let root = tmp("same-title");
+        let root = tmp("import-same-title");
         let library = root.join("bms");
         std::fs::create_dir_all(&library).unwrap();
         let pack = |artist: &str, sound: &[u8]| {
             let p = root.join("Aurora.zip");
-            let mut z = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
-            let opts = zip::write::SimpleFileOptions::default();
             let chart = format!("#TITLE Aurora\n#ARTIST {artist}\n#WAV01 01.wav\n");
-            for (name, data) in [("a.bms", chart.as_bytes()), ("01.ogg", sound)] {
-                z.start_file(name, opts).unwrap();
-                z.write_all(data).unwrap();
-            }
-            z.finish().unwrap();
+            std::fs::write(&p, zip(&[("a.bms", chart.as_bytes()), ("01.ogg", sound)])).unwrap();
             p
         };
         let first = library.join("Aurora");
@@ -205,7 +186,6 @@ mod tests {
         // nothing left beside the downloads
         let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The same on a store that is no disk, the song's archive times kept.
@@ -215,17 +195,11 @@ mod tests {
         let mem = Mem::default();
         let library = Path::new("bms");
         let pack = |artist: &str| {
-            let mut out = std::io::Cursor::new(Vec::new());
-            let mut z = zip::ZipWriter::new(&mut out);
             let at = zip::DateTime::from_date_and_time(2019, 1, 1, 0, 0, 0).unwrap();
-            let opts = zip::write::SimpleFileOptions::default().last_modified_time(at);
             let chart = format!("#TITLE Aurora\n#ARTIST {artist}\n#WAV01 01.wav\n");
-            for (name, data) in [("a.bms", chart.as_bytes()), ("sub/01.ogg", b"x")] {
-                z.start_file(name, opts).unwrap();
-                z.write_all(data).unwrap();
-            }
-            z.finish().unwrap();
-            mem.put(Path::new("dl/Aurora.zip"), &out.into_inner(), 0);
+            let files = [("a.bms", chart.as_str()), ("sub/01.ogg", "x")];
+            let z = crate::testkit::zip_at(&files, at);
+            mem.put(Path::new("dl/Aurora.zip"), &z, 0);
             Path::new("dl/Aurora.zip")
         };
         let got = import_to(&mem, pack("alpha"), library).unwrap();
@@ -257,17 +231,10 @@ mod tests {
         let mut lib = Library::new(Path::new("bms"));
         // read before the song comes
         assert!(lib.files(&mem, Path::new("bms/Old")).is_some());
-        let mut out = std::io::Cursor::new(Vec::new());
-        {
-            let mut z = zip::ZipWriter::new(&mut out);
-            let o = zip::write::SimpleFileOptions::default();
-            for (name, data) in [("song.bms", CHART.as_bytes()), ("01.ogg", b"ogg")] {
-                z.start_file(name, o).unwrap();
-                z.write_all(data).unwrap();
-            }
-            z.finish().unwrap();
-        }
-        put("dl/Song.zip", &out.into_inner());
+        put(
+            "dl/Song.zip",
+            &zip(&[("song.bms", CHART), ("01.ogg", "ogg")]),
+        );
         let got = import(
             &mem,
             Path::new("dl/Song.zip"),
@@ -287,28 +254,17 @@ mod tests {
 
     #[test]
     fn unpacks_archives_in_an_archive() {
-        let root = tmp("nested");
+        let root = tmp("import-nested");
         let library = root.join("bms");
         std::fs::create_dir_all(&library).unwrap();
-        let zip = |entries: &[(&str, &[u8])]| {
-            let mut out = std::io::Cursor::new(Vec::new());
-            let mut z = zip::ZipWriter::new(&mut out);
-            for (name, data) in entries {
-                z.start_file(*name, zip::write::SimpleFileOptions::default())
-                    .unwrap();
-                z.write_all(data).unwrap();
-            }
-            z.finish().unwrap();
-            out.into_inner()
-        };
         // a shared folder as a zip: the song's archive and a readme
-        let inner = zip(&[("Song/song.bms", CHART.as_bytes()), ("Song/01.ogg", b"ogg")]);
+        let inner = zip(&[("Song/song.bms", CHART), ("Song/01.ogg", "ogg")]);
         let pack = root.join("Folder.zip");
-        std::fs::write(
-            &pack,
-            zip(&[("Song_ogg.zip", &inner), ("readme.txt", b"hi")]),
-        )
-        .unwrap();
+        let outer = zip(&[
+            ("Song_ogg.zip", inner.as_slice()),
+            ("readme.txt", b"hi".as_slice()),
+        ]);
+        std::fs::write(&pack, outer).unwrap();
         let dest = library.join("Folder");
         assert_eq!(
             import_to(&Disk, &pack, &library).unwrap(),
@@ -316,6 +272,5 @@ mod tests {
         );
         assert!(dest.join("Song_ogg/Song/song.bms").is_file());
         assert!(!dest.join("Song_ogg.zip").exists());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -496,19 +496,9 @@ mod tests {
 
     #[test]
     fn zip_in_memory() {
-        let mut out = Cursor::new(Vec::new());
-        {
-            let mut z = zip::ZipWriter::new(&mut out);
-            let o = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-            z.start_file("song/a.bms", o).unwrap();
-            std::io::Write::write_all(&mut z, b"#TITLE A").unwrap();
-            z.start_file("../evil.txt", o).unwrap();
-            std::io::Write::write_all(&mut z, b"x").unwrap();
-            z.finish().unwrap();
-        }
+        let z = crate::testkit::zip(&[("song/a.bms", "#TITLE A"), ("../evil.txt", "x")]);
         let mut got = Vec::new();
-        let n = unpack_bytes(out.into_inner(), |p, b| got.push((p, b))).unwrap();
+        let n = unpack_bytes(z, |p, b| got.push((p, b))).unwrap();
         assert_eq!(n, 2);
         assert_eq!(got[0].0, PathBuf::from("song/a.bms"));
         assert_eq!(got[0].1, b"#TITLE A");
@@ -555,34 +545,14 @@ mod tests {
         1, 0, 1, 35, 3, 1, 1, 5, 93, 0, 16, 0, 0, 12, 128, 154, 10, 1, 124, 253, 132, 0, 0, 0,
     ];
 
-    /// The same as a RAR5 (stored).
-    const RAR_TIMES: [u8; 117] = [
-        82, 97, 114, 33, 26, 7, 1, 0, 51, 146, 181, 229, 10, 1, 5, 6, 0, 5, 1, 1, 128, 128, 0, 66,
-        98, 211, 59, 32, 2, 2, 136, 0, 6, 136, 0, 164, 131, 2, 165, 93, 13, 94, 221, 184, 73, 19,
-        128, 0, 1, 10, 115, 111, 110, 103, 47, 97, 46, 98, 109, 115, 35, 84, 73, 84, 76, 69, 32,
-        65, 227, 107, 162, 118, 33, 2, 2, 131, 0, 6, 131, 0, 164, 131, 2, 165, 93, 13, 94, 148, 92,
-        160, 69, 128, 0, 1, 11, 115, 111, 110, 103, 47, 48, 49, 46, 111, 103, 103, 111, 103, 103,
-        29, 119, 86, 81, 3, 5, 4, 0,
-    ];
-
     /// 2020-01-02 03:04:05 UTC.
     const T: i64 = 1_577_934_245;
 
     /// A zip of `entries`, each of 2020-01-02 03:04:04 (MS-DOS times are
     /// to 2 seconds).
     fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut out = Cursor::new(Vec::new());
-        {
-            let mut z = zip::ZipWriter::new(&mut out);
-            let at = zip::DateTime::from_date_and_time(2020, 1, 2, 3, 4, 4).unwrap();
-            let o = zip::write::SimpleFileOptions::default().last_modified_time(at);
-            for (name, data) in entries {
-                z.start_file(*name, o).unwrap();
-                std::io::Write::write_all(&mut z, data).unwrap();
-            }
-            z.finish().unwrap();
-        }
-        out.into_inner()
+        let at = zip::DateTime::from_date_and_time(2020, 1, 2, 3, 4, 4).unwrap();
+        crate::testkit::zip_at(entries, at)
     }
 
     fn sorted(mut m: Vec<Member>) -> Vec<Member> {
@@ -608,7 +578,11 @@ mod tests {
             ]
         };
         let z = zip(&[("song/a.bms", b"#TITLE A"), ("song/01.ogg", b"ogg")]);
-        for (bytes, t) in [(z, T - 1), (SEVEN.to_vec(), T), (RAR_TIMES.to_vec(), T)] {
+        for (bytes, t) in [
+            (z, T - 1),
+            (SEVEN.to_vec(), T),
+            (crate::testkit::SONG_RAR.to_vec(), T),
+        ] {
             let mem = Mem::default();
             let got = unpack(Blob::Bytes(bytes), &mem, Path::new("d"), BUDGET).unwrap();
             assert_eq!(sorted(got), song(t));
@@ -675,15 +649,12 @@ mod tests {
     #[test]
     fn times_kept_on_a_disk() {
         use crate::fs::{Disk, Fs};
-        let d = std::env::temp_dir().join(format!("bmseeker-times-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::testkit::tmp("times");
         let file = d.join("x.rar");
-        std::fs::write(&file, RAR_TIMES).unwrap();
+        std::fs::write(&file, crate::testkit::SONG_RAR).unwrap();
         let got = unpack(Blob::File(file), &Disk, &d.join("out"), BUDGET).unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(Disk.stamp(&d.join("out/song/01.ogg")), Some((T, 3)));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

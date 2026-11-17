@@ -356,19 +356,6 @@ mod tests {
         (format!("http://{addr}"), asked)
     }
 
-    fn zip(files: &[(&str, &str)]) -> Vec<u8> {
-        use std::io::Write;
-        let mut out = std::io::Cursor::new(Vec::new());
-        let mut z = zip::ZipWriter::new(&mut out);
-        for (name, body) in files {
-            z.start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            z.write_all(body.as_bytes()).unwrap();
-        }
-        z.finish().unwrap();
-        out.into_inner()
-    }
-
     /// A table's run (audit defect 3): two entries of one song and a pack
     /// of separate charts for two songs. The song is downloaded once, the
     /// pack once; each chart ends in its song's folder.
@@ -388,24 +375,26 @@ mod tests {
         let (base, asked) = serve(vec![
             (
                 "/alpha.zip",
-                zip(&[
-                    ("Alpha/n.bms", &a_n),
+                crate::testkit::zip(&[
+                    ("Alpha/n.bms", a_n.as_str()),
                     ("Alpha/01.ogg", "1"),
                     ("Alpha/02.ogg", "2"),
                 ]),
             ),
             (
                 "/beta.zip",
-                zip(&[
-                    ("Beta/n.bms", &b_n),
+                crate::testkit::zip(&[
+                    ("Beta/n.bms", b_n.as_str()),
                     ("Beta/01.ogg", "1"),
                     ("Beta/02.ogg", "2"),
                 ]),
             ),
-            ("/pack.zip", zip(&[("p/ax.bms", &a_x), ("p/bx.bms", &b_x)])),
+            (
+                "/pack.zip",
+                crate::testkit::zip(&[("p/ax.bms", &a_x), ("p/bx.bms", &b_x)]),
+            ),
         ]);
-        let root = std::env::temp_dir().join(format!("bmseeker-batch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::testkit::tmp("batch");
         let (library, downloads) = (root.join("bms"), root.join("bms/.dl"));
         let entry = |md5: &str, title: &str, artist: &str, song: &str, chart: &str| Entry {
             md5: md5.into(),
@@ -472,6 +461,5 @@ mod tests {
             .unwrap()
             .flatten()
             .all(|e| !crate::placement::is_chart(&e.path())));
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

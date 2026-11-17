@@ -352,15 +352,13 @@ mod tests {
     #[test]
     fn mega_ctr() {
         // AES-128 of a zero key and zero counter block, xored with zeros
-        let dir = std::env::temp_dir().join(format!("bmseeker-mega-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testkit::tmp("mega");
         let (a, b) = (dir.join("a"), dir.join("b"));
         std::fs::write(&a, [0u8; 20]).unwrap();
         mega_decrypt(&a, &b, &[0u8; 32]).unwrap();
         let out = std::fs::read(&b).unwrap();
         assert_eq!(out.len(), 20);
         assert_eq!(&out[..4], &[0x66, 0xe9, 0x4b, 0xd4]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A server that sends a little and then nothing: cancelling ends it.

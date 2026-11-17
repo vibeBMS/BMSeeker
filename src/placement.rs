@@ -1211,19 +1211,10 @@ mod tests {
         let mem = Mem::default();
         let now = 1_700_000_000;
         mem.put(Path::new("bms/Song/01.ogg"), b"song's", now);
-        let mut out = std::io::Cursor::new(Vec::new());
-        {
-            let mut z = zip::ZipWriter::new(&mut out);
-            let at = zip::DateTime::from_date_and_time(2015, 6, 1, 0, 0, 0).unwrap();
-            let o = zip::write::SimpleFileOptions::default().last_modified_time(at);
-            for (n, b) in [("01.ogg", b"pack's".as_slice()), ("02.ogg", b"new")] {
-                z.start_file(n, o).unwrap();
-                std::io::Write::write_all(&mut z, b).unwrap();
-            }
-            z.finish().unwrap();
-        }
+        let at = zip::DateTime::from_date_and_time(2015, 6, 1, 0, 0, 0).unwrap();
+        let z = crate::testkit::zip_at(&[("01.ogg", "pack's"), ("02.ogg", "new")], at);
         let pkg = Path::new("dl/pkg");
-        unpack(Blob::Bytes(out.into_inner()), &mem, pkg, BUDGET).unwrap();
+        unpack(Blob::Bytes(z), &mem, pkg, BUDGET).unwrap();
         let song = Path::new("bms/Song");
         assert_eq!(bring(&mem, &pkg.join("01.ogg"), song), None);
         assert_eq!(

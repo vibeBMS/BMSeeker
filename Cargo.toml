@@ -20,6 +20,8 @@ required-features = ["cli"]
 
 [features]
 cli = ["dep:clap"]
+# archives and folders for tests (a player's too)
+testkit = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

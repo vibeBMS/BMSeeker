@@ -1,21 +1,10 @@
 use super::*;
 use crate::fs::Mem;
 
-/// A zip of `files` (name, contents), each of `time` (a year).
+/// A zip of `files` (name, contents), each of the start of `year`.
 fn zip(files: &[(&str, &str)], year: u16) -> Vec<u8> {
-    use std::io::Write;
-    let mut out = std::io::Cursor::new(Vec::new());
-    {
-        let mut z = zip::ZipWriter::new(&mut out);
-        let at = zip::DateTime::from_date_and_time(year, 1, 1, 0, 0, 0).unwrap();
-        let o = zip::write::SimpleFileOptions::default().last_modified_time(at);
-        for (n, b) in files {
-            z.start_file(*n, o).unwrap();
-            z.write_all(b.as_bytes()).unwrap();
-        }
-        z.finish().unwrap();
-    }
-    out.into_inner()
+    let at = zip::DateTime::from_date_and_time(year, 1, 1, 0, 0, 0).unwrap();
+    crate::testkit::zip_at(files, at)
 }
 
 /// A store holding `files` (path, contents), of the time 1000.

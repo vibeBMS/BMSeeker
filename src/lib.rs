@@ -51,6 +51,8 @@ pub mod probe;
 pub mod progress;
 pub mod sources;
 pub mod table;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 pub mod text;
 pub mod titles;
 pub mod unpack;
