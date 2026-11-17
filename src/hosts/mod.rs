@@ -28,7 +28,7 @@ mod venues;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use download::retrying;
 #[cfg(not(target_arch = "wasm32"))]
-pub use download::{download, fetch, fetch_files, sniff, Native};
+pub use download::{download, fetch, fetch_files, Native};
 pub use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
@@ -429,22 +429,6 @@ pub const PRESS_DOWNLOAD_JS: &str = r#"(function () {
   }, 500);
 })();"#;
 
-/// The archive format of a file's first bytes.
-pub fn sniff_bytes(h: &[u8]) -> Option<&'static str> {
-    if h.starts_with(b"PK\x03\x04") || h.starts_with(b"PK\x05\x06") {
-        Some("zip")
-    } else if h.starts_with(b"Rar!\x1a\x07") {
-        Some("rar")
-    } else if h.starts_with(b"7z\xbc\xaf\x27\x1c") {
-        Some("7z")
-    } else if h.len() >= 7 && h[2] == b'-' && h[6] == b'-' && matches!(&h[3..5], b"lh" | b"lz") {
-        // an LHA header: `-lh5-` (its method) after its size and checksum
-        Some("lzh")
-    } else {
-        None
-    }
-}
-
 /// Google Drive's answer for a file downloaded too often lately.
 pub const DRIVE_QUOTA: &str =
     "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
@@ -463,14 +447,6 @@ pub(crate) fn url_file_name(url: &str) -> Option<String> {
         return None; // just the host
     }
     crate::text::safe_file_name(&crate::net::percent_decode(last))
-}
-
-/// Whether a file name is an archive's.
-fn archive_name(n: &str) -> bool {
-    let n = n.to_ascii_lowercase();
-    [".zip", ".rar", ".7z", ".lzh"]
-        .iter()
-        .any(|e| n.ends_with(e))
 }
 
 /// The best of (name, item) among a folder's archives: ogg over wav, full
@@ -590,6 +566,5 @@ mod tests {
             pick_file(names.iter().map(|n| (*n, *n))),
             Some("song_ogg.zip")
         );
-        assert!(archive_name("A.RAR") && !archive_name("a.txt"));
     }
 }

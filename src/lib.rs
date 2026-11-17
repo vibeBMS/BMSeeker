@@ -54,9 +54,3 @@ pub mod table;
 pub mod text;
 pub mod titles;
 pub mod unpack;
-
-/// A file name from an archive: UTF-8, else Shift_JIS / EUC-KR as BMS packs
-/// use.
-pub fn decode_name(raw: &[u8]) -> String {
-    text::decode_text(raw)
-}

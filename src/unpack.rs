@@ -18,6 +18,61 @@ pub const BUDGET: u64 = if cfg!(target_arch = "wasm32") {
     4 << 30
 };
 
+/// An archive's format, known by its first bytes ([`sniff`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Zip,
+    SevenZ,
+    Rar,
+    Lzh,
+}
+
+impl Format {
+    /// Its file name extension.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Zip => "zip",
+            Format::SevenZ => "7z",
+            Format::Rar => "rar",
+            Format::Lzh => "lzh",
+        }
+    }
+}
+
+/// The archive format of a file's first bytes.
+pub fn sniff(h: &[u8]) -> Option<Format> {
+    if h.starts_with(b"PK\x03\x04") || h.starts_with(b"PK\x05\x06") {
+        Some(Format::Zip)
+    } else if h.starts_with(b"Rar!\x1a\x07") {
+        Some(Format::Rar)
+    } else if h.starts_with(b"7z\xbc\xaf\x27\x1c") {
+        Some(Format::SevenZ)
+    } else if h.len() >= 7 && h[2] == b'-' && h[6] == b'-' && matches!(&h[3..5], b"lh" | b"lz") {
+        // an LHA header: `-lh5-` (its method) after its size and checksum
+        Some(Format::Lzh)
+    } else {
+        None
+    }
+}
+
+/// The archive format of the file `p` on a disk, from its first bytes.
+pub fn sniff_file(p: &Path) -> Option<Format> {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    let n = std::fs::File::open(p).ok()?.read(&mut head).ok()?;
+    sniff(&head[..n])
+}
+
+/// Whether a file is an archive by its name.
+pub fn is_archive(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "zip" | "7z" | "rar" | "lzh" | "lha"
+        )
+    })
+}
+
 /// An archive: a file in the store, or bytes.
 #[derive(Debug)]
 pub enum Blob {
@@ -128,11 +183,11 @@ fn zip_time<R: std::io::Read>(e: &zip::read::ZipFile<'_, R>) -> Option<i64> {
     ))
 }
 
-/// Unpack the archive `r` (`format`: "zip", "7z", "rar", "lzh") into `sink`, with
-/// at most `budget` bytes in all (`limit`: the whole's, for the message).
+/// Unpack the archive `r` of `format` into `sink`, with at most `budget`
+/// bytes in all (`limit`: the whole's, for the message).
 fn members(
     r: Box<dyn ReadSeek + Send>,
-    format: &str,
+    format: Format,
     limit: u64,
     budget: &mut u64,
     sink: &mut dyn Sink,
@@ -167,7 +222,7 @@ fn members(
         }
     };
     match format {
-        "zip" => {
+        Format::Zip => {
             let mut z = zip::ZipArchive::new(r).map_err(|e| e.to_string())?;
             for i in 0..z.len() {
                 let mut e = z.by_index(i).map_err(|e| e.to_string())?;
@@ -175,7 +230,7 @@ fn members(
                     continue;
                 }
                 // names in Shift_JIS / EUC-KR as BMS packs often have
-                let Some(rel) = safe_rel(&crate::decode_name(e.name_raw())) else {
+                let Some(rel) = safe_rel(&crate::text::decode_text(e.name_raw())) else {
                     continue;
                 };
                 let mtime = zip_time(&e);
@@ -184,7 +239,7 @@ fn members(
                 })?;
             }
         }
-        "7z" => {
+        Format::SevenZ => {
             let mut a =
                 sevenz_rust2::ArchiveReader::new(r, "".into()).map_err(|e| e.to_string())?;
             let mut err = None;
@@ -214,7 +269,7 @@ fn members(
                 return Err(e);
             }
         }
-        "rar" => {
+        Format::Rar => {
             let mut a = unrar_rs::RarArchive::open(r).map_err(|e| e.to_string())?;
             for i in 0..a.len() {
                 let Some(info) = a.member_info(i) else {
@@ -238,7 +293,7 @@ fn members(
                 })?;
             }
         }
-        "lzh" => {
+        Format::Lzh => {
             let mut a = delharc::LhaDecodeReader::new(r).map_err(|e| e.to_string())?;
             loop {
                 let h = a.header();
@@ -261,7 +316,6 @@ fn members(
                 }
             }
         }
-        _ => return Err("not an archive".into()),
     }
     Ok(())
 }
@@ -288,14 +342,11 @@ fn lzh_name(h: &delharc::LhaHeader) -> String {
         .take_while(|b| *b != 0)
         .map(|b| if b == 0xFF { b'/' } else { b })
         .collect();
-    crate::decode_name(&raw)
+    crate::text::decode_text(&raw)
 }
 
 /// The format of the archive `blob` and something to read it with.
-fn reader(
-    blob: Blob,
-    store: &dyn Store,
-) -> Result<(&'static str, Box<dyn ReadSeek + Send>), String> {
+fn reader(blob: Blob, store: &dyn Store) -> Result<(Format, Box<dyn ReadSeek + Send>), String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut r: Box<dyn ReadSeek + Send> = match blob {
         Blob::Bytes(b) => Box::new(Cursor::new(b)),
@@ -306,7 +357,7 @@ fn reader(
     let mut head = [0u8; 8];
     let n = r.read(&mut head).map_err(|e| e.to_string())?;
     r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    let format = crate::hosts::sniff_bytes(&head[..n]).ok_or("not an archive")?;
+    let format = sniff(&head[..n]).ok_or("not an archive")?;
     Ok((format, r))
 }
 
@@ -330,16 +381,6 @@ impl Sink for Into<'_> {
     fn drop_partial(&mut self, rel: &Path) {
         self.store.remove(&self.dest.join(rel));
     }
-}
-
-/// Whether a file is an archive by its name.
-pub fn is_archive(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "zip" | "7z" | "rar" | "lzh" | "lha"
-        )
-    })
 }
 
 /// Unpack the archive `blob` (its format from its first bytes) into the
@@ -422,7 +463,7 @@ fn unpack_within(
     limit: u64,
     put: impl FnMut(PathBuf, Vec<u8>),
 ) -> Result<usize, String> {
-    let format = crate::hosts::sniff_bytes(&bytes).ok_or("not an archive")?;
+    let format = sniff(&bytes).ok_or("not an archive")?;
     let mut sink = Handed {
         buf: Vec::new(),
         put,
@@ -603,7 +644,8 @@ mod tests {
     #[test]
     fn lzh() {
         use crate::fs::Mem;
-        assert_eq!(crate::hosts::sniff_bytes(&LZH), Some("lzh"));
+        assert_eq!(sniff(&LZH), Some(Format::Lzh));
+        assert!(is_archive(Path::new("A.LHA")) && !is_archive(Path::new("a.txt")));
         let mem = Mem::default();
         let got = unpack(Blob::Bytes(LZH.to_vec()), &mem, Path::new("d"), BUDGET).unwrap();
         assert_eq!(

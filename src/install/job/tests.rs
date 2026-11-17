@@ -126,6 +126,23 @@ fn a_page_is_a_page() {
         &Context::default(),
     );
     assert_eq!(run_job(&mut j, &d).unwrap().name, "a.bms");
+    // an empty file: no page, a failure
+    let d = Canned::default();
+    d.file(
+        "http://e.test/a.bms",
+        Ok(Served::bytes(Vec::new(), None, None)),
+    );
+    let mut j = Acquire::new(
+        "http://e.test/a.bms",
+        None,
+        true,
+        "slot".into(),
+        &Context::default(),
+    );
+    assert!(matches!(
+        run_job(&mut j, &d),
+        Err(Fetch::Failed(NetError::Other(_)))
+    ));
 }
 
 /// A server's passing failure: tried again after 3 s, then 10 s; then
@@ -580,9 +597,10 @@ fn install_in_a_batch_and_cancelled() {
         &d,
     );
     assert!(steps(&d).is_empty());
-    assert!(
-        matches!(&out.done[..], [Done::Failed(f)] if f.to_string() == crate::install::DOWNLOADED)
-    );
+    assert!(matches!(
+        &out.done[..],
+        [Done::Failed(crate::install::Failure::Downloaded)]
+    ));
     assert!(out.batch.has(&Batch::key(link, &q)));
     let p = Progress::new();
     p.cancel();

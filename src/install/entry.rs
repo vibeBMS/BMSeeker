@@ -5,6 +5,7 @@
 //! charts) gets each file once.
 
 use super::{Done, Failure, Role};
+use crate::chart::md5_key;
 use crate::hosts::{DownloadKey, Want};
 use crate::library::Library;
 use crate::sources::Query;
@@ -96,7 +97,7 @@ pub fn entry_steps(e: &Entry, lib: &Library) -> Vec<Step> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    if has_song(e, lib) && (!e.chart.is_empty() || e.md5.trim().len() == 32) {
+    if has_song(e, lib) && (!e.chart.is_empty() || md5_key(&e.md5).is_some()) {
         out.push(step(&e.chart, Role::Diff, When::Always));
         if !e.song.is_empty() {
             let when = match e.chart.is_empty() {
@@ -128,11 +129,7 @@ impl Batch {
     pub fn new(wanted: impl IntoIterator<Item = String>) -> Batch {
         Batch {
             seen: HashSet::new(),
-            wanted: wanted
-                .into_iter()
-                .map(|m| m.trim().to_ascii_lowercase())
-                .filter(|m| m.len() == 32)
-                .collect(),
+            wanted: wanted.into_iter().filter_map(|m| md5_key(&m)).collect(),
         }
     }
 
@@ -160,8 +157,12 @@ impl Batch {
 
     /// The charts wanted but `q`'s.
     pub fn also(&self, q: &Query) -> Vec<String> {
-        let md5 = q.md5.trim().to_ascii_lowercase();
-        self.wanted.iter().filter(|m| **m != md5).cloned().collect()
+        let md5 = md5_key(&q.md5);
+        self.wanted
+            .iter()
+            .filter(|m| Some(*m) != md5.as_ref())
+            .cloned()
+            .collect()
     }
 }
 

@@ -3,9 +3,11 @@
 //! names its archives, the best of which is taken. A folder link ending in
 //! `#sub/folder/file` names goes down to that file.
 
-use super::{archive_name, between, get_then, pick_file, Host, Link, Resolved, Target, Want};
+use super::{between, get_then, pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
 use crate::net::{Answer, BoxTask, Next, Ready, Request, Task};
+use crate::unpack::is_archive;
+use std::path::Path;
 
 pub struct Drive;
 
@@ -43,7 +45,7 @@ impl Host for Drive {
                 let best = pick_file(
                     files
                         .iter()
-                        .filter(|(name, _)| archive_name(name))
+                        .filter(|(name, _)| is_archive(Path::new(name)))
                         .map(|(n, i)| (n.as_str(), (n, i))),
                 );
                 match best {

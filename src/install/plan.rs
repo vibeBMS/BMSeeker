@@ -6,7 +6,7 @@
 //! a download that has just arrived: natively and in a web page alike.
 
 use super::{md5_hex, safe_name, unique, Done, Failure};
-use crate::chart::ChartInfo;
+use crate::chart::{md5_key, ChartInfo};
 use crate::fs::{file_name, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
@@ -122,12 +122,6 @@ impl Item {
             moves: Vec::new(),
         }
     }
-}
-
-/// An MD5 as it is compared (None: not one).
-fn md5_key(m: &str) -> Option<String> {
-    let m = m.trim();
-    (m.len() == 32).then(|| m.to_ascii_lowercase())
 }
 
 /// What folders a package's charts point to.

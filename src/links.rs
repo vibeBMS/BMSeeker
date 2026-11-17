@@ -11,6 +11,7 @@
 //! [`Links::chart_links`] give every link known for a chart, the table's own
 //! first, to try one after another.
 
+use crate::chart::md5_key;
 use crate::table::{DifficultyTable, TableEntry};
 use std::collections::HashMap;
 
@@ -26,12 +27,6 @@ pub fn is_dead(url: &str) -> bool {
 fn usable(url: &str) -> bool {
     let u = url.trim();
     (u.starts_with("https://") || u.starts_with("http://")) && !is_dead(u)
-}
-
-/// A 32-digit hex MD5, in lower case.
-fn md5_key(s: &str) -> Option<String> {
-    let s = s.trim();
-    (s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
 }
 
 /// MD5 → the (song's link, chart's link) pairs known for it, in the order

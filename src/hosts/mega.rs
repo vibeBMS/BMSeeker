@@ -3,9 +3,11 @@
 //! a folder of many songs' archives gives the one for the song looked for.
 //! The bytes come encrypted ([`MegaCipher`]).
 
-use super::{archive_name, pick_file, Host, Link, Resolved, Target, Want};
+use super::{pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
 use crate::net::{Answer, BoxTask, NetError, Next, Ready, Request, Task};
+use crate::unpack::is_archive;
+use std::path::Path;
 
 pub struct Mega;
 
@@ -335,7 +337,10 @@ pub(crate) fn pack_artist(by: &str, artist: &str) -> bool {
 /// (or just the title). Without a match, a folder of one song's archives
 /// gives its best; one of many songs gives none.
 fn pick_in_pack<'a>(files: &'a [MegaFile], want: Option<&Want>) -> Option<&'a MegaFile> {
-    let archives: Vec<&MegaFile> = files.iter().filter(|f| archive_name(&f.name)).collect();
+    let archives: Vec<&MegaFile> = files
+        .iter()
+        .filter(|f| is_archive(Path::new(&f.name)))
+        .collect();
     let best = |c: &[&'a MegaFile]| {
         let i = pick_file(c.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)))?;
         Some(c[i])

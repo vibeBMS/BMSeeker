@@ -43,6 +43,13 @@ const MOVIE: [&str; 15] = [
     "flv", "rm",
 ];
 
+/// A chart's MD5 as it is compared: 32 hex digits, lower case (None: not
+/// one).
+pub fn md5_key(m: &str) -> Option<String> {
+    let m = m.trim();
+    (m.len() == 32 && m.bytes().all(|b| b.is_ascii_hexdigit())).then(|| m.to_ascii_lowercase())
+}
+
 /// The class of a file by its extension (None: not one a chart uses).
 pub fn class_of(name: &str) -> Option<Class> {
     let name = name.rsplit(['/', '\\']).next().unwrap_or(name);

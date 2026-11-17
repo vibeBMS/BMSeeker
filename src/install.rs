@@ -38,28 +38,19 @@ pub enum Done {
 pub enum Failure {
     /// The download (or a request on the way) failed; `Cancelled` too.
     Net(crate::net::NetError),
-    /// What a link found by name brought does not hold the chart wanted
-    /// ([`NOT_THE_CHART`]).
+    /// What a link found by name brought does not hold the chart wanted.
     NotTheChart,
-    /// The song is in the library and none of its chart's links works
-    /// ([`NO_CHART_LINK`]).
+    /// The song is in the library and none of its chart's links works (nor
+    /// led to a page).
     NoChartLink,
     /// No link to try.
     NoLink,
+    /// The link's file this batch of downloads has had already (and what
+    /// it brought is in the library, or waits).
+    Downloaded,
     /// Anything else (unpacking, the disk), as said.
     Other(String),
 }
-
-/// A download found by name that does not hold the chart wanted.
-pub const NOT_THE_CHART: &str = "what it brought does not hold the chart";
-
-/// A link whose file this batch of downloads has had already (and what
-/// it brought is in the library, or waits).
-pub const DOWNLOADED: &str = "downloaded already in this run";
-
-/// What a chart's download comes to when its song is in the library
-/// already and none of the chart's links brought it (nor led to a page).
-pub const NO_CHART_LINK: &str = "the song is in the library; no link for this chart works";
 
 impl Failure {
     /// The download was cancelled (nothing to tell: the person did it).
@@ -72,9 +63,12 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Failure::Net(e) => e.fmt(f),
-            Failure::NotTheChart => f.write_str(NOT_THE_CHART),
-            Failure::NoChartLink => f.write_str(NO_CHART_LINK),
+            Failure::NotTheChart => f.write_str("what it brought does not hold the chart"),
+            Failure::NoChartLink => {
+                f.write_str("the song is in the library; no link for this chart works")
+            }
             Failure::NoLink => f.write_str("no link"),
+            Failure::Downloaded => f.write_str("downloaded already in this run"),
             Failure::Other(e) => f.write_str(e),
         }
     }
@@ -101,10 +95,7 @@ impl From<&str> for Failure {
 /// The MD5 of `bytes`, in hex.
 pub fn md5_hex(bytes: &[u8]) -> String {
     use md5::Digest;
-    md5::Md5::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::text::hex(&md5::Md5::digest(bytes))
 }
 
 /// A link to a chart file of its own (`….bms` and the like).
@@ -149,7 +140,7 @@ pub fn request(
 ) -> Request {
     Request {
         want: Some(q.want.clone()),
-        md5: Some(q.md5.trim().to_string()).filter(|m| m.len() == 32),
+        md5: crate::chart::md5_key(&q.md5),
         org_md5: q.org_md5.clone(),
         role: if q.diff { Role::Diff } else { Role::Song },
         check,
@@ -387,7 +378,10 @@ mod tests {
         t.record(vec![Done::Failed(NetError::Status(404).into())]);
         t.record(vec![Done::Failed(Failure::NotTheChart)]);
         assert!(matches!(&t.end()[..], [Done::Failed(Failure::NotTheChart)]));
-        assert_eq!(Failure::NotTheChart.to_string(), NOT_THE_CHART);
+        assert_eq!(
+            Failure::NotTheChart.to_string(),
+            "what it brought does not hold the chart"
+        );
         assert_eq!(Failure::from(NetError::Status(404)).to_string(), "HTTP 404");
         assert!(Failure::from(NetError::Cancelled).cancelled());
         assert!(!Failure::Other("cancelled".into()).cancelled());

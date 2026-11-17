@@ -176,7 +176,7 @@ fn get(
     } else {
         tmp
     };
-    let format = hosts::sniff(&file).unwrap_or("file");
+    let format = bmseeker::unpack::sniff_file(&file).map_or("file", |f| f.ext());
     r.out.record(
         json!({"file": file, "name": name, "format": format, "link": link, "errors": errors}),
         || format!("{} ({format}, from {link})", file.display()),

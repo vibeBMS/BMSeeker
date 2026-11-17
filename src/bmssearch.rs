@@ -20,7 +20,7 @@ fn get(url: String) -> Step {
 
 pub struct Lookup {
     api: String,
-    md5: String,
+    md5: Option<String>,
     want: Want,
     wait: Wait,
 }
@@ -82,7 +82,7 @@ impl Lookup {
     pub fn new(md5: &str, want: &Want, api: &str) -> Lookup {
         Lookup {
             api: api.trim_end_matches('/').to_string(),
-            md5: md5.trim().to_ascii_lowercase(),
+            md5: crate::chart::md5_key(md5),
             want: want.clone(),
             wait: Wait::Pattern,
         }
@@ -108,8 +108,8 @@ impl Task for Lookup {
 
     fn start(&mut self) -> Step {
         self.wait = Wait::Pattern;
-        if self.md5.len() == 32 && self.md5.bytes().all(|b| b.is_ascii_hexdigit()) {
-            get(format!("{}/patterns/{}", self.api, self.md5))
+        if let Some(m) = &self.md5 {
+            get(format!("{}/patterns/{m}", self.api))
         } else {
             let (t, a) = (self.want.title.clone(), self.want.artist.clone());
             self.search(&t, &a)

@@ -167,7 +167,9 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
                     ..Checked::state(State::Chart, String::new())
                 }
             } else {
-                let format = crate::hosts::sniff(&file).unwrap_or("zip").to_string();
+                let format = crate::unpack::sniff_file(&file)
+                    .map_or("zip", |f| f.ext())
+                    .to_string();
                 let dir: PathBuf = tmp.join("unpacked");
                 match crate::import::unpack_into(
                     &crate::fs::Disk,

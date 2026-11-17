@@ -18,12 +18,6 @@ fn sql_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// A 32-digit hex MD5 (LR2 knows charts by it), in lower case.
-fn md5(s: &str) -> Option<String> {
-    let s = s.trim();
-    (s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
-}
-
 /// The table's LR2 custom folders, one per level in the table's order:
 /// (file name, its Shift_JIS text). Levels without an MD5 are left out.
 pub fn lr2_folders(t: &DifficultyTable) -> Vec<(String, Vec<u8>)> {
@@ -33,7 +27,7 @@ pub fn lr2_folders(t: &DifficultyTable) -> Vec<(String, Vec<u8>)> {
             .entries
             .iter()
             .filter(|e| e.level == level)
-            .filter_map(|e| md5(&e.md5))
+            .filter_map(|e| crate::chart::md5_key(&e.md5))
             .map(|h| sql_quote(&h))
             .collect();
         if hashes.is_empty() {
@@ -82,10 +76,7 @@ fn constraint_name(c: &str) -> Option<&'static str> {
 /// The file name beatoraja gives a table's cache: the SHA-256 (hex) of its
 /// URL, `.bmt`.
 pub fn bmt_file_name(url: &str) -> String {
-    use sha2::Digest;
-    let h = sha2::Sha256::digest(url.as_bytes());
-    let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{hex}.bmt")
+    format!("{}.bmt", crate::library::sha256_hex(url.as_bytes()))
 }
 
 /// The table as beatoraja caches it: gzip of its JSON (`url`, `name`,

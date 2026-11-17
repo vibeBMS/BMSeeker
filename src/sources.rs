@@ -126,10 +126,10 @@ impl Source for ChartMirrors {
     }
 
     fn find(&self, q: &Query) -> BoxTask<Vec<String>> {
-        let md5 = q.md5.trim().to_ascii_lowercase();
-        if !q.diff || self.folders.is_empty() || md5.len() != 32 {
+        let md5 = crate::chart::md5_key(&q.md5).filter(|_| q.diff && !self.folders.is_empty());
+        let Some(md5) = md5 else {
             return Ready::boxed(Vec::new());
-        }
+        };
         let folders = self.folders.clone();
         crate::net::get_then(format!("{}/patterns/{md5}", self.api), move |answer| {
             // (nothing when it fails)
@@ -245,14 +245,14 @@ impl Source for BmsLibrary {
 
     fn find(&self, q: &Query) -> BoxTask<Vec<String>> {
         let title = q.want.title.trim().to_string();
-        let md5 = q.md5.trim().to_ascii_lowercase();
+        let md5 = crate::chart::md5_key(&q.md5);
         // a separate chart too: a song's archive there may hold it (checked)
-        if self.folder.is_empty() || (title.is_empty() && md5.len() != 32) {
+        if self.folder.is_empty() || (title.is_empty() && md5.is_none()) {
             return Ready::boxed(Vec::new());
         }
         Box::new(Library {
             root: self.folder.clone(),
-            pattern: (md5.len() == 32).then(|| format!("{}/patterns/{md5}", self.api)),
+            pattern: md5.map(|m| format!("{}/patterns/{m}", self.api)),
             table_title: title,
             titles: Vec::new(),
             artist: q.want.artist.clone(),

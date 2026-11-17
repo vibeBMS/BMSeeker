@@ -86,10 +86,7 @@ fn hash_key(h: &str) -> Option<String> {
 /// The SHA-256 of `bytes`, in hex.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
-    sha2::Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::text::hex(&sha2::Sha256::digest(bytes))
 }
 
 impl Library {

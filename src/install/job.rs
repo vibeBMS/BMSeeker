@@ -228,12 +228,17 @@ impl Acquire {
     /// The file came: what it is.
     fn served(&mut self, s: Served) -> Step<Result<Got, Fetch>> {
         let t = self.target.take().expect("a target");
-        let page = s.head.is_empty() || s.head.trim_ascii_start().starts_with(b"<");
-        let kept = self.plain || crate::hosts::sniff_bytes(&s.head).is_some();
+        let empty = s.head.is_empty();
+        let page = empty || s.head.trim_ascii_start().starts_with(b"<");
+        let kept = self.plain || crate::unpack::sniff(&s.head).is_some();
         if !kept && !(self.any && !page) {
-            let e = match crate::hosts::drive_quota(&s.head) {
-                true => Fetch::Failed(NetError::Other(crate::hosts::DRIVE_QUOTA.into())),
-                false => Fetch::Page,
+            // (a file wanted as it is that came empty is no page either)
+            let e = if self.any && empty {
+                Fetch::Failed(NetError::Other("the file is empty".into()))
+            } else if crate::hosts::drive_quota(&s.head) {
+                Fetch::Failed(NetError::Other(crate::hosts::DRIVE_QUOTA.into()))
+            } else {
+                Fetch::Page
             };
             let moved = s.at.filter(|u| *u != t.url);
             return self.failed(e, moved);
@@ -524,7 +529,7 @@ impl Install {
 
     /// The next link, else the next source's, else the end.
     fn next(&mut self) -> Step<Installed> {
-        use super::{chart_link, Batch, Done};
+        use super::{chart_link, Batch, Done, Failure};
         loop {
             if self.cx.cancelled() {
                 return self.end(vec![Done::Failed(NetError::Cancelled.into())]);
@@ -537,11 +542,10 @@ impl Install {
                 continue;
             }
             if self.batch.as_ref().is_some_and(|b| b.has(&key)) {
-                self.tries
-                    .record(vec![Done::Failed(super::DOWNLOADED.into())]);
+                self.tries.record(vec![Done::Failed(Failure::Downloaded)]);
                 continue;
             }
-            let check = self.checked && self.q.md5.trim().len() == 32;
+            let check = self.checked && crate::chart::md5_key(&self.q.md5).is_some();
             let job = self.downloads.join(format!(".job-{}", super::unique()));
             self.store.create_dir_all(&job);
             let chart = chart_link(&link);

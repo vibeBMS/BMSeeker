@@ -3,7 +3,7 @@
 //! an hour) but a limit on silence ([`STALL_MS`]) and the context's
 //! [`Progress`](crate::progress::Progress) able to cancel it.
 
-use super::{sniff_bytes, Context, Fetch, MegaCipher, Want, STALL_MS};
+use super::{Context, Fetch, MegaCipher, Want, STALL_MS};
 use crate::install::job::{self, run_job, Acquire, Driver, Effect, Fed};
 use crate::net::{percent_decode, Client, NetError};
 use crate::progress::Progress;
@@ -137,13 +137,6 @@ fn disposition_name(h: &str) -> Option<String> {
         latin1.and_then(|b| String::from_utf8(b).ok()).unwrap_or(v)
     };
     safe_file_name(&name)
-}
-
-/// The archive format of a file from its first bytes.
-pub fn sniff(p: &Path) -> Option<&'static str> {
-    let mut head = [0u8; 8];
-    let n = std::fs::File::open(p).ok()?.read(&mut head).ok()?;
-    sniff_bytes(&head[..n])
 }
 
 fn mega_decrypt(from: &Path, to: &Path, k: &[u8]) -> Result<(), String> {
@@ -349,7 +342,7 @@ mod tests {
         match fetch(&url, None, &out, false, &Context::default()) {
             Ok(name) => println!(
                 "OK {name} {:?} {} bytes",
-                sniff(&out),
+                crate::unpack::sniff_file(&out),
                 std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0)
             ),
             Err(e) => println!("ERR {e:?}"),
