@@ -1,7 +1,7 @@
 //! `bmseeker`: difficulty tables, downloads from where BMS authors link
 //! songs, a library's charts and BMS events, from a terminal or a script.
 //!
-//! `bmseeker [--json] [--config FILE] [--third-party] <noun> <verb> ...`. With `--json`
+//! `bmseeker [--json] [--config FILE] [--third-party] [--name-folders] <noun> <verb> ...`. With `--json`
 //! every command writes JSON Lines (one record a line, as it goes); the
 //! `event` commands always do, and read records (JSON Lines, or a JSON
 //! array or object) from a file or `-` (stdin).
@@ -32,6 +32,12 @@ struct Cli {
     /// where it was found by name.
     #[arg(long, global = true)]
     third_party: bool,
+    /// A song new to the library: its folder named after its charts
+    /// (`[artist] title`, as BeMusicSeeker names one; the settings'
+    /// `folder_name_format`), a folder its archive wraps everything in left
+    /// out.
+    #[arg(long, global = true)]
+    name_folders: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -95,6 +101,7 @@ fn main() {
     let config = match Config::load(cli.config.as_deref()) {
         Ok(c) => Config {
             third_party: c.third_party || cli.third_party,
+            folder_naming: c.folder_naming || cli.name_folders,
             ..c
         },
         Err(e) => {

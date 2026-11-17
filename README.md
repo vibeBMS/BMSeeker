@@ -12,7 +12,7 @@ As a library: `bmseeker = { git = "https://github.com/vibeBMS/BMSeeker" }` (the 
 `clap`, comes in only with the `cli` feature).
 
 ```text
-bmseeker [--json] [--config FILE] [--third-party] <noun> <verb> ...
+bmseeker [--json] [--config FILE] [--third-party] [--name-folders] <noun> <verb> ...
 
 link resolve <link>... [-t title -a artist]          what a link leads to (a file's URL and name / a page that
                                                      needs a browser / an error), without downloading
@@ -109,7 +109,18 @@ down `#sub/folder/file`.
 Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`) are JSON over the defaults:
 `user_agent`, `mirror_catalog` (the BMS event mirror's list; empty: not used), `manbow`, `bmssearch_api`,
 `stella_list`, `mega_api`, `sources`, `third_party`, `uploaders`, `chart_mirrors`, `bms_library`, `tables`,
-`downloads` (the folder in a library where downloads wait), `min_coverage`, `reinstall`.
+`downloads` (the folder in a library where downloads wait), `min_coverage`, `reinstall`, `folder_naming`,
+`folder_name_format`, `sjis_only`.
+
+A song new to the library gets a folder named after the song's title (a table's), or the archive. With
+`--name-folders` (setting `"folder_naming": true`; off by default) it is named after its charts as BeMusicSeeker names
+one: `folder_name_format` (default `[%ARTIST%] %TITLE%`) with what the charts' artists and titles share (their chart
+names such as `[ANOTHER]`, prefixes such as `BMS:` and credits such as `/ obj:` trimmed; the best by its length^0.65 ×
+how many charts give it), characters a file name cannot have made full-width, at most 128 bytes (250 for the whole
+path) as Shift_JIS counts them, `name (2)` beside another song of that name, `新しいフォルダー` when nothing is left;
+`"sjis_only": true` keeps only characters Shift_JIS has (LR2 on Windows). A folder the archive wraps everything in is
+left out (`[alpha] Song/song.bms`, not `[alpha] Song/Song_v1/song.bms`), and a song the library has under another
+folder name (a chart of the same title and artist there) goes into that folder, not a second one.
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
 

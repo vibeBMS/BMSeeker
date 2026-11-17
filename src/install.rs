@@ -284,8 +284,8 @@ pub fn request(
         role: if q.diff { Role::Diff } else { Role::Song },
         check,
         rules: crate::placement::Rules::default(),
-        // (the library folder is named after the song)
-        naming: Naming::Named(safe_name(&q.want.title)),
+        // (the library folder is named after the song, or its charts)
+        naming: Naming::of(config, Naming::Named(safe_name(&q.want.title))),
         file,
         reinstall: config.reinstall,
         also: Vec::new(),

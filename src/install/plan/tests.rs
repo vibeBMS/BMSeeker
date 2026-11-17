@@ -368,3 +368,50 @@ fn votes() {
         Some("bms/Song".into())
     );
 }
+
+/// Folders named after their charts (opt-in): `[artist] title`, the folder
+/// the archive wraps everything in left out; the same song already in the
+/// library (under another name) goes into its folder, not a second one.
+#[test]
+fn folders_named_after_their_charts() {
+    let naming = Naming::Charts {
+        format: crate::naming::DEFAULT_FORMAT.into(),
+        sjis_only: false,
+    };
+    let r = Request {
+        naming,
+        ..req(Role::Song)
+    };
+    let n = "#TITLE Song [NORMAL]\n#ARTIST alpha\n#WAV01 sound/01.wav\n";
+    let h = "#TITLE Song [HYPER]\n#ARTIST alpha / obj: x\n#WAV01 sound/01.wav\n";
+    let files = [
+        ("Song_v1/n.bms", n),
+        ("Song_v1/h.bms", h),
+        ("Song_v1/sound/01.ogg", "x"),
+    ];
+    let m = store(&[]);
+    let done = take_zip(&m, &files, &r, &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Added(p, 3)] if p == Path::new("bms/[alpha] Song")),
+        "{done:?}"
+    );
+    assert!(text(&m, "bms/[alpha] Song/sound/01.ogg").is_some());
+    // the song in the library under another name: its folder
+    let m = store(&[("bms/Old/n.bms", n), ("bms/Old/sound/01.ogg", "x")]);
+    let a = "#TITLE Song [ANOTHER]\n#ARTIST alpha\n#WAV01 sound/01.wav\n#WAV02 sound/a.wav\n";
+    let files = [
+        ("Song_v2/a.bms", a),
+        ("Song_v2/sound/01.ogg", "x"),
+        ("Song_v2/sound/a.ogg", "y"),
+    ];
+    let done = take_zip(&m, &files, &r, &mut lib(&m));
+    assert!(
+        done.iter().all(|d| match d {
+            Done::Added(p, _) | Done::Placed(p) => p.starts_with("bms/Old"),
+            _ => false,
+        }),
+        "{done:?}"
+    );
+    assert!(text(&m, "bms/Old/a.bms").is_some() && text(&m, "bms/Old/sound/a.ogg").is_some());
+    no_stage(&m);
+}

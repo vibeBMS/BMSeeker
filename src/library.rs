@@ -184,6 +184,30 @@ impl Library {
         out
     }
 
+    /// The folders holding a chart of the same song as one of `charts` (the
+    /// title but for the chart's name, and the artist), among the charts
+    /// given or read so far.
+    pub fn song_folders_like(&self, charts: &[ChartInfo]) -> Vec<PathBuf> {
+        use crate::placement::{same_artist, same_song_title};
+        let mut out: Vec<PathBuf> = self
+            .charts
+            .borrow()
+            .iter()
+            .filter(|(p, c)| {
+                p.starts_with(&self.root)
+                    && c.as_ref().is_some_and(|c| {
+                        charts.iter().any(|n| {
+                            same_song_title(&c.title, &n.title) && same_artist(&c.artist, &n.artist)
+                        })
+                    })
+            })
+            .filter_map(|(p, _)| p.parent().map(Path::to_path_buf))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// `file` is in the library now (moved there; `md5`: a chart's): the
     /// song's folder it is in holds it (a chart in a folder that was none:
     /// a song's of its own).

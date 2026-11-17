@@ -37,6 +37,28 @@ pub enum Naming {
     Download,
     /// This name (the song's title, made a file name).
     Named(String),
+    /// After its charts, as the BeMusicSeeker fork names one
+    /// ([`crate::naming::folder_name`]: `format` with `%ARTIST%` and
+    /// `%TITLE%`; `sjis_only`: only characters Shift_JIS has); a folder the
+    /// download wraps everything in left out; a folder of the library
+    /// holding the song (by its charts' titles and artists, whatever its
+    /// name) used.
+    Charts { format: String, sjis_only: bool },
+}
+
+impl Naming {
+    /// [`Naming::Charts`] when `config` names folders after their charts
+    /// ([`Config::folder_naming`](crate::config::Config::folder_naming)),
+    /// else `otherwise`.
+    pub fn of(config: &crate::config::Config, otherwise: Naming) -> Naming {
+        match config.folder_naming {
+            true => Naming::Charts {
+                format: config.folder_name_format.clone(),
+                sjis_only: config.sjis_only,
+            },
+            false => otherwise,
+        }
+    }
 }
 
 /// What a download is for, and how it is brought in.
@@ -383,6 +405,23 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         .collect()
 }
 
+/// The folder all of `files` (members) are in, when they are in one (a
+/// folder a download wraps everything in).
+fn wrapper(s: &Staged, files: &[usize]) -> Option<PathBuf> {
+    let mut top: Option<&std::ffi::OsStr> = None;
+    for &f in files {
+        let mut parts = s.members[f].rel.components();
+        let first = parts.next()?.as_os_str();
+        // a file right in it, or another folder: none
+        parts.next()?;
+        if top.is_some_and(|t| t != first) {
+            return None;
+        }
+        top = Some(first);
+    }
+    top.map(PathBuf::from)
+}
+
 /// The packages `new` (and the files in no package) as one song new to the
 /// library, laid out as in the download.
 fn new_item(
@@ -393,32 +432,51 @@ fn new_item(
     all: &[Package],
     req: &Request,
 ) -> Item {
-    let stem = match &req.naming {
-        Naming::Named(n) => n.clone(),
-        Naming::Download => req
-            .file
-            .as_deref()
-            .and_then(|f| Path::new(f).file_stem())
-            .map(|s| safe_name(&s.to_string_lossy()))
-            .unwrap_or_else(|| "download".into()),
-    };
     let charts: Vec<ChartInfo> = new
         .iter()
         .flat_map(|p| p.charts.iter())
         .filter_map(|&c| s.charts[c].info.clone())
         .collect();
-    let dest = placement::song_folder_in(fs, lib, &stem, &charts);
     let packed: HashSet<usize> = all.iter().flat_map(|p| p.files.iter().copied()).collect();
     let mut files: Vec<usize> = new.iter().flat_map(|p| p.files.iter().copied()).collect();
     files.extend((0..s.members.len()).filter(|f| !packed.contains(f)));
     files.sort_unstable();
     files.dedup();
+    let named = |stem: &str| placement::song_folder_in(fs, lib, stem, &charts);
+    let (dest, strip) = match &req.naming {
+        Naming::Named(n) => (named(n), None),
+        Naming::Download => {
+            let stem = req
+                .file
+                .as_deref()
+                .and_then(|f| Path::new(f).file_stem())
+                .map(|s| safe_name(&s.to_string_lossy()))
+                .unwrap_or_else(|| "download".into());
+            (named(&stem), None)
+        }
+        Naming::Charts { format, sjis_only } => {
+            // the song's folder in the library already, by its charts'
+            // titles and artists (not by a name that may have changed)
+            let dest = match lib.song_folders_like(&charts).as_slice() {
+                [one] => one.clone(),
+                _ => {
+                    let name = crate::naming::folder_name(&charts, format, *sjis_only);
+                    named(&crate::naming::fit_path(lib.root(), &name))
+                }
+            };
+            (dest, wrapper(s, &files))
+        }
+    };
     Item {
         moves: files
             .into_iter()
             .map(|f| {
                 let rel = &s.members[f].rel;
-                (s.root.join(rel), dest.join(rel))
+                let to = match &strip {
+                    Some(w) => rel.strip_prefix(w).unwrap_or(rel),
+                    None => rel,
+                };
+                (s.root.join(rel), dest.join(to))
             })
             .collect(),
         outcome: Outcome::New(dest),

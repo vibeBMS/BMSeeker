@@ -39,6 +39,7 @@ pub mod install;
 pub mod library;
 pub mod links;
 pub mod manbow;
+pub mod naming;
 pub mod net;
 pub mod package;
 pub mod placement;

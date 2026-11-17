@@ -53,6 +53,17 @@ pub struct Config {
     /// replace them when newer. Else only the files the folder lacks come
     /// in.
     pub reinstall: bool,
+    /// Whether a song new to the library names its folder after its charts
+    /// (as the BeMusicSeeker fork does: [`Config::folder_name_format`]; a
+    /// folder the archive wraps everything in left out). Else after the
+    /// song's title or the archive, as it has been.
+    pub folder_naming: bool,
+    /// How such a folder is named: `%ARTIST%` and `%TITLE%`, what the
+    /// charts' artists and titles share.
+    pub folder_name_format: String,
+    /// Such a folder's name has only characters Shift_JIS has (LR2 on
+    /// Windows).
+    pub sjis_only: bool,
 }
 
 /// The [`Config::sources`] that are third parties' copies.
@@ -187,6 +198,9 @@ impl Default for Config {
             downloads: ".bmseeker".into(),
             min_coverage: 0.99,
             reinstall: false,
+            folder_naming: false,
+            folder_name_format: crate::naming::DEFAULT_FORMAT.into(),
+            sjis_only: false,
         }
     }
 }

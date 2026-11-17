@@ -93,6 +93,7 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
         } => {
             let req = bmseeker::install::Request {
                 reinstall: again.reinstall || r.config().reinstall,
+                naming: install::Naming::of(r.config(), Default::default()),
                 ..Default::default()
             };
             let lib = &mut scan(&library, &r.config().downloads);
