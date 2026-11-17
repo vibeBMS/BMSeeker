@@ -13,10 +13,11 @@ rm -rf "$out"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 cp web/www/* "$out/"
-wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" \
+wasm-bindgen --target web --no-typescript --remove-name-section --remove-producers-section \
+  --out-dir "$out/pkg" \
   "$target/wasm32-unknown-unknown/web/bmseeker_web.wasm"
 if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -O3 -o "$out/pkg/bmseeker_web_bg.wasm" "$out/pkg/bmseeker_web_bg.wasm"
+  wasm-opt -Os -o "$out/pkg/bmseeker_web_bg.wasm" "$out/pkg/bmseeker_web_bg.wasm"
 fi
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/"
 # (as `mygo build -platform web` builds: production, no inspector)

@@ -117,7 +117,7 @@ func (a *app) libraryView(c *ui.Context) {
 				a.job("Zipping", func() error {
 					n, err := await(p)
 					if err == nil {
-						a.say("zip: %.1f MB", n.Float()/1e6)
+						a.say("zip downloaded: %.0f KB", n.Float()/1e3)
 					}
 					return err
 				})
