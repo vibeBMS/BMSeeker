@@ -379,7 +379,7 @@ impl Sink for Into<'_> {
         self.out.push(m);
     }
     fn drop_partial(&mut self, rel: &Path) {
-        self.store.remove(&self.dest.join(rel));
+        let _ = self.store.remove(&self.dest.join(rel));
     }
 }
 
@@ -387,8 +387,9 @@ impl Sink for Into<'_> {
 /// folder `dest` of `store`, at most `budget` bytes in all. An archive
 /// holding no chart but archives (a shared folder downloaded as a zip of
 /// the song's archives): each of those unpacked into a folder of its name
-/// beside it, then removed. Returns the files written. What it wrote before
-/// it failed stays (the caller removes the folder).
+/// beside it, then removed (one that cannot be unpacked, but for being too
+/// large, is kept as it is). Returns the files written. What it wrote
+/// before it failed stays (the caller removes the folder).
 pub fn unpack(
     blob: Blob,
     store: &dyn Store,
@@ -410,21 +411,34 @@ pub fn unpack(
         .collect();
     let mut inner = Vec::new();
     for &i in nested.iter().rev() {
-        let m = out.remove(i);
-        let at = dest.join(&m.rel);
-        let into = m.rel.with_extension("");
-        let (format, r) = reader(Blob::File(at.clone()), store)?;
+        let at = dest.join(&out[i].rel);
+        let into = out[i].rel.with_extension("");
         let mut sink = Into {
             store,
             dest: &dest.join(&into),
             out: Vec::new(),
         };
-        members(r, format, budget, &mut left, &mut sink)?;
-        inner.extend(sink.out.into_iter().map(|n| Member {
-            rel: into.join(n.rel),
-            ..n
-        }));
-        store.remove(&at);
+        let was = left;
+        let read = reader(Blob::File(at.clone()), store)
+            .and_then(|(format, r)| members(r, format, budget, &mut left, &mut sink));
+        match read {
+            Ok(()) => {
+                // (it goes: what it took is free again)
+                left += out.remove(i).size;
+                let _ = store.remove(&at);
+                inner.extend(sink.out.into_iter().map(|n| Member {
+                    rel: into.join(n.rel),
+                    ..n
+                }));
+            }
+            Err(e) if e.ends_with(&too_large(budget)) => return Err(e),
+            Err(_) => {
+                for n in &sink.out {
+                    let _ = store.remove(&sink.dest.join(&n.rel));
+                }
+                left = was;
+            }
+        }
     }
     out.extend(inner);
     Ok(out)
@@ -529,6 +543,30 @@ mod tests {
         let e = unpack_within(RAR.to_vec(), 1 << 10, |p, _| got.push(p)).unwrap_err();
         assert!(e.contains("larger than"), "{e}");
         assert_eq!(got, [PathBuf::from("a.bms")]);
+    }
+
+    /// A solid RAR5 of `x:y` (a name no folder can hold), `a.bms` and
+    /// `b.bms`, in that order.
+    const SOLID: [u8; 165] = [
+        82, 97, 114, 33, 26, 7, 1, 0, 32, 182, 250, 17, 10, 1, 5, 6, 4, 5, 1, 1, 128, 128, 0, 101,
+        150, 61, 137, 21, 2, 2, 166, 0, 4, 172, 2, 164, 131, 2, 208, 78, 226, 211, 128, 29, 1, 3,
+        120, 58, 121, 195, 186, 35, 35, 0, 35, 250, 51, 221, 226, 168, 94, 74, 208, 112, 65, 209,
+        225, 92, 17, 16, 65, 255, 241, 117, 120, 183, 136, 132, 239, 166, 115, 153, 167, 105, 133,
+        217, 16, 90, 239, 150, 192, 23, 2, 2, 136, 0, 4, 137, 0, 164, 131, 2, 66, 225, 166, 202,
+        192, 29, 1, 5, 97, 46, 98, 109, 115, 70, 25, 5, 234, 18, 24, 243, 192, 176, 75, 146, 187,
+        23, 2, 2, 134, 0, 4, 146, 0, 164, 131, 2, 120, 1, 127, 83, 192, 29, 1, 5, 98, 46, 98, 109,
+        115, 68, 29, 3, 201, 240, 184, 29, 119, 86, 81, 3, 5, 4, 0,
+    ];
+
+    /// A member passed by in a solid RAR (each is unpacked with those
+    /// before it): those after it still come.
+    #[test]
+    fn solid_rar_with_a_member_passed_by() {
+        let mut got = Vec::new();
+        let n = unpack_bytes(SOLID.to_vec(), |p, b| got.push((p, b))).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(got[0], (PathBuf::from("a.bms"), b"#TITLE A\n".to_vec()));
+        assert_eq!(got[1].0, PathBuf::from("b.bms"));
     }
 
     /// A 7z (stored) of `song/a.bms` ("#TITLE A") and `song/01.ogg`
@@ -680,6 +718,42 @@ mod tests {
         let got = unpack(Blob::Bytes(outer), &mem, Path::new("d"), BUDGET).unwrap();
         assert_eq!(got.len(), 2);
         assert!(mem.get(Path::new("d/Song_bga.zip")).is_some());
+    }
+
+    /// An archive in an archive that is none (or cannot be read) stays as
+    /// it is; one unpacked no longer counts against the budget.
+    #[test]
+    fn archives_in_an_archive_that_are_not() {
+        use crate::fs::Mem;
+        let inner = zip(&[("Song/song.bms", b"#TITLE A")]);
+        let outer = zip(&[("Song.zip", &inner), ("notes.zip", b"not a zip")]);
+        let mem = Mem::default();
+        let got = unpack(Blob::Bytes(outer), &mem, Path::new("d"), BUDGET).unwrap();
+        let rels: Vec<PathBuf> = sorted(got).into_iter().map(|m| m.rel).collect();
+        assert_eq!(
+            rels,
+            [PathBuf::from("Song/Song/song.bms"), "notes.zip".into()]
+        );
+        assert_eq!(mem.get(Path::new("d/notes.zip")).unwrap().0, b"not a zip");
+        // two of 40 KiB (that do not compress) in 130 KiB: the second fits
+        // once the first is gone
+        let noise = |seed: u32| -> Vec<u8> {
+            let next = |x: &mut u32, _| {
+                *x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Some((*x >> 24) as u8)
+            };
+            (0..40 << 10).scan(seed, next).collect()
+        };
+        let a = zip(&[("a.bin", &noise(1))]);
+        let b = zip(&[("b.bin", &noise(2))]);
+        let outer = zip(&[("a.zip", &a), ("b.zip", &b)]);
+        let got = unpack(
+            Blob::Bytes(outer),
+            &Mem::default(),
+            Path::new("d"),
+            130 << 10,
+        );
+        assert_eq!(got.unwrap().len(), 2);
     }
 
     #[test]

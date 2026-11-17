@@ -163,7 +163,7 @@ pub fn place_waiting(fs: &dyn Fs, downloads: &Path, lib: &mut Library) -> Vec<Pa
             continue;
         }
         let at = match locate(fs, &e.path, lib, false, Rules::default()) {
-            Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir),
+            Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir).ok().flatten(),
             _ => None,
         };
         if let Some(at) = at {

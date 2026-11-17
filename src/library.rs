@@ -8,9 +8,9 @@
 
 use crate::chart::ChartInfo;
 use crate::fs::{file_name, Fs};
-use crate::placement::{class_of, is_chart, key, rel, song_folders_except, Class, FolderInfo};
+use crate::placement::{is_chart, rel, song_folders_except, Class, Folder, Keys, Names};
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A chart a player knows it has: where, its hashes (hex; either may be
@@ -39,40 +39,54 @@ pub struct Library {
 
 #[derive(Default)]
 struct Songs {
-    /// (song's folder, its files by their path in it), by path.
-    list: Vec<(PathBuf, Vec<String>)>,
-    /// A sound file's key: the folders (in `list`) holding one.
-    by_sound: HashMap<String, Vec<usize>>,
+    /// The songs' folders, by path.
+    list: Vec<Song>,
     /// A folder's place in `list`.
     at: HashMap<PathBuf, usize>,
+    /// The numbers of the files' keys.
+    names: Names,
+    /// A sound file's key (its number): the folders (places in `list`)
+    /// holding one.
+    by_sound: HashMap<u32, Vec<usize>>,
+    /// Files come in where there is no song's folder (yet): a chart coming
+    /// in above them makes them its song's.
+    loose: Vec<PathBuf>,
+}
+
+struct Song {
+    dir: PathBuf,
+    /// Its files by their path in it, sorted.
+    files: Vec<String>,
+    /// The charts right in it, by name, sorted.
+    charts: Vec<String>,
+    keys: Keys,
 }
 
 impl Songs {
-    fn index(&mut self, i: usize, file: &str) {
-        let (Some(Class::Audio), Some(Ok(k))) = (class_of(file), key(file)) else {
-            return;
-        };
-        let at = self.by_sound.entry(k).or_default();
-        if !at.contains(&i) {
-            at.push(i);
-        }
-    }
-
     /// The song's folder `dir` holds `files` (its paths in it).
     fn merge(&mut self, dir: &Path, files: impl IntoIterator<Item = String>) {
-        let i = match self.at.get(dir) {
-            Some(i) => *i,
-            None => {
-                self.list.push((dir.to_path_buf(), Vec::new()));
-                self.at.insert(dir.to_path_buf(), self.list.len() - 1);
-                self.list.len() - 1
-            }
-        };
+        let i = *self.at.entry(dir.to_path_buf()).or_insert_with(|| {
+            self.list.push(Song {
+                dir: dir.to_path_buf(),
+                files: Vec::new(),
+                charts: Vec::new(),
+                keys: Keys::default(),
+            });
+            self.list.len() - 1
+        });
+        let song = &mut self.list[i];
         for f in files {
-            self.index(i, &f);
-            if !self.list[i].1.contains(&f) {
-                self.list[i].1.push(f);
+            let Err(at) = song.files.binary_search(&f) else {
+                continue;
+            };
+            if let Some((Class::Audio, k)) = song.keys.add(&self.names, &f) {
+                self.by_sound.entry(k).or_default().push(i);
             }
+            if !f.contains('/') && is_chart(Path::new(&f)) {
+                let c = song.charts.binary_search(&f).unwrap_or_else(|c| c);
+                song.charts.insert(c, f.clone());
+            }
+            song.files.insert(at, f);
         }
     }
 }
@@ -200,7 +214,7 @@ impl Library {
 
     /// `file` is in the library now (moved there; `md5`: a chart's): the
     /// song's folder it is in holds it (a chart in a folder that was none:
-    /// a song's of its own).
+    /// a song's of its own, with the files that came below it before).
     pub fn add(&mut self, file: &Path, md5: Option<&str>) {
         let Some(dir) = file.parent() else {
             return;
@@ -223,8 +237,15 @@ impl Library {
             .map(|d| d.to_path_buf());
         match song {
             Some(d) if d == dir || !is_chart(file) => s.merge(&d, [rel(file, &d)]),
-            _ if is_chart(file) => s.merge(dir, [file_name(file)]),
-            _ => {}
+            _ if is_chart(file) => {
+                let (below, loose) = std::mem::take(&mut s.loose)
+                    .into_iter()
+                    .partition(|f: &PathBuf| f.starts_with(dir));
+                s.loose = loose;
+                let files = below.iter().map(|f| rel(f, dir));
+                s.merge(dir, std::iter::once(file_name(file)).chain(files));
+            }
+            _ => s.loose.push(file.to_path_buf()),
         }
     }
 
@@ -251,7 +272,7 @@ impl Library {
     /// a song's folder).
     pub fn files(&self, fs: &dyn Fs, dir: &Path) -> Option<&[String]> {
         let s = self.songs(fs);
-        s.at.get(dir).map(|i| s.list[*i].1.as_slice())
+        s.at.get(dir).map(|i| s.list[*i].files.as_slice())
     }
 
     /// The charts below `dir` (a song's folders there): those given or read
@@ -259,8 +280,8 @@ impl Library {
     pub fn charts_below(&self, fs: &dyn Fs, dir: &Path) -> Vec<ChartInfo> {
         let s = self.songs(fs);
         let mut out = Vec::new();
-        for (d, files) in s.list.iter().filter(|(d, _)| d.starts_with(dir)) {
-            out.extend(self.charts_in(fs, d, files));
+        for song in s.list.iter().filter(|s| s.dir.starts_with(dir)) {
+            out.extend(self.charts_in(fs, &song.dir, &song.charts, ChartInfo::clone));
         }
         out
     }
@@ -291,13 +312,7 @@ impl Library {
         let charts: Vec<PathBuf> = self.songs.get().map_or(Vec::new(), |s| {
             s.list
                 .iter()
-                .flat_map(|(d, files)| {
-                    files
-                        .iter()
-                        .filter(|f| !f.contains('/'))
-                        .map(|f| d.join(f))
-                        .filter(|p| is_chart(p))
-                })
+                .flat_map(|s| s.charts.iter().map(|c| s.dir.join(c)))
                 .collect()
         });
         for c in charts {
@@ -315,54 +330,62 @@ impl Library {
         })
     }
 
+    /// The numbers of the library's files' keys.
+    pub(crate) fn names(&self, fs: &dyn Fs) -> &Names {
+        &self.songs(fs).names
+    }
+
     /// The songs' folders other than `except` holding a sound file of one
-    /// of `sounds` (keys), by path.
-    pub(crate) fn near(
-        &self,
-        fs: &dyn Fs,
-        sounds: &HashSet<String>,
-        except: &Path,
-    ) -> Vec<FolderInfo> {
+    /// of `sounds` (keys' numbers), by path (their charts not read).
+    pub(crate) fn near(&self, fs: &dyn Fs, sounds: &[u32], except: &Path) -> Vec<Folder<'_>> {
         let s = self.songs(fs);
-        let mut at: Vec<usize> = sounds
+        let mut hit = vec![false; s.list.len()];
+        for i in sounds.iter().filter_map(|k| s.by_sound.get(k)).flatten() {
+            hit[*i] = true;
+        }
+        s.list
             .iter()
-            .filter_map(|k| s.by_sound.get(k))
-            .flatten()
-            .copied()
-            .collect();
-        at.sort_unstable();
-        at.dedup();
-        at.into_iter()
-            .map(|i| &s.list[i])
-            .filter(|(d, _)| d != except)
-            .map(|(dir, files)| FolderInfo {
-                dir: dir.clone(),
-                files: files.clone(),
-                charts: Vec::new(),
+            .zip(hit)
+            .filter(|(song, hit)| *hit && song.dir != except)
+            .map(|(song, _)| Folder {
+                dir: &song.dir,
+                keys: &song.keys,
+                titles: &[],
             })
             .collect()
     }
 
-    /// The charts right in the song's folder `dir` holding `files`.
-    fn charts_in(&self, fs: &dyn Fs, dir: &Path, files: &[String]) -> Vec<ChartInfo> {
+    /// What `of` takes from the charts `names` right in the folder `dir`.
+    fn charts_in<T>(
+        &self,
+        fs: &dyn Fs,
+        dir: &Path,
+        names: &[String],
+        of: impl Fn(&ChartInfo) -> T,
+    ) -> Vec<T> {
         let mut known = self.charts.borrow_mut();
-        files
+        names
             .iter()
-            .filter(|n| !n.contains('/'))
-            .map(|n| dir.join(n))
-            .filter(|p| is_chart(p))
-            .filter_map(|p| {
+            .filter_map(|n| {
+                let p = dir.join(n);
                 known
                     .entry(p)
                     .or_insert_with_key(|p| crate::placement::chart_info(fs, p))
-                    .clone()
+                    .as_ref()
+                    .map(&of)
             })
             .collect()
     }
 
-    /// The charts of the folder `f` (those right in it).
-    pub(crate) fn folder_charts(&self, fs: &dyn Fs, f: &FolderInfo) -> Vec<ChartInfo> {
-        self.charts_in(fs, &f.dir, &f.files)
+    /// The titles and artists of the charts right in the song's folder
+    /// `dir`.
+    pub(crate) fn folder_titles(&self, fs: &dyn Fs, dir: &Path) -> Vec<(String, String)> {
+        let s = self.songs(fs);
+        s.at.get(dir).map_or(Vec::new(), |&i| {
+            self.charts_in(fs, dir, &s.list[i].charts, |c| {
+                (c.title.clone(), c.artist.clone())
+            })
+        })
     }
 }
 
@@ -420,6 +443,113 @@ mod tests {
             lib.files(&m, Path::new("bms/New")).unwrap(),
             ["n.bms", "n.ogg"]
         );
+        // a song's sounds before its chart, file by file
+        lib.add(Path::new("bms/Later/sound/01.ogg"), None);
+        lib.add(Path::new("bms/Elsewhere/02.ogg"), None);
+        assert!(lib.files(&m, Path::new("bms/Later")).is_none());
+        lib.add(Path::new("bms/Later/l.bms"), None);
+        assert_eq!(
+            lib.files(&m, Path::new("bms/Later")).unwrap(),
+            ["l.bms", "sound/01.ogg"]
+        );
+    }
+
+    /// A library of 3,000 songs' folders with numbered sounds (`01.wav`
+    /// ...), most of which hold most of a 差分's sounds: the time to walk
+    /// its folders, to read them (walked and indexed), and to place 50
+    /// charts (with a digest of where, to compare). `cargo test --release large_library -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement"]
+    fn large_library() {
+        use crate::fs::Entry;
+        use crate::placement::{locate_by, Rules};
+        use std::hash::{Hash, Hasher};
+        use std::time::Instant;
+        #[derive(Default)]
+        struct Tree {
+            dirs: HashMap<PathBuf, Vec<Entry>>,
+            files: HashMap<PathBuf, Vec<u8>>,
+        }
+        impl Tree {
+            fn put(&mut self, p: PathBuf, body: Vec<u8>) {
+                let mut child = p.clone();
+                let mut is_dir = false;
+                while let Some(dir) = child.parent().map(Path::to_path_buf) {
+                    let e = self.dirs.entry(dir.clone()).or_default();
+                    if e.iter().any(|e| e.path == child) {
+                        break;
+                    }
+                    e.push(Entry {
+                        path: child,
+                        is_dir,
+                    });
+                    (child, is_dir) = (dir, true);
+                }
+                self.files.insert(p, body);
+            }
+        }
+        impl Fs for Tree {
+            fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+                self.files
+                    .get(p)
+                    .cloned()
+                    .ok_or(std::io::ErrorKind::NotFound.into())
+            }
+            fn read_dir(&self, p: &Path) -> std::io::Result<Vec<Entry>> {
+                self.dirs
+                    .get(p)
+                    .cloned()
+                    .ok_or(std::io::ErrorKind::NotFound.into())
+            }
+            fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+            fn stamp(&self, _: &Path) -> Option<(i64, u64)> {
+                None
+            }
+            fn remove(&self, _: &Path) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+        }
+        let mut t = Tree::default();
+        for i in 0..3000 {
+            let d = PathBuf::from(format!("bms/Song {i}"));
+            let chart = format!("#TITLE Song {i}\n#ARTIST Artist {}\n", i % 300);
+            t.put(d.join("song.bms"), chart.into_bytes());
+            for j in 1..=100 + i % 200 {
+                t.put(d.join(format!("{j:02}.wav")), Vec::new());
+            }
+            t.put(d.join(format!("bga/{i}.bmp")), Vec::new());
+            t.put(d.join("bg.png"), Vec::new());
+        }
+        let started = Instant::now();
+        crate::placement::song_folders(&t, Path::new("bms"));
+        let walk = started.elapsed();
+        let started = Instant::now();
+        let lib = Library::new(Path::new("bms"));
+        assert!(lib.files(&t, Path::new("bms/Song 0")).is_some());
+        let read = started.elapsed();
+        let charts: Vec<ChartInfo> = (0..50)
+            .map(|c| ChartInfo {
+                title: format!("Song {} [ANOTHER]", c * 60),
+                artist: format!("Artist {} / obj: x", c * 60 % 300),
+                sounds: (1..=80 + c * 3).map(|j| format!("{j:02}.wav")).collect(),
+                images: vec![format!("bga/{}.bmp", c * 60)],
+                stagefile: "bg.png".into(),
+                ..Default::default()
+            })
+            .collect();
+        let started = Instant::now();
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        for c in &charts {
+            let r = locate_by(&t, c, &[], Path::new("dl"), &lib, Rules::default());
+            format!("{r:?}").hash(&mut digest);
+        }
+        let placed = started.elapsed();
+        println!(
+            "walked {walk:?}, read {read:?}, placed 50 in {placed:?}, digest {:016x}",
+            digest.finish()
+        );
     }
 
     /// A player's records stand for the charts it cannot read (a web
@@ -439,13 +569,13 @@ mod tests {
             fn read_dir(&self, p: &Path) -> std::io::Result<Vec<crate::fs::Entry>> {
                 self.0.read_dir(p)
             }
-            fn rename(&self, from: &Path, to: &Path) -> bool {
+            fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
                 self.0.rename(from, to)
             }
             fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
                 self.0.stamp(p)
             }
-            fn remove(&self, p: &Path) -> bool {
+            fn remove(&self, p: &Path) -> std::io::Result<()> {
                 self.0.remove(p)
             }
         }

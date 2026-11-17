@@ -3,7 +3,7 @@
 //! `placement`), as [`install::take`](crate::install::take) does with a
 //! song's download. On any [`Store`] (a disk, a player's files).
 
-use crate::fs::{copy, file_name, Store};
+use crate::fs::{file_name, Store};
 use crate::install::plan::{taken, Outcome, Request};
 use crate::install::Done;
 use crate::library::Library;
@@ -105,7 +105,9 @@ pub fn unpack_into(
         return unpack(Blob::File(file.to_path_buf()), store, dest, BUDGET).map(|m| m.len());
     }
     let to = dest.join(safe_rel(name).unwrap_or_else(|| PathBuf::from("download")));
-    copy(store, file, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    store
+        .copy(file, &to)
+        .map_err(|e| format!("{}: {e}", to.display()))?;
     Ok(1)
 }
 

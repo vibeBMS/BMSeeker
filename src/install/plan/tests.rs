@@ -1,5 +1,6 @@
 use super::*;
 use crate::fs::Mem;
+use std::io;
 
 /// A zip of `files` (name, contents), each of the start of `year`.
 fn zip(files: &[(&str, &str)], year: u16) -> Vec<u8> {
@@ -221,7 +222,7 @@ fn owned_skipped_or_reinstalled() {
     let done = take_zip(&m, &files, &r, &mut l);
     assert!(matches!(&done[..], [Done::Added(_, 3)]), "{done:?}");
     // its folder changed since: a file gone, another of its own
-    m.remove(Path::new("bms/Song/Song/bg.png"));
+    m.remove(Path::new("bms/Song/Song/bg.png")).unwrap();
     m.put(Path::new("bms/Song/Song/sound/01.ogg"), b"mine", 1000);
     let done = take_zip(&m, &files, &r, &mut lib(&m));
     assert!(
@@ -403,4 +404,124 @@ fn folders_named_after_their_charts() {
     );
     assert!(text(&m, "bms/Old/a.bms").is_some() && text(&m, "bms/Old/sound/a.ogg").is_some());
     no_stage(&m);
+}
+
+/// A 差分 bringing sounds its song's folder lacked: a chart waiting for
+/// them is placed too.
+#[test]
+fn a_diffs_sounds_place_a_waiting_chart() {
+    let song = "#TITLE Song\n#ARTIST alpha\n#WAV01 01.wav\n";
+    let two = "#WAV01 01.wav\n#WAV02 02.wav\n";
+    let m = store(&[
+        ("bms/Song/song.bms", song),
+        ("bms/Song/01.ogg", "x"),
+        (
+            "dl/w.bms",
+            &format!("#TITLE Song [W]\n#ARTIST alpha\n{two}"),
+        ),
+    ]);
+    let diff = format!("#TITLE Song [D]\n#ARTIST alpha\n{two}");
+    let files = [("d.bms", diff.as_str()), ("02.ogg", "y")];
+    let done = take_zip(&m, &files, &req(Role::Diff), &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Placed(d), Done::Placed(w)]
+            if d == Path::new("bms/Song/d.bms") && w == Path::new("bms/Song/w.bms")),
+        "{done:?}"
+    );
+    no_stage(&m);
+}
+
+/// A store whose moves (and new files) fail where `fails` says (a full
+/// disk, a file in use).
+struct Failing {
+    mem: Mem,
+    fails: fn(&Path, &Path) -> bool,
+}
+
+impl Fs for Failing {
+    fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+        self.mem.read(p)
+    }
+    fn read_dir(&self, p: &Path) -> io::Result<Vec<crate::fs::Entry>> {
+        self.mem.read_dir(p)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        if (self.fails)(from, to) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.mem.rename(from, to)
+    }
+    fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
+        self.mem.stamp(p)
+    }
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        self.mem.remove(p)
+    }
+}
+
+impl Store for Failing {
+    fn create(&self, p: &Path, mtime: Option<i64>) -> io::Result<Box<dyn Write + '_>> {
+        if (self.fails)(p, p) {
+            return Err(io::ErrorKind::StorageFull.into());
+        }
+        self.mem.create(p, mtime)
+    }
+    fn remove_dir(&self, p: &Path) {
+        self.mem.remove_dir(p)
+    }
+}
+
+/// A song's files that cannot all come in (one cannot be
+/// written; one there cannot be set aside) leave its folder as it was.
+#[test]
+fn a_failed_move_keeps_the_song() {
+    let cases: [fn(&Path, &Path) -> bool; 2] = [
+        |_, to| to.to_string_lossy().contains("locked"),
+        |from, _| from == Path::new("bms/Song/01.ogg"),
+    ];
+    for fails in cases {
+        let mem = store(&[
+            ("bms/Song/song.bms", "old"),
+            ("bms/Song/01.ogg", "old"),
+            ("dl/s/song.bms", "new"),
+            ("dl/s/01.ogg", "new"),
+            ("dl/s/locked.ogg", "new"),
+        ]);
+        let fs = Failing { mem, fails };
+        let moves = ["song.bms", "01.ogg", "locked.ogg"]
+            .map(|n| (Path::new("dl/s").join(n), Path::new("bms/Song").join(n)));
+        let item = Item {
+            outcome: Outcome::New("bms/Song".into()),
+            moves: moves.to_vec(),
+        };
+        let mut lib = Library::scan(&fs, Path::new("bms"));
+        let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
+        assert!(matches!(&done[..], [Done::Failed(_)]), "{done:?}");
+        let left: Vec<PathBuf> = fs.mem.0.lock().unwrap().keys().cloned().collect();
+        let song: Vec<&PathBuf> = left.iter().filter(|p| p.starts_with("bms")).collect();
+        assert_eq!(song, ["bms/Song/01.ogg", "bms/Song/song.bms"]);
+        assert_eq!(text(&fs.mem, "bms/Song/song.bms").as_deref(), Some("old"));
+        assert_eq!(text(&fs.mem, "bms/Song/01.ogg").as_deref(), Some("old"));
+    }
+}
+
+/// A newer file that cannot take the place of the one there (smart
+/// overwrite) leaves it.
+#[test]
+fn a_failed_overwrite_keeps_the_file() {
+    let mem = store(&[("bms/Song/song.bms", SONG), ("bms/Song/01.ogg", "old")]);
+    mem.put(Path::new("dl/s/01.ogg"), b"new", 2000);
+    let fs = Failing {
+        mem,
+        fails: |from, _| from.starts_with("dl"),
+    };
+    let item = Item {
+        outcome: Outcome::Into("bms/Song".into()),
+        moves: vec![("dl/s/01.ogg".into(), "bms/Song/01.ogg".into())],
+    };
+    let mut lib = Library::scan(&fs, Path::new("bms"));
+    let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
+    assert!(matches!(&done[..], [Done::Failed(_)]), "{done:?}");
+    assert_eq!(text(&fs.mem, "bms/Song/01.ogg").as_deref(), Some("old"));
+    assert!(text(&fs.mem, "bms/Song/.01.ogg.old").is_none());
 }
