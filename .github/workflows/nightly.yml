@@ -1,0 +1,123 @@
+name: Nightly
+
+# The "nightly" prerelease: main's latest build (build.yml), each file as it
+# is, and the web site on GitHub Pages, both with the version
+# <version>-nightly.<run>+<commit> (tools/ci_version.sh). A build that failed
+# keeps its previous file; the notes say which files this commit brought.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "gui/**"
+      - "web/**"
+      - "Cargo.*"
+      - "tools/**"
+      - ".github/workflows/nightly.yml"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # a newer push's builds cancel an older one's
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: nightly
+    concurrency:
+      group: nightly-build
+      cancel-in-progress: true
+
+  # main -> the site root (https://vibebms.github.io/BMSeeker/, beside
+  # vibeBMS's /vibe/)
+  pages:
+    needs: build
+    if: always() && needs.build.result != 'cancelled' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # one publish after another, none stopped half way
+    concurrency:
+      group: web-pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: bmseeker-web
+      - run: unzip -q bmseeker-web.zip -d site
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          commit_message: "web build ${{ github.sha }}"
+
+  release:
+    name: nightly release
+    needs: build
+    if: always() && needs.build.result != 'cancelled' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # one release after another, none stopped half way (release.yml's
+    # writes latest.json and builds.json here too); a newer push's waits
+    # and publishes after
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      # the version the builds were given
+      - run: tools/ci_version.sh
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bmseeker-*
+          path: out
+          merge-multiple: true
+      - run: tools/release_manifests.sh out
+      - name: release
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          # only the branch's head is published: a newer push has its own run,
+          # and GitHub lets this token point the tag only at a branch's head
+          head() { gh api "repos/$GH_REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha; }
+          if [ "$(head)" != "$SHA" ]; then
+            echo "$GITHUB_REF_NAME has moved on from ${SHA:0:7}; its own run publishes it"
+            exit 0
+          fi
+          # the tag follows the latest commit
+          if ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$SHA" -F force=true >/dev/null \
+            && ! gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$SHA" >/dev/null; then
+            [ "$(head)" != "$SHA" ] && { echo "$GITHUB_REF_NAME moved on meanwhile"; exit 0; }
+            exit 1
+          fi
+          # shellcheck disable=SC2016 # Markdown's backquotes
+          files="$(cd out && printf '`%s` ' *)"
+          notes="$(
+            echo "The latest build of \`${GITHUB_REF_NAME}\`: version $BMSEEKER_VERSION ($(date -u '+%Y-%m-%d %H:%M UTC'))."
+            echo
+            echo "Files from this commit: $files"
+            echo
+            echo "- \`bmseeker-*\` is the command-line tool, \`bmseeker-gui-*\` the window (with the tool inside it)."
+            echo "- Linux / macOS: \`chmod +x bmseeker-*\`; on macOS also \`xattr -d com.apple.quarantine bmseeker-*\`."
+            echo "  The macOS files are universal (Apple silicon and Intel). Linux needs glibc 2.35."
+            echo "- Web: unzip \`bmseeker-web.zip\` and serve the folder over HTTP(S), or use https://vibebms.github.io/BMSeeker/."
+          )"
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --prerelease --title "Nightly" --notes "$notes" --target "$SHA"
+          else
+            gh release create nightly --prerelease --title "Nightly" --notes "$notes" --target "$SHA"
+          fi
+          gh release upload nightly out/* --clobber
+          # files no build makes any more; a failed build's stay (latest.json
+          # keeps their entries)
+          keep="$(ls out; jq -r '.channels.nightly.files | keys[]' out/latest.json; echo bmseeker-web.zip)"
+          gh release view nightly --json assets --jq '.assets[].name' | while read -r a; do
+            grep -qxF "$a" <<< "$keep" || gh release delete-asset nightly "$a" --yes
+          done

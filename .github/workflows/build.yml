@@ -1,0 +1,127 @@
+name: Build
+
+# The files a release has, for the nightly (nightly.yml) and the releases
+# (release.yml), each as an artifact named bmseeker-<what> holding the files
+# by their names in the release: the CLI and the window (with the CLI inside
+# it) per system, and the web site as a zip. Versions are tools/ci_version.sh's
+# for the channel.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: nightly, or stable for a release
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: the oldest runners (glibc 2.35: Ubuntu 22.04, Debian 12 and
+          # newer), as vibeBMS's
+          - { name: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, goarch: amd64 }
+          - { name: linux-arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, goarch: arm64 }
+          - { name: windows-x64, os: windows-latest, target: x86_64-pc-windows-msvc, goarch: amd64, exe: .exe }
+          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, goarch: arm64, exe: .exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.os }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: gui/go.mod
+          cache-dependency-path: gui/go.sum
+      # after the cache step, whose key reads Cargo.toml
+      - run: tools/ci_version.sh
+        shell: bash
+        env:
+          BMSEEKER_CHANNEL: ${{ inputs.channel }}
+      - run: gui/build.sh
+        shell: bash
+        env:
+          CARGO_TARGET: ${{ matrix.target }}
+          GOARCH: ${{ matrix.goarch }}
+      - name: files
+        shell: bash
+        run: |
+          mkdir dist
+          for f in bmseeker bmseeker-gui; do
+            cp "target/${{ matrix.target }}/release/$f${{ matrix.exe }}" "dist/$f-${{ matrix.name }}${{ matrix.exe }}"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bmseeker-${{ matrix.name }}
+          path: dist/*
+
+  # both architectures on one runner (x86_64 cross-built on the arm64 one),
+  # each executable universal: macOS runners are few
+  macos:
+    name: build macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: gui/go.mod
+          cache-dependency-path: gui/go.sum
+      - run: tools/ci_version.sh
+        env:
+          BMSEEKER_CHANNEL: ${{ inputs.channel }}
+      - run: |
+          CARGO_TARGET=aarch64-apple-darwin GOARCH=arm64 gui/build.sh
+          CARGO_TARGET=x86_64-apple-darwin GOARCH=amd64 gui/build.sh
+      - name: files
+        run: |
+          mkdir dist
+          for f in bmseeker bmseeker-gui; do
+            lipo -create -output "dist/$f-macos-universal" \
+              "target/aarch64-apple-darwin/release/$f" "target/x86_64-apple-darwin/release/$f"
+            lipo -info "dist/$f-macos-universal"
+            codesign --force -s - "dist/$f-macos-universal"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bmseeker-macos-universal
+          path: dist/*
+
+  web:
+    name: build web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: gui/go.mod
+          cache-dependency-path: gui/go.sum
+      - run: tools/ci_version.sh
+        env:
+          BMSEEKER_CHANNEL: ${{ inputs.channel }}
+      - run: cargo install wasm-bindgen-cli --locked --version "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)"
+      - run: web/build.sh
+      - run: cd web/dist && zip -qr ../../bmseeker-web.zip .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bmseeker-web
+          path: bmseeker-web.zip
