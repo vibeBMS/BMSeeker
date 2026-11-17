@@ -33,7 +33,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"
 encoding_rs = "0.8"
-md-5 = "0.10"
+md-5 = "0.11"
 sha2 = "0.10"
 url = "2"
 web-time = "1"
