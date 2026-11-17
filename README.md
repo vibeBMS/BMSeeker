@@ -165,6 +165,24 @@ folder on first use (`$BMSEEKER_CLI` if set; a development build without it uses
 Build: `gui/build.sh` (builds the CLI with `cargo build --release --features cli` into `gui/bin/`, then `go build`;
 Go 1.27+).
 
+## In a web page
+
+The same window runs in a browser at <https://vibebms.github.io/BMSeeker/>: the GUI compiled to `js/wasm`, the CLI's
+commands compiled to wasm (`web/`, the crate `bmseeker-web`) and run in a worker. Settings › Where songs go:
+
+- **vibeBMS web library (this browser)**: the library of [vibeBMS](https://vibebms.github.io/vibe/)'s web build, in
+  the site's storage (OPFS `bms/`; BMSeeker's downloads and scan in `bmseeker/`, nothing else of the player's
+  touched). An open vibeBMS page sees what comes in at once.
+- **A folder on this computer** (Chrome, Edge: `showDirectoryPicker`): LR2's or beatoraja's songs. The folder is
+  remembered, and allowed again with one click on the next visit.
+- **Download as zip**: what comes in gathers in the page, then downloads as one zip.
+
+Downloads go through vibeBMS's CORS proxy (`?proxy=<url>` uses another). A link that gives a page opens in a tab:
+download its file there, then Browser › Import a downloaded file.
+
+Build: `web/build.sh` (into `web/dist`; needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` of the
+version in `Cargo.lock`). Test: `node web/test/e2e.mjs web/dist [<vibeBMS web folder>]` (Playwright, Chromium).
+
 ## Modules
 
 | Module | What it does |
