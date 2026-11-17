@@ -233,8 +233,8 @@ fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, NetError> {
         let Ok(aes) = aes::Aes128::new_from_slice(k) else {
             return;
         };
-        for b in data.chunks_exact_mut(16) {
-            let mut block = <[u8; 16]>::try_from(&*b).expect("16").into();
+        for b in data.as_chunks_mut::<16>().0 {
+            let mut block = (*b).into();
             aes.decrypt_block(&mut block);
             b.copy_from_slice(&block);
         }
@@ -425,8 +425,8 @@ fn mega_attr_name(attr: &[u8], k: &[u8]) -> Option<String> {
     // CBC with a zero IV
     let mut a = attr.to_vec();
     let mut prev = [0u8; 16];
-    for b in a.chunks_exact_mut(16) {
-        let c: [u8; 16] = (&*b).try_into().ok()?;
+    for b in a.as_chunks_mut::<16>().0 {
+        let c = *b;
         let mut block = c.into();
         aes.decrypt_block(&mut block);
         for ((x, d), p) in b.iter_mut().zip(block.iter()).zip(prev) {
@@ -577,14 +577,14 @@ mod tests {
         let enc = |k: &[u8], data: &mut [u8], cbc: bool| {
             let aes = aes::Aes128::new_from_slice(k).unwrap();
             let mut prev = [0u8; 16];
-            for b in data.chunks_exact_mut(16) {
+            for b in data.as_chunks_mut::<16>().0 {
                 if cbc {
                     b.iter_mut().zip(prev).for_each(|(x, p)| *x ^= p);
                 }
-                let mut block = <[u8; 16]>::try_from(&*b).unwrap().into();
+                let mut block = (*b).into();
                 aes.encrypt_block(&mut block);
                 b.copy_from_slice(&block);
-                prev.copy_from_slice(b);
+                prev = *b;
             }
         };
         let b64 = |b: &[u8]| {

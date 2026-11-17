@@ -23,10 +23,10 @@ jobs:
           - { os: macos-latest, name: macos-arm64 }
           - { os: macos-13, name: macos-x86_64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: gui/go.mod
           cache-dependency-path: gui/go.sum
@@ -40,7 +40,7 @@ jobs:
           ext=""; [ "${{ runner.os }}" = Windows ] && ext=.exe
           cp "target/release/bmseeker$ext" "dist/bmseeker-${{ matrix.name }}$ext"
           cp "target/release/bmseeker-gui$ext" "dist/bmseeker-gui-${{ matrix.name }}$ext"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bmseeker-${{ matrix.name }}
           path: dist/*
@@ -50,7 +50,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
