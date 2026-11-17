@@ -42,7 +42,7 @@ web-time = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd"] }
 unrar-rs = { version = "0.16.4", default-features = false, features = ["crypto-rust"] }
-delharc = "0.6.2"
+delharc = "0.8.0"
 # titles and artists compared in NFKC
 unicode-normalization = "0.1"
 # MEGA files are AES-128-CTR encrypted
