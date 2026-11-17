@@ -219,6 +219,9 @@ pub struct Context {
     pub config: Arc<Config>,
     pub hosts: Arc<Hosts>,
     pub progress: Option<Arc<Progress>>,
+    /// A download that fails is a page (a web page's proxy passes archives
+    /// only, refusing anything else).
+    pub failures_are_pages: bool,
 }
 
 impl Context {
@@ -227,6 +230,7 @@ impl Context {
             hosts: Arc::new(Hosts::from_config(&config)),
             config: Arc::new(config),
             progress: None,
+            failures_are_pages: false,
         }
     }
 

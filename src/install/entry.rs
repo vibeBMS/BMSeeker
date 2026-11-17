@@ -2,14 +2,19 @@
 //! downloads it needs, in order ([`entry_steps`]): nothing when the
 //! library has the chart; the separate chart (差分) first when the library
 //! has its song; and a batch of entries ([`Batch`]: a table's missing
-//! charts) gets each file once.
+//! charts) gets each file once. [`EntryJob`] takes them.
 
-use super::{Done, Failure, Role};
+use super::job::{Fed, Install, Installed, Job, Step};
+use super::{got, Done, Failure, Role};
 use crate::chart::md5_key;
-use crate::hosts::{DownloadKey, Want};
+use crate::fs::Store;
+use crate::hosts::{Context, DownloadKey, Want};
 use crate::library::Library;
-use crate::sources::Query;
-use std::collections::HashSet;
+use crate::net::NetError;
+use crate::sources::{Query, Sources};
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// A table's entry: the chart wanted, its song, and their links.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -26,6 +31,22 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The table's entry `e`, its links those `links` knows (its own
+    /// first).
+    pub fn from_table(e: &crate::table::TableEntry, links: &crate::links::Links) -> Entry {
+        Entry {
+            md5: e.md5.clone(),
+            sha256: e.sha256.clone(),
+            want: Want {
+                title: e.title.clone(),
+                artist: e.artist.clone(),
+            },
+            org_md5: e.org_md5.clone(),
+            song: links.song_links(e),
+            chart: links.chart_links(e),
+        }
+    }
+
     /// Whether the library has the chart.
     pub fn owned(&self, lib: &Library) -> bool {
         lib.owns(&self.md5) || lib.owns(&self.sha256)
@@ -166,39 +187,147 @@ impl Batch {
     }
 }
 
-/// An entry's steps ([`entry_steps`]) one after another, each through its
-/// links and the sources ([`super::run`]), into `lib` (what comes
-/// in added to it); `batch`: what the run has had. `each`: what a step
-/// came to, as it comes.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn entry_in(
-    downloads: &std::path::Path,
-    lib: &mut Library,
-    e: &Entry,
-    sources: &crate::sources::Sources,
-    batch: &mut Batch,
-    cx: &crate::hosts::Context,
-    mut each: impl FnMut(&EntryStep, &[Done]),
-) -> Vec<Done> {
-    let mut out = Vec::new();
-    let mut last: Vec<Done> = Vec::new();
-    for step in entry_steps(e, lib) {
-        if cx.cancelled() || !step.due(e, lib, &last) {
-            continue;
+/// An entry's steps ([`entry_steps`], then its add-ons) one after another,
+/// each an [`Install`] into the library (what comes in added to it), the
+/// next one only when it is due ([`EntryStep::due`]). The sources are
+/// asked only with the chart's MD5, and only for the song or, with the
+/// song in the library, for the chart; never for an add-on. With the song
+/// in the library and none of the chart's links bringing it (nor leading
+/// to a page): [`Failure::NoChartLink`].
+pub struct EntryJob {
+    install: Install,
+    e: Entry,
+    /// The steps to come, and whether the sources are asked for each.
+    steps: VecDeque<(EntryStep, bool)>,
+    sources: Sources,
+    have_song: bool,
+    last: Vec<Done>,
+    done: Vec<Done>,
+}
+
+impl EntryJob {
+    /// `e` from its links and then `sources` into `lib` (natively through
+    /// `downloads`).
+    pub fn new(
+        store: Arc<dyn Store + Send + Sync>,
+        downloads: PathBuf,
+        lib: Library,
+        e: Entry,
+        sources: Sources,
+        cx: &Context,
+    ) -> EntryJob {
+        let have_song = has_song(&e, &lib);
+        let md5 = md5_key(&e.md5).is_some();
+        let steps = entry_steps(&e, &lib)
+            .into_iter()
+            .map(|s| {
+                let ask = md5 && (s.role == Role::Song || have_song);
+                (s, ask)
+            })
+            // (nothing to try)
+            .filter(|(s, ask)| *ask || !s.links.is_empty())
+            .collect();
+        let install = Install::new(store, downloads, lib, Query::default(), Vec::new(), cx);
+        EntryJob {
+            install,
+            e,
+            steps,
+            sources,
+            have_song,
+            last: Vec::new(),
+            done: Vec::new(),
         }
-        let q = e.query(step.role);
-        last = super::run(downloads, lib, &q, &step.links, sources, batch, cx);
-        each(&step, &last);
-        out.extend(last.iter().cloned());
     }
-    out
+
+    /// What the run has had (a table's missing charts).
+    pub fn batch(mut self, batch: Batch) -> EntryJob {
+        self.install = self.install.batch(batch);
+        self
+    }
+
+    /// Then each of `links` on its own, as the chart's, while the library
+    /// lacks the chart.
+    pub fn addons(mut self, links: impl IntoIterator<Item = String>) -> EntryJob {
+        let step = |l| EntryStep {
+            links: vec![l],
+            role: Role::Diff,
+            when: When::Missing,
+        };
+        self.steps
+            .extend(links.into_iter().map(|l| (step(l), false)));
+        self
+    }
+
+    /// Whether there is nothing to try.
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// The next step due, else the end.
+    fn next(&mut self) -> Step<Installed> {
+        while let Some((step, ask)) = self.steps.pop_front() {
+            if self.install.cx.cancelled() {
+                if !cancelled(&self.last) {
+                    self.done.push(Done::Failed(NetError::Cancelled.into()));
+                }
+                break;
+            }
+            if !step.due(&self.e, &self.install.lib, &self.last) {
+                continue;
+            }
+            let sources = match ask {
+                true => self.sources.clone(),
+                false => Sources::default(),
+            };
+            self.install
+                .again(self.e.query(step.role), step.links, sources);
+            let s = self.install.next();
+            return self.went(s);
+        }
+        let mut done = std::mem::take(&mut self.done);
+        let page = done.iter().any(|d| matches!(d, Done::Page(_)));
+        if self.have_song && !done.is_empty() && !page && !cancelled(&done) && !got(&done) {
+            done = vec![Done::Failed(Failure::NoChartLink)];
+        }
+        Step::Done(self.install.installed(done))
+    }
+
+    fn went(&mut self, step: Step<Vec<Done>>) -> Step<Installed> {
+        match step {
+            Step::Do(e) => Step::Do(e),
+            Step::Done(done) => {
+                self.done.extend(done.iter().cloned());
+                self.last = done;
+                self.next()
+            }
+        }
+    }
+}
+
+fn cancelled(done: &[Done]) -> bool {
+    done.iter()
+        .any(|d| matches!(d, Done::Failed(f) if f.cancelled()))
+}
+
+impl Job for EntryJob {
+    type Output = Installed;
+    fn start(&mut self) -> Step<Installed> {
+        self.next()
+    }
+    fn feed(&mut self, fed: Fed) -> Step<Installed> {
+        let step = self.install.fed(fed);
+        self.went(step)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fs::Mem;
+    use crate::install::job::tests::Canned;
+    use crate::install::job::{Served, Unserved};
     use crate::install::md5_hex;
+    use crate::testkit::zip;
     use std::path::Path;
 
     const SONG: &str = "#TITLE Song [N]\n#ARTIST alpha\n#WAV01 01.wav\n";
@@ -314,6 +443,225 @@ mod tests {
         other_song.want.title = "Other".into();
         assert!(b.has(&Batch::key(folder, &song)));
         assert!(!b.has(&Batch::key(folder, &other_song.query(Role::Song))));
+    }
+
+    /// A source that finds nothing, keeping whether each query was a
+    /// separate chart's.
+    #[derive(Clone, Default)]
+    struct Asked(Arc<std::sync::Mutex<Vec<bool>>>);
+
+    impl crate::sources::Source for Asked {
+        fn name(&self) -> &'static str {
+            "asked"
+        }
+        fn find(&self, q: &Query) -> crate::net::BoxTask<Vec<String>> {
+            self.0.lock().unwrap().push(q.diff);
+            crate::net::Ready::boxed(Vec::new())
+        }
+    }
+
+    /// `e` (and `addons`) into the library `m` holds, the driver `d`
+    /// serving; what the sources were asked (a separate chart's: true).
+    fn entry_job(
+        m: &Arc<Mem>,
+        e: &Entry,
+        addons: &[&str],
+        cx: &Context,
+        d: &Canned,
+    ) -> (Installed, Vec<bool>) {
+        let asked = Asked::default();
+        let mut sources = Sources::default();
+        sources.push(Box::new(asked.clone()));
+        let lib = Library::scan(&**m, Path::new("bms"));
+        let job = EntryJob::new(m.clone(), "dl".into(), lib, e.clone(), sources, cx);
+        let mut job = job.addons(addons.iter().map(|s| s.to_string()));
+        let out = crate::install::job::run_job(&mut job, d);
+        let asked = asked.0.lock().unwrap().clone();
+        (out, asked)
+    }
+
+    fn served(bytes: Vec<u8>) -> Result<Served, Unserved> {
+        Ok(Served::bytes(bytes, None, None))
+    }
+
+    fn downloads(d: &Canned) -> Vec<String> {
+        d.done.borrow().clone()
+    }
+
+    const X: &str = "#TITLE Another [X]\n#ARTIST alpha\n#WAV01 01.wav\n";
+
+    /// The song not in the library: the song (the sources asked for it),
+    /// then the chart (not asked for it) unless the song brought it; an
+    /// add-on only while the chart is missing.
+    #[test]
+    fn song_then_chart() {
+        let song = zip(&[
+            (
+                "Another/n.bms",
+                "#TITLE Another [N]\n#ARTIST alpha\n#WAV01 01.wav\n",
+            ),
+            ("Another/01.ogg", "x"),
+        ]);
+        let mut e = entry("Another [X]", &["https://e/x.bms"]);
+        e.md5 = md5_hex(X.as_bytes());
+        let (m, _) = library();
+        let m = Arc::new(m);
+        let d = Canned::default();
+        d.file("https://e/song.zip", served(song.clone()));
+        d.file("https://e/x.bms", served(X.into()));
+        let (out, asked) = entry_job(&m, &e, &["https://e/addon.zip"], &Context::default(), &d);
+        assert!(
+            matches!(&out.done[..], [Done::Added(..), Done::Placed(p)]
+                if p.ends_with("Another/x.bms")),
+            "{:?}",
+            out.done
+        );
+        assert!(out.lib.owns(&e.md5) && asked.is_empty());
+        assert_eq!(
+            downloads(&d),
+            ["download https://e/song.zip", "download https://e/x.bms"]
+        );
+        // the song brings the chart: nothing more
+        let (m, _) = library();
+        let both = zip(&[
+            (
+                "Another/n.bms",
+                "#TITLE Another [N]\n#ARTIST alpha\n#WAV01 01.wav\n",
+            ),
+            ("Another/x.bms", X),
+            ("Another/01.ogg", "x"),
+        ]);
+        let d = Canned::default();
+        d.file("https://e/song.zip", served(both));
+        let (out, _) = entry_job(
+            &Arc::new(m),
+            &e,
+            &["https://e/addon.zip"],
+            &Context::default(),
+            &d,
+        );
+        assert!(matches!(&out.done[..], [Done::Added(..)]), "{:?}", out.done);
+        assert_eq!(downloads(&d), ["download https://e/song.zip"]);
+        // none of them comes: the sources asked for the song only, never
+        // for an add-on; the song not in the library is no NoChartLink
+        let (m, _) = library();
+        let d = Canned::default();
+        let (out, asked) = entry_job(
+            &Arc::new(m),
+            &e,
+            &["https://e/addon.zip"],
+            &Context::default(),
+            &d,
+        );
+        assert_eq!(asked, [false]);
+        assert_eq!(downloads(&d).len(), 3);
+        assert!(
+            matches!(
+                &out.done[..],
+                [
+                    Done::Failed(Failure::Net(_)),
+                    Done::Failed(Failure::Net(_)),
+                    Done::Failed(Failure::Net(_))
+                ]
+            ),
+            "{:?}",
+            out.done
+        );
+    }
+
+    /// The song in the library: the chart first (the sources asked for it
+    /// with the chart's MD5 only); none of its links working, nor an
+    /// add-on's: NoChartLink.
+    #[test]
+    fn the_chart_with_its_song_in() {
+        let (m, _) = library();
+        let m = Arc::new(m);
+        let e = entry("Song [X]", &["https://e/x.zip"]);
+        let d = Canned::default();
+        let (out, asked) = entry_job(&m, &e, &["https://e/addon.zip"], &Context::default(), &d);
+        assert_eq!(asked, [true]);
+        assert_eq!(
+            downloads(&d),
+            ["download https://e/x.zip", "download https://e/addon.zip"]
+        );
+        assert!(
+            matches!(&out.done[..], [Done::Failed(Failure::NoChartLink)]),
+            "{:?}",
+            out.done
+        );
+        // no MD5: no source asked; a page stays a page
+        let mut no_md5 = e.clone();
+        no_md5.md5.clear();
+        let d = Canned::default();
+        d.file("https://e/x.zip", served(b"<html>".to_vec()));
+        let (out, asked) = entry_job(&m, &no_md5, &[], &Context::default(), &d);
+        assert!(asked.is_empty());
+        assert!(matches!(&out.done[..], [Done::Page(_)]), "{:?}", out.done);
+        // nothing to try: no step
+        no_md5.chart.clear();
+        no_md5.song.clear();
+        let lib = Library::scan(&*m, Path::new("bms"));
+        let job = EntryJob::new(
+            m.clone(),
+            "dl".into(),
+            lib,
+            no_md5,
+            Sources::default(),
+            &Context::default(),
+        );
+        assert!(job.is_empty());
+    }
+
+    /// The chart waits for its song: the song next, the chart into its
+    /// folder.
+    #[test]
+    fn a_waiting_chart_then_its_song() {
+        let (m, _) = library();
+        let m = Arc::new(m);
+        let zx = "#TITLE Zeta [X]\n#ARTIST omega\n#WAV01 q.wav\n";
+        let mut e = entry("Zeta [X]", &["https://e/zx.bms"]);
+        e.want.artist = "omega".into();
+        e.md5 = md5_hex(zx.as_bytes());
+        // (the song is the library's by a chart the table names)
+        e.org_md5 = vec![md5_hex(SONG.as_bytes())];
+        let song = zip(&[
+            (
+                "Zeta/n.bms",
+                "#TITLE Zeta [N]\n#ARTIST omega\n#WAV01 q.wav\n",
+            ),
+            ("Zeta/q.ogg", "x"),
+        ]);
+        let d = Canned::default();
+        d.file("https://e/zx.bms", served(zx.into()));
+        d.file("https://e/song.zip", served(song));
+        let (out, _) = entry_job(&m, &e, &[], &Context::default(), &d);
+        assert!(
+            matches!(&out.done[..], [Done::Waiting(_), Done::Added(..), Done::Placed(p)]
+                if p.ends_with("Zeta/zx.bms")),
+            "{:?}",
+            out.done
+        );
+        assert!(out.lib.owns(&e.md5));
+    }
+
+    /// A cancel ends it: the steps after are not taken.
+    #[test]
+    fn cancelled_between_steps() {
+        let (m, _) = library();
+        let p = crate::progress::Progress::new();
+        let d = Canned {
+            cancel: Some(p.clone()),
+            ..Default::default()
+        };
+        let e = entry("Another [X]", &["https://e/x.bms"]);
+        let cx = Context::default().with_progress(p);
+        let (out, _) = entry_job(&Arc::new(m), &e, &["https://e/addon.zip"], &cx, &d);
+        assert_eq!(downloads(&d), ["download https://e/song.zip"]);
+        assert!(
+            matches!(&out.done[..], [Done::Failed(f)] if f.cancelled()),
+            "{:?}",
+            out.done
+        );
     }
 
     /// A server on this machine for `files` (path, body), counting the
@@ -435,10 +783,13 @@ mod tests {
         ];
         let mut lib = Library::scan(&Disk, &library);
         let mut batch = Batch::new(entries.iter().map(|e| e.md5.clone()));
-        let cx = crate::hosts::Context::default();
-        let none = crate::sources::Sources::default();
+        let cx = Context::default();
+        let native = crate::hosts::Native::new(&cx);
         for e in &entries {
-            entry_in(&downloads, &mut lib, e, &none, &mut batch, &cx, |_, _| {});
+            let dl = downloads.clone();
+            let job = EntryJob::new(Arc::new(Disk), dl, lib, e.clone(), Sources::default(), &cx);
+            let out = crate::install::job::run_job(&mut job.batch(batch), &native);
+            (lib, batch) = (out.lib, out.batch);
         }
         let mut asked = asked.lock().unwrap().clone();
         asked.sort();

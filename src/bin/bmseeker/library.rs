@@ -236,9 +236,11 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
                 ..Default::default()
             };
             let downloads = library.join(&r.config().downloads);
-            let lib = &mut bmseeker::library::Library::new(&library);
-            let batch = &mut Default::default();
-            let done = install::run(&downloads, lib, &q, &links, &sources, batch, &r.cx);
+            let lib = bmseeker::library::Library::new(&library);
+            let store = std::sync::Arc::new(Disk);
+            let job = install::job::Install::new(store, downloads, lib, q, links, &r.cx);
+            let native = bmseeker::hosts::Native::new(&r.cx);
+            let done = install::job::run_job(&mut job.sources(sources), &native).done;
             for d in &done {
                 r.out
                     .record(done_record(&song.title, d), || done_text(&song.title, d));

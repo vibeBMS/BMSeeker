@@ -309,11 +309,12 @@ fn a_mirror_next() {
 /// (and opened from where its redirects ended), but a cancel is a cancel.
 #[test]
 fn failures_as_pages() {
-    let web = |link: &str, d: &Canned| {
-        let mut j =
-            Acquire::new(link, None, false, "".into(), &Context::default()).failures_are_pages();
-        run_job(&mut j, d)
+    let cx = Context {
+        failures_are_pages: true,
+        ..Default::default()
     };
+    let web =
+        |link: &str, d: &Canned| run_job(&mut Acquire::new(link, None, false, "".into(), &cx), d);
     let d = Canned::default();
     d.file("http://e.test/a", status(404));
     assert!(matches!(web("http://e.test/a", &d), Err(Fetch::Page)));
@@ -446,8 +447,8 @@ fn install(
     let store: Arc<dyn crate::fs::Store + Send + Sync> = m.clone();
     let lib = crate::library::Library::scan(&**m, Path::new("bms"));
     let own = own.iter().map(|s| s.to_string()).collect();
-    let mut job = Install::new(store, "dl".into(), lib, batch, q.clone(), own, sources, cx);
-    run_job(&mut job, d)
+    let job = Install::new(store, "dl".into(), lib, q.clone(), own, cx);
+    run_job(&mut job.sources(sources).batch(batch), d)
 }
 
 fn song_query(md5: &str) -> crate::sources::Query {

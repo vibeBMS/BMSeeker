@@ -11,7 +11,7 @@ pub mod entry;
 pub mod job;
 pub mod plan;
 
-pub use entry::{entry_steps, Batch, Entry, EntryStep, When};
+pub use entry::{entry_steps, Batch, Entry, EntryJob, EntryStep, When};
 pub use plan::{apply, take, Item, Naming, Outcome, Request, Role};
 
 /// What became of one link.
@@ -175,37 +175,6 @@ pub fn place_waiting(fs: &dyn Fs, downloads: &Path, lib: &mut Library) -> Vec<Pa
     out
 }
 
-/// A song (`q.diff`: its separate chart) on a disk from its own links
-/// `own`, in order, then those each of `sources` finds, into `downloads`
-/// and then `lib` (what comes in added to it): a [`job::Install`] run with
-/// the native transport. `batch`: what the run has had (a file had is not
-/// downloaded again).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run(
-    downloads: &Path,
-    lib: &mut Library,
-    q: &crate::sources::Query,
-    own: &[String],
-    sources: &crate::sources::Sources,
-    batch: &mut Batch,
-    cx: &crate::hosts::Context,
-) -> Vec<Done> {
-    let mut job = job::Install::new(
-        std::sync::Arc::new(crate::fs::Disk),
-        downloads.to_path_buf(),
-        std::mem::replace(lib, Library::new(lib.root())),
-        std::mem::take(batch),
-        q.clone(),
-        own.to_vec(),
-        sources.clone(),
-        cx,
-    );
-    let out = job::run_job(&mut job, &crate::hosts::Native::new(cx));
-    *lib = out.lib;
-    *batch = out.batch;
-    out.done
-}
-
 /// Whether the chart `c` is of the song `want`: its title but for the
 /// chart's name, and its artist.
 pub(crate) fn is_song(c: &crate::chart::ChartInfo, want: &crate::hosts::Want) -> bool {
@@ -319,15 +288,12 @@ mod tests {
                     diff: var == "BMSEEKER_DIFF",
                     ..Default::default()
                 };
-                let done = run(
-                    &root.join("downloads"),
-                    &mut Library::new(&root.join("bms")),
-                    &q,
-                    &[l],
-                    &Default::default(),
-                    &mut Batch::default(),
-                    &crate::hosts::Context::default(),
-                );
+                let lib = Library::new(&root.join("bms"));
+                let cx = crate::hosts::Context::default();
+                let store = std::sync::Arc::new(crate::fs::Disk);
+                let mut job =
+                    job::Install::new(store, root.join("downloads"), lib, q, vec![l], &cx);
+                let done = job::run_job(&mut job, &crate::hosts::Native::new(&cx)).done;
                 println!("{var}: {done:?}");
             }
         }

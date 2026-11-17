@@ -11,10 +11,16 @@
 //! other links tried when its file does not come, a server's passing
 //! failure tried again, Google Drive's quota told apart from a page).
 
+use super::{Batch, Done, Failure, Tries};
+use crate::fs::Store;
 use crate::hosts::{Context, Fetch, Link, Resolver, Target, Want};
-use crate::net::{Answer, NetError, Next, Request, Task};
+use crate::library::Library;
+use crate::net::{Answer, BoxTask, NetError, Next, Request, Task};
+use crate::sources::{Query, Sources};
 use crate::unpack::Blob;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Something a job needs done.
@@ -85,6 +91,16 @@ impl From<NetError> for Unserved {
 pub enum Step<T> {
     Do(Effect),
     Done(T),
+}
+
+impl<T> Step<T> {
+    /// The output, once there, as `f` makes it.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Step<U> {
+        match self {
+            Step::Do(e) => Step::Do(e),
+            Step::Done(out) => Step::Done(f(out)),
+        }
+    }
 }
 
 /// A computation that needs effects done.
@@ -159,9 +175,6 @@ pub struct Acquire {
     want: Option<Want>,
     any: bool,
     slot: PathBuf,
-    /// A download's failure is a page (a web page's proxy passes archives
-    /// only, refusing anything else).
-    pages: bool,
     r: Resolver,
     target: Option<Target>,
     moves: u8,
@@ -181,18 +194,11 @@ impl Acquire {
             want,
             any,
             slot,
-            pages: false,
             target: None,
             moves: 0,
             waits: 0,
             plain: false,
         }
-    }
-
-    /// A download that fails is a page (a web page's proxy).
-    pub fn failures_are_pages(mut self) -> Acquire {
-        self.pages = true;
-        self
     }
 
     /// The file `url` itself (a mirror's), not through the hosts: whatever
@@ -263,7 +269,7 @@ impl Acquire {
             return Step::Do(Effect::Sleep(Duration::from_secs(WAITS[self.waits - 1])));
         }
         let t = self.target.take().expect("a target");
-        if self.pages && u.error != NetError::Cancelled {
+        if self.cx.failures_are_pages && u.error != NetError::Cancelled {
             let moved = u.at.filter(|a| *a != t.url);
             return self.failed(Fetch::Page, moved);
         }
@@ -345,7 +351,6 @@ pub struct Files {
     cx: Context,
     links: Vec<FileLink>,
     slots: PathBuf,
-    pages: bool,
     got: Vec<Got>,
     current: Option<Acquire>,
 }
@@ -357,16 +362,9 @@ impl Files {
             cx: cx.clone(),
             links,
             slots,
-            pages: false,
             got: Vec::new(),
             current: None,
         }
-    }
-
-    /// A download that fails is a page ([`Acquire::failures_are_pages`]).
-    pub fn failures_are_pages(mut self) -> Files {
-        self.pages = true;
-        self
     }
 
     /// Where the `i`th file goes (natively).
@@ -387,9 +385,6 @@ impl Files {
             true => Acquire::plain(&link.url, slot, &self.cx),
             false => Acquire::new(&link.url, None, false, slot, &self.cx),
         };
-        if self.pages {
-            a = a.failures_are_pages();
-        }
         let step = a.start();
         self.current = Some(a);
         self.went(step)
@@ -433,9 +428,9 @@ impl Job for Files {
 /// What [`Install`] came to, and the library and batch it was given back
 /// (what came in added).
 pub struct Installed {
-    pub done: Vec<super::Done>,
-    pub lib: crate::library::Library,
-    pub batch: super::Batch,
+    pub done: Vec<Done>,
+    pub lib: Library,
+    pub batch: Batch,
 }
 
 /// A link being tried.
@@ -448,6 +443,14 @@ struct Trying {
     job: PathBuf,
 }
 
+/// What [`Install`] waits for.
+enum Doing {
+    Nothing,
+    /// A source's links.
+    Finding(TaskJob<BoxTask<Vec<String>>>),
+    Trying(Box<Trying>),
+}
+
 /// A song (or its separate chart: `q.diff`) from its own links in order,
 /// then those each source finds (asked one after another, only while
 /// nothing has come in): each link's file ([`Acquire`]; a chart's own link
@@ -456,59 +459,60 @@ struct Trying {
 /// Natively each download passes through a folder of its own in
 /// `downloads` (`.job-…`).
 pub struct Install {
-    store: std::sync::Arc<dyn crate::fs::Store + Send + Sync>,
+    store: Arc<dyn Store + Send + Sync>,
     downloads: PathBuf,
-    lib: Option<crate::library::Library>,
-    batch: Option<super::Batch>,
-    q: crate::sources::Query,
-    sources: crate::sources::Sources,
-    cx: Context,
-    pages: bool,
-    links: std::collections::VecDeque<String>,
+    pub(super) lib: Library,
+    batch: Batch,
+    q: Query,
+    sources: Sources,
+    pub(super) cx: Context,
+    links: VecDeque<String>,
     /// The links in `links` were found by name (what they bring must hold
     /// the chart).
     checked: bool,
     next_source: usize,
-    finding: Option<TaskJob<crate::net::BoxTask<Vec<String>>>>,
-    trying: Option<Trying>,
-    tried: std::collections::HashSet<crate::hosts::DownloadKey>,
-    tries: super::Tries,
+    doing: Doing,
+    tried: HashSet<crate::hosts::DownloadKey>,
+    tries: Tries,
 }
 
 impl Install {
-    #[allow(clippy::too_many_arguments)]
+    /// The song `q` from its own links `own` into `lib` (natively through
+    /// `downloads`); no source asked, nothing had.
     pub fn new(
-        store: std::sync::Arc<dyn crate::fs::Store + Send + Sync>,
+        store: Arc<dyn Store + Send + Sync>,
         downloads: PathBuf,
-        lib: crate::library::Library,
-        batch: super::Batch,
-        q: crate::sources::Query,
+        lib: Library,
+        q: Query,
         own: Vec<String>,
-        sources: crate::sources::Sources,
         cx: &Context,
     ) -> Install {
         Install {
             store,
             downloads,
-            lib: Some(lib),
-            batch: Some(batch),
+            lib,
+            batch: Batch::default(),
             q,
-            sources,
+            sources: Sources::default(),
             cx: cx.clone(),
-            pages: false,
             links: own.into(),
             checked: false,
             next_source: 0,
-            finding: None,
-            trying: None,
-            tried: Default::default(),
-            tries: Default::default(),
+            doing: Doing::Nothing,
+            tried: HashSet::new(),
+            tries: Tries::default(),
         }
     }
 
-    /// A download that fails is a page ([`Acquire::failures_are_pages`]).
-    pub fn failures_are_pages(mut self) -> Install {
-        self.pages = true;
+    /// The sources asked, in order, when its own links bring nothing.
+    pub fn sources(mut self, sources: Sources) -> Install {
+        self.sources = sources;
+        self
+    }
+
+    /// What the run has had (a table's missing charts).
+    pub fn batch(mut self, batch: Batch) -> Install {
+        self.batch = batch;
         self
     }
 
@@ -519,20 +523,34 @@ impl Install {
         self
     }
 
-    fn end(&mut self, done: Vec<super::Done>) -> Step<Installed> {
-        Step::Done(Installed {
+    /// This install's library and batch, for the song `q` from `own` and
+    /// then `sources`.
+    pub(super) fn again(&mut self, q: Query, own: Vec<String>, sources: Sources) {
+        let next = Install::new(
+            self.store.clone(),
+            std::mem::take(&mut self.downloads),
+            std::mem::take(&mut self.lib),
+            q,
+            own,
+            &self.cx,
+        );
+        *self = next.batch(std::mem::take(&mut self.batch)).sources(sources);
+    }
+
+    /// `done`, the library and the batch handed back.
+    pub(super) fn installed(&mut self, done: Vec<Done>) -> Installed {
+        Installed {
             done,
-            lib: self.lib.take().expect("the library"),
-            batch: self.batch.take().expect("the batch"),
-        })
+            lib: std::mem::take(&mut self.lib),
+            batch: std::mem::take(&mut self.batch),
+        }
     }
 
     /// The next link, else the next source's, else the end.
-    fn next(&mut self) -> Step<Installed> {
-        use super::{chart_link, Batch, Done, Failure};
+    pub(super) fn next(&mut self) -> Step<Vec<Done>> {
         loop {
             if self.cx.cancelled() {
-                return self.end(vec![Done::Failed(NetError::Cancelled.into())]);
+                return Step::Done(vec![Done::Failed(NetError::Cancelled.into())]);
             }
             let Some(link) = self.links.pop_front() else {
                 break;
@@ -541,14 +559,14 @@ impl Install {
             if !self.tried.insert(key.clone()) {
                 continue;
             }
-            if self.batch.as_ref().is_some_and(|b| b.has(&key)) {
+            if self.batch.has(&key) {
                 self.tries.record(vec![Done::Failed(Failure::Downloaded)]);
                 continue;
             }
             let check = self.checked && crate::chart::md5_key(&self.q.md5).is_some();
             let job = self.downloads.join(format!(".job-{}", super::unique()));
             self.store.create_dir_all(&job);
-            let chart = chart_link(&link);
+            let chart = super::chart_link(&link);
             let mut acquire = if chart {
                 Acquire::plain(&link, job.join(super::chart_name(&link)), &self.cx)
             } else {
@@ -556,61 +574,54 @@ impl Install {
                 let want = (!self.q.diff).then(|| self.q.want.clone());
                 Acquire::new(&link, want, false, job.join("download"), &self.cx)
             };
-            if self.pages {
-                acquire = acquire.failures_are_pages();
-            }
             let step = acquire.start();
-            self.trying = Some(Trying {
+            let t = Trying {
                 acquire,
                 link,
                 key,
                 check,
                 chart,
                 job,
-            });
-            return self.acquiring(step);
+            };
+            return self.acquiring(Box::new(t), step);
         }
         // the sources' links, one source after another
-        if self.cx.cancelled() {
-            return Step::Done(self.finish());
-        }
-        let Some(source) = self.sources.iter().nth(self.next_source) else {
-            return Step::Done(self.finish());
+        let source = self.sources.iter().nth(self.next_source);
+        let Some(source) = source.filter(|_| !self.cx.cancelled()) else {
+            return Step::Done(std::mem::take(&mut self.tries).end());
         };
         self.next_source += 1;
         self.checked = source.checked();
         let mut find = TaskJob(source.find(&self.q));
         let step = find.start();
-        self.finding = Some(find);
-        self.finding(step)
+        self.finding(find, step)
     }
 
-    fn finish(&mut self) -> Installed {
-        let done = std::mem::take(&mut self.tries).end();
-        match self.end(done) {
-            Step::Done(i) => i,
-            Step::Do(_) => unreachable!(),
-        }
-    }
-
-    fn finding(&mut self, step: Step<Vec<String>>) -> Step<Installed> {
+    fn finding(
+        &mut self,
+        find: TaskJob<BoxTask<Vec<String>>>,
+        step: Step<Vec<String>>,
+    ) -> Step<Vec<Done>> {
         match step {
-            Step::Do(e) => Step::Do(e),
+            Step::Do(e) => {
+                self.doing = Doing::Finding(find);
+                Step::Do(e)
+            }
             Step::Done(found) => {
-                self.finding = None;
                 self.links = found.into();
                 self.next()
             }
         }
     }
 
-    fn acquiring(&mut self, step: Step<Result<Got, Fetch>>) -> Step<Installed> {
-        use super::Done;
+    fn acquiring(&mut self, t: Box<Trying>, step: Step<Result<Got, Fetch>>) -> Step<Vec<Done>> {
         let got = match step {
-            Step::Do(e) => return Step::Do(e),
+            Step::Do(e) => {
+                self.doing = Doing::Trying(t);
+                return Step::Do(e);
+            }
             Step::Done(got) => got,
         };
-        let t = self.trying.take().expect("a link");
         let done = match got {
             // a page where a chart was expected
             Ok(g) if t.chart && g.head.trim_ascii_start().starts_with(b"<") => {
@@ -622,22 +633,36 @@ impl Install {
                     true => super::chart_name(&t.link),
                     false => "download".into(),
                 };
-                let batch = self.batch.as_ref().expect("the batch");
                 let mut req = super::request(&self.q, t.check, Some(file), &self.cx.config);
-                req.also = batch.also(&self.q);
-                let lib = self.lib.as_mut().expect("the library");
-                super::take(&*self.store, g.blob, &req, &self.downloads, lib)
+                req.also = self.batch.also(&self.q);
+                super::take(&*self.store, g.blob, &req, &self.downloads, &mut self.lib)
             }
             Err(Fetch::Page) => vec![Done::Page(t.link.clone())],
             Err(Fetch::Failed(e)) => vec![Done::Failed(e.into())],
         };
         self.store.remove_dir(&t.job);
-        if let Some(b) = self.batch.as_mut() {
-            b.tried(t.key, &done);
-        }
+        self.batch.tried(t.key, &done);
         match self.tries.record(done) {
-            Some(done) => self.end(done),
+            Some(done) => Step::Done(done),
             None => self.next(),
+        }
+    }
+
+    /// What the effect asked for came to.
+    pub(super) fn fed(&mut self, fed: Fed) -> Step<Vec<Done>> {
+        match std::mem::replace(&mut self.doing, Doing::Nothing) {
+            Doing::Finding(mut f) => {
+                let step = f.feed(fed);
+                self.finding(f, step)
+            }
+            Doing::Trying(mut t) => {
+                let step = t.acquire.feed(fed);
+                self.acquiring(t, step)
+            }
+            Doing::Nothing => {
+                debug_assert!(false, "fed with nothing asked");
+                self.next()
+            }
         }
     }
 }
@@ -645,20 +670,10 @@ impl Install {
 impl Job for Install {
     type Output = Installed;
     fn start(&mut self) -> Step<Installed> {
-        self.next()
+        self.next().map(|done| self.installed(done))
     }
     fn feed(&mut self, fed: Fed) -> Step<Installed> {
-        if let Some(f) = self.finding.as_mut() {
-            let step = f.feed(fed);
-            return self.finding(step);
-        }
-        match self.trying.as_mut() {
-            Some(t) => {
-                let step = t.acquire.feed(fed);
-                self.acquiring(step)
-            }
-            None => self.next(),
-        }
+        self.fed(fed).map(|done| self.installed(done))
     }
 }
 

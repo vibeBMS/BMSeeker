@@ -4,8 +4,10 @@ use crate::library::{done_record, scan};
 use crate::link::fetch_list;
 use crate::Run;
 use bmseeker::export;
-use bmseeker::hosts::Want;
-use bmseeker::install::{self, Batch, Entry};
+use bmseeker::fs::Disk;
+use bmseeker::hosts::Native;
+use bmseeker::install::job::run_job;
+use bmseeker::install::{self, Batch, Entry, EntryJob};
 use bmseeker::links::Links;
 use bmseeker::net::Client;
 use bmseeker::sources::Sources;
@@ -13,6 +15,7 @@ use bmseeker::table::{fetch_table, DifficultyTable, TableEntry};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum Table {
@@ -191,35 +194,25 @@ fn missing(
     // one batch: each file downloaded once; the charts it wants wait for
     // their songs
     let mut batch = Batch::new(missing.iter().map(|e| e.md5.clone()));
+    let native = Native::new(&r.cx);
     for e in missing {
-        let entry = Entry {
-            md5: e.md5.clone(),
-            sha256: e.sha256.clone(),
-            want: Want {
-                title: e.title.clone(),
-                artist: e.artist.clone(),
-            },
-            // (the song's own charts: where its separate chart goes)
-            org_md5: e.org_md5.clone(),
-            song: links.song_links(e),
-            chart: links.chart_links(e),
-        };
         // an earlier one brought it, or its song (the chart first then)
-        install::entry::entry_in(
-            &downloads,
-            &mut have,
-            &entry,
-            &sources,
-            &mut batch,
+        let entry = Entry::from_table(e, &links);
+        let job = EntryJob::new(
+            Arc::new(Disk),
+            downloads.clone(),
+            have,
+            entry,
+            sources.clone(),
             &r.cx,
-            |_, done| {
-                for d in done {
-                    r.out.record(done_record(&e.title, d), || {
-                        crate::library::done_text(&e.title, d)
-                    });
-                }
-            },
         );
+        let out = run_job(&mut job.batch(batch), &native);
+        (have, batch) = (out.lib, out.batch);
+        for d in &out.done {
+            r.out.record(done_record(&e.title, d), || {
+                crate::library::done_text(&e.title, d)
+            });
+        }
     }
     Ok(())
 }

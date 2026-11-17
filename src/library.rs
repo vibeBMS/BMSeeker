@@ -25,6 +25,7 @@ pub struct Owned {
 }
 
 /// The library below a folder.
+#[derive(Default)]
 pub struct Library {
     root: PathBuf,
     /// A folder below passed by (the downloads waiting).
