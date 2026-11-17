@@ -91,7 +91,7 @@ mod tests {
         let mut a = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         assert_eq!(a.len(), 1);
         let mut f = a.by_index(0).unwrap();
-        assert_eq!(f.name(), "曲/a.bms");
+        assert_eq!(f.name().unwrap(), "曲/a.bms");
         let t = f.last_modified().unwrap();
         assert_eq!(
             (

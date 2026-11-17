@@ -63,13 +63,13 @@ jobs:
       group: ${{ github.event_name == 'push' && 'web-pages' || format('web-{0}', github.run_id) }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: gui/go.mod
           cache-dependency-path: gui/go.sum
@@ -81,7 +81,7 @@ jobs:
         working-directory: gui
       - run: cargo install wasm-bindgen-cli --locked --version "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)"
       - run: web/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: BMSeeker-web
           path: web/dist
