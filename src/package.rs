@@ -5,8 +5,7 @@
 //! the library's already ([`Class::Owned`]), a song new to it
 //! ([`Class::Song`]), or charts for a song's folder there ([`Class::Diff`]):
 //! [`classify`], the link it came from counting most. Where the rules are
-//! not sure, the whole download is one package (as it was before there
-//! were packages).
+//! not sure, the whole download is one package.
 
 use crate::chart::ChartInfo;
 use crate::fs::Fs;

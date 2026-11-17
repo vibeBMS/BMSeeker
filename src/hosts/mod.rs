@@ -445,8 +445,6 @@ pub fn sniff_bytes(h: &[u8]) -> Option<&'static str> {
     }
 }
 
-pub use crate::net::url_encode;
-
 /// Google Drive's answer for a file downloaded too often lately.
 pub const DRIVE_QUOTA: &str =
     "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
@@ -518,11 +516,6 @@ fn between<'a>(s: &'a str, a: &str, b: &str) -> Option<&'a str> {
     let i = s.find(a)? + a.len();
     let j = s[i..].find(b)? + i;
     Some(&s[i..j])
-}
-
-/// A link in a page (an attribute's value).
-fn unescape(s: &str) -> String {
-    crate::text::unescape_attr(s)
 }
 
 #[cfg(test)]

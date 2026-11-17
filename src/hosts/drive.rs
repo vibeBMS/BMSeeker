@@ -3,9 +3,7 @@
 //! names its archives, the best of which is taken. A folder link ending in
 //! `#sub/folder/file` names goes down to that file.
 
-use super::{
-    archive_name, between, get_then, pick_file, unescape, Host, Link, Resolved, Target, Want,
-};
+use super::{archive_name, between, get_then, pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
 use crate::net::{Answer, BoxTask, Next, Ready, Request, Task};
 
@@ -106,7 +104,7 @@ pub fn listing(page: &str) -> Vec<Entry> {
         };
         if let Some(name) = between(part, "flip-entry-title\">", "<") {
             out.push(Entry {
-                name: unescape(name),
+                name: crate::text::unescape_attr(name),
                 id: id.to_string(),
                 folder,
             });

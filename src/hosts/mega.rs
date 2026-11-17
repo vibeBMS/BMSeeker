@@ -497,13 +497,13 @@ mod tests {
         assert_eq!(b64url("-_8").unwrap(), [0xfb, 0xff]);
     }
 
-    /// Which archive of a MEGA pack each song gets: `VIBEBMS_PACKS=FILE`
+    /// Which archive of a MEGA pack each song gets: `BMSEEKER_PACKS=FILE`
     /// of `title<TAB>artist<TAB>link` lines.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     #[ignore = "network"]
     fn mega_packs() {
-        let list = std::fs::read_to_string(std::env::var("VIBEBMS_PACKS").unwrap()).unwrap();
+        let list = std::fs::read_to_string(std::env::var("BMSEEKER_PACKS").unwrap()).unwrap();
         let mut seen = std::collections::HashMap::new();
         for line in list.lines() {
             let [title, artist, link] = line.splitn(3, '\t').collect::<Vec<_>>()[..] else {

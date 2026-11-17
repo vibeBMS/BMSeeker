@@ -1,7 +1,7 @@
 //! MediaFire: a file's page has the download button's link (a folder's
 //! needs a browser).
 
-use super::{between, get_then, unescape, Host, Link, Resolved, Target, Want};
+use super::{between, get_then, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
 use crate::net::{BoxTask, Ready};
 
@@ -32,7 +32,7 @@ impl Host for MediaFire {
                         && l.contains("mediafire.com/")
                 });
             match file {
-                Some(l) => Resolved::File(Target::url(unescape(l))),
+                Some(l) => Resolved::File(Target::url(crate::text::unescape_attr(l))),
                 None => Resolved::Page,
             }
         })

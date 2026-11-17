@@ -305,7 +305,7 @@ fn waiting(s: &Staged, charts: &[usize], outcome: Outcome) -> Item {
 /// the folder the song's own charts a table names are in; else where each
 /// chart's sounds are ([`placement`]): all in one folder, the package goes
 /// in as it is laid out; else each chart on its own, with the files beside
-/// it (as before there were packages).
+/// it.
 fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request) -> Vec<Item> {
     let new: Vec<usize> = p
         .charts

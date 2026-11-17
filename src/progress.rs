@@ -1,9 +1,8 @@
 //! How far a song's download has got, for whoever shows it: a [`Progress`]
 //! shared between the download (on its thread, or the web's callbacks) and
 //! the screen. The functions that download take it in their
-//! [`Context`](crate::hosts::Context) ([`Context::with_progress`]); a
-//! thread's [`scope`] is still read when the context has none (older
-//! callers).
+//! [`Context`](crate::hosts::Context) ([`Context::with_progress`]), else
+//! the thread's ([`scope`]).
 //!
 //! [`Context::with_progress`]: crate::hosts::Context::with_progress
 

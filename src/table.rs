@@ -304,9 +304,6 @@ pub const MOVED: &[(&str, &str)] = &[
     ("http://www.ribbit.xyz/bms/tables/normal.html", NORMAL),
 ];
 
-/// Known mirrors used when the primary host is unreachable.
-pub const MIRRORS: &[(&str, &str)] = MOVED;
-
 /// Next action of a [`TableLoader`].
 #[derive(Debug)]
 enum Step {
@@ -342,7 +339,7 @@ impl TableLoader {
     fn step(&mut self, body: Answer) -> Result<Step, TableError> {
         match self.advance(body) {
             Ok(s) => Ok(s),
-            Err(e) => match MIRRORS
+            Err(e) => match MOVED
                 .iter()
                 .find(|(u, _)| *u == self.source)
                 .filter(|_| !self.mirror_used)

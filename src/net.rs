@@ -264,13 +264,6 @@ pub(crate) fn header_text(v: &[u8]) -> String {
     }
 }
 
-/// A page or file in memory (a table, a list): a blocking GET with the
-/// default settings.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn get(url: &str) -> Answer {
-    Client::new(&crate::config::Config::default()).send(&Request::Get(url.into()))
-}
-
 /// `s` percent-encoded for a URL's query.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);

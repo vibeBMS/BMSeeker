@@ -335,7 +335,8 @@ fn credit_at(t: &[char], i: usize) -> Option<(usize, bool)> {
     Some((e, music))
 }
 
-/// `\s*[.:;,=/]` next (an explicit music credit: `music: X`, `作曲/X`).
+/// `\s*/` next (with [`punct_next`], what ends an explicit music credit:
+/// `music: X`, `作曲/X`).
 fn slash_or_sep(t: &[char], i: usize) -> bool {
     let j = spaces(t, i);
     j < t.len() && t[j] == '/'

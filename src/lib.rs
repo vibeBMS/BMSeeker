@@ -4,7 +4,7 @@
 //! - [`table`]: difficulty tables (bmstable: 発狂BMS, Satellite, Stella, ...);
 //! - [`hosts`]: from the link an author or a table gives to the archive
 //!   (Google Drive, Dropbox, MediaFire, MEGA, event venues, ...);
-//! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar) into the library
+//! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar, .lzh) into the library
 //!   (a [`fs::Store`]), with their files' times;
 //! - [`placement`]: which song's folder a chart of its own (差分) belongs in
 //!   (its title and artist compared as [`titles`] does);

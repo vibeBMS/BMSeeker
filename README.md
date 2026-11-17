@@ -71,33 +71,38 @@ dead uploaders' files by number (`uploaders`). What is found by name (`mirrors`,
 only if it holds the chart (its MD5); a song's archive also when its charts are the song's (title and artist), the
 chart wanted being a separate one. `--own-links`: a song's own links only.
 
-What a download holds is sorted before anything goes into the library: an archive may hold several songs' folders
-and charts of their own (packages, by the BeMusicSeeker fork's rules: a folder whose charts' files are there is one,
-with the folders below; a folder of one chart or one song's charts is one; other charts are each one), and where those
-rules are not sure, the whole archive is one, as before. Each package is a song new to the library (a folder of its
-own, named after the song's title or the archive, `name (2)` beside another song of that name), the library's
-already (state `owned`: nothing is downloaded into a second folder; only the files its folder lacks come in, or with
-`--reinstall` / `"reinstall": true` newer ones over those there too), or charts for a song's folder there (state
-`placed`). Such a package goes into its song's folder as it is laid out (its `sound/` folder there too); which folder
-is decided first by its own charts the library has (each votes for its folder; two folders with as many votes, as
-when the library holds a chart twice, are never picked between: the chart waits), then by the song's own charts a
-table names (`org_md5`), then by the files the charts use and their title and artist (as the BeMusicSeeker fork
-compares them: NFKC, the chart's name at the end of the title cut (`[ANOTHER]`, `-7EX-`, kept up to a `MIX`), the
-artist's credits for anything but the music removed (`/ obj:`, `feat.`, `BGA:`, `差分`; not `remix`, `作曲`); the same
-song when the artists are the same and the titles' Dice coefficient is at least 0.72, which a chart needs to go into
-a folder without asking (two such folders: it waits); folders whose title or artist is alike, Dice 0.5, are offered
-first). What a song's link brings is a
-folder of its own unless where it goes is sure. A separate chart whose song is not in the library yet waits in the
-downloads folder (of a pack of many, only the chart wanted; with `table missing --get`, the run's missing charts) and
-goes into the song's folder when the song comes. `table missing --get` takes each missing chart in turn: one the run
-has brought in already is skipped; when the library has its song (one of the song's charts the table names, or a
-chart of its title and artist), its separate chart is downloaded first and the song only if the chart is left waiting
-(the song is never downloaded into a second folder); else the song, then its separate chart unless the song brought
-it. A file is downloaded once a run, whatever link leads to it (Google Drive's `gdrive:ID`, MediaFire's, MEGA's,
-Dropbox's, else the URL without its `#` part; a folder's link with the song looked for in it). A short link (`db.tt`, `bit.ly`) whose redirects
-end at a host bmseeker knows (Dropbox, Google Drive...) is opened from there. A server's passing failure (HTTP 429,
-502, 503, 504) is tried again twice. Google Drive's "Quota exceeded" (a file downloaded too often lately) is reported
-as such: it passes within a day.
+What a download holds is sorted before anything goes into the library:
+
+- **Packages.** An archive may hold several songs' folders and charts of their own; it is split by the BeMusicSeeker
+  fork's rules (a folder whose charts' files are there is one, with the folders below; a folder of one chart or one
+  song's charts is one; other charts are each one). Where those rules are not sure, the whole archive is one.
+- **What each package is.** A song new to the library (a folder of its own, named after the song's title or the
+  archive, `name (2)` beside another song of that name); the library's already (state `owned`: nothing is downloaded
+  into a second folder; only the files its folder lacks come in, or with `--reinstall` / `"reinstall": true` newer ones
+  over those there too); or charts for a song's folder there (state `placed`), which go into that folder as they are
+  laid out (its `sound/` folder there too). What a song's link brings is a folder of its own unless where it goes is
+  sure.
+- **Which song's folder**, in this order:
+  1. the package's own charts the library has (each votes for its folder; two folders with as many votes, as when the
+     library holds a chart twice, are never picked between: the chart waits);
+  2. the song's own charts a table names (`org_md5`);
+  3. the files the charts use and their title and artist, as the BeMusicSeeker fork compares them: NFKC, the chart's
+     name at the end of the title cut (`[ANOTHER]`, `-7EX-`, kept up to a `MIX`), the artist's credits for anything
+     but the music removed (`/ obj:`, `feat.`, `BGA:`, `差分`; not `remix`, `作曲`). The same song when the artists are
+     the same and the titles' Dice coefficient is at least 0.72, which a chart needs to go into a folder without
+     asking (two such folders: it waits); folders whose title or artist is alike (Dice 0.5) are offered first.
+- **Waiting.** A separate chart whose song is not in the library yet waits in the downloads folder (of a pack of many,
+  only the chart wanted; with `table missing --get`, the run's missing charts) and goes into the song's folder when the
+  song comes.
+- **`table missing --get`** takes each missing chart in turn: one the run has brought in already is skipped; when the
+  library has its song (one of the song's charts the table names, or a chart of its title and artist), its separate
+  chart is downloaded first and the song only if the chart is left waiting (the song is never downloaded into a second
+  folder); else the song, then its separate chart unless the song brought it.
+- **Each file once a run**, whatever link leads to it (Google Drive's `gdrive:ID`, MediaFire's, MEGA's, Dropbox's, else
+  the URL without its `#` part; a folder's link with the song looked for in it).
+- **Links on the way.** A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker knows (Dropbox, Google
+  Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) is tried again twice. Google
+  Drive's "Quota exceeded" (a file downloaded too often lately) is reported as such: it passes within a day.
 
 Dead uploaders' links (with `--third-party`) are downloaded from copies by number (`uploaders`). By default: gnqg
 (`gnqg.rosx.net/upload/upload.cgi?get=03691`) → `gnqg-upload/03691.zip` on bms.hexlataia.xyz, then on darksabun.club,
@@ -158,7 +163,7 @@ Go 1.27+).
 | `hosts` | link → archive: direct links, Google Drive files and folders, Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
 | `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder, no archive bombs; the archive's file times kept; archives inside one holding no chart unpacked too) |
 | `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not; where file times mean nothing, as in a web page's storage, the one there stays) |
-| `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists, and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan`), folder by folder when first needed (`new`), or given by a player's own records of its charts (`from_catalog`: a web page cannot read its library's charts when it likes); what comes in is added to it (`add`, `add_folder`). The `*_in` functions of `install`, `import` and `placement` work in one |
+| `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists, and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan`), folder by folder when first needed (`new`), or given by a player's own records of its charts (`from_catalog`: a web page cannot read its library's charts when it likes); what comes in is added to it (`add`, `add_folder`). |
 | `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
 | `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart); what arrives goes through `take` (on any `fs::Store`): unpacked into a folder of its own, planned without touching a file (`plan`), carried out (`apply`) |
 | `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, the community archive |
@@ -172,7 +177,7 @@ Go 1.27+).
 Everything that reads the network is a `net::Task` (an IO-free job that hands out requests and takes their answers):
 `hosts::Resolver` (a link through the `Host` strategies), `table::TableLoader`, `bmssearch::Lookup`, the sources.
 Natively `net::run` runs one blocking; the browser (vibeBMS's web build) runs the same job asynchronously. Where it
-reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`. Where the design is going:
+reads from (APIs, mirrors, lists) and the user agent are all in `config::Config`. The design:
 [DESIGN.md](DESIGN.md).
 
 ## Web (wasm32)

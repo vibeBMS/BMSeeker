@@ -443,11 +443,11 @@ fn unpack_within(
 mod tests {
     use super::*;
 
-    /// `VIBEBMS_UNPACK=FILE cargo test -p vibebms unpack_file -- --ignored`
+    /// `BMSEEKER_UNPACK=FILE cargo test -p bmseeker unpack_file -- --ignored`
     #[test]
     #[ignore = "needs an archive"]
     fn unpack_file() {
-        let f = std::env::var("VIBEBMS_UNPACK").expect("VIBEBMS_UNPACK");
+        let f = std::env::var("BMSEEKER_UNPACK").expect("BMSEEKER_UNPACK");
         let mut size = 0;
         let n = unpack_bytes(std::fs::read(f).unwrap(), |_, b| size += b.len()).unwrap();
         println!("UNPACKED {n} files, {size} bytes");

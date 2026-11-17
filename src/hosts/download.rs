@@ -339,13 +339,13 @@ mod tests {
         assert_eq!(safe_file_name("../a/b.zip").as_deref(), Some("_a_b.zip"));
     }
 
-    /// `VIBEBMS_FETCH=URL cargo test -p vibebms fetch_url -- --ignored`
+    /// `BMSEEKER_FETCH=URL cargo test -p bmseeker fetch_url -- --ignored`
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     #[ignore = "network"]
     fn fetch_url() {
-        let url = std::env::var("VIBEBMS_FETCH").expect("VIBEBMS_FETCH");
-        let out = std::env::temp_dir().join("vibebms-fetch");
+        let url = std::env::var("BMSEEKER_FETCH").expect("BMSEEKER_FETCH");
+        let out = std::env::temp_dir().join("bmseeker-fetch");
         match fetch(&url, None, &out, false, &Context::default()) {
             Ok(name) => println!(
                 "OK {name} {:?} {} bytes",
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn mega_ctr() {
         // AES-128 of a zero key and zero counter block, xored with zeros
-        let dir = std::env::temp_dir().join(format!("vibebms-mega-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bmseeker-mega-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (a, b) = (dir.join("a"), dir.join("b"));
         std::fs::write(&a, [0u8; 20]).unwrap();
