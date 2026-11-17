@@ -1,7 +1,7 @@
 [package]
 name = "bmseeker-web"
 description = "BMSeeker in a web page: the command-line tool's commands on a browser's storage, run in a worker"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"

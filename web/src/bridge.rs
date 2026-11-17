@@ -224,6 +224,7 @@ mod tests {
         assert_eq!(code, 2);
         assert!(notes[0].starts_with("error:"), "{notes:?}");
         let (code, _, notes) = lines(&["--version"], library(), &net);
-        assert_eq!((code, notes[0].as_str()), (0, "bmseeker 0.1.0"));
+        let version = concat!("bmseeker ", env!("CARGO_PKG_VERSION"));
+        assert_eq!((code, notes[0].as_str()), (0, version));
     }
 }

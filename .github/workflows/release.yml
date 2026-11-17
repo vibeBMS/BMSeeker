@@ -1,62 +1,71 @@
 name: Release
 
-# On a tag (v*): the CLI and the window (with the CLI inside) for each
-# system, attached to the tag's release.
+# On a tag v<version>, of the version in Cargo.toml (0.1.0-dev is released
+# as v0.1.0): the files of build.yml, built as stable (tools/ci_version.sh),
+# attached to the tag's release, and the "stable" part of latest.json and
+# the build in builds.json, on the nightly release (tools/release_manifests.sh).
 
 on:
   push:
     tags: ["v*"]
+  # (on a tag)
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, name: linux-x86_64 }
-          - { os: windows-latest, name: windows-x86_64 }
-          - { os: macos-latest, name: macos-arm64 }
-          - { os: macos-13, name: macos-x86_64 }
+  check:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: gui/go.mod
-          cache-dependency-path: gui/go.sum
-      - name: Build
-        shell: bash
-        run: gui/build.sh
-      - name: Pack
-        shell: bash
+      - run: tools/ci_version.sh
+        env:
+          BMSEEKER_CHANNEL: stable
+      - name: the tag is the version
         run: |
-          mkdir -p dist
-          ext=""; [ "${{ runner.os }}" = Windows ] && ext=.exe
-          cp "target/release/bmseeker$ext" "dist/bmseeker-${{ matrix.name }}$ext"
-          cp "target/release/bmseeker-gui$ext" "dist/bmseeker-gui-${{ matrix.name }}$ext"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: bmseeker-${{ matrix.name }}
-          path: dist/*
+          if [ "$GITHUB_REF" != "refs/tags/v$BMSEEKER_VERSION" ]; then
+            echo "::error::$GITHUB_REF is not the tag of Cargo.toml's version (v$BMSEEKER_VERSION)"
+            exit 1
+          fi
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: stable
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # latest.json and builds.json are the nightly's too (nightly.yml)
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v7
+      - run: tools/ci_version.sh
+        env:
+          BMSEEKER_CHANNEL: stable
       - uses: actions/download-artifact@v8
         with:
-          path: dist
+          pattern: bmseeker-*
+          path: out
           merge-multiple: true
-      - env:
-          GH_TOKEN: ${{ github.token }}
+      - run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          gh release upload "$GITHUB_REF_NAME" out/* --clobber
+      - name: latest.json, builds.json
         run: |
-          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" dist/* -R "$GITHUB_REPOSITORY" --clobber
+          tools/release_manifests.sh out
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly out/latest.json out/builds.json --clobber
+          else
+            echo "::warning::no nightly release to keep latest.json and builds.json on"
+          fi

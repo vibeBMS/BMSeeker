@@ -157,13 +157,24 @@ bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, 
 - **Browser**: links that only give a page (OneDrive ...). Opening one shows it in a web view, which presses its
   Download button; what it downloads goes into the library.
 - **Settings**: the BMS folder, third-party mirrors (`--third-party`), the difficulty tables (forgotten when the window
-  closes).
+  closes), and the version.
 
 The window runs the CLI with `--json` and reads its records. The CLI it carries is unpacked into the user's cache
 folder on first use (`$BMSEEKER_CLI` if set; a development build without it uses `bmseeker` on the PATH).
 
 Build: `gui/build.sh` (builds the CLI with `cargo build --release --features cli` into `gui/bin/`, then `go build`;
 Go 1.27+).
+
+## Builds
+
+Each push to `main` that changes the code publishes the
+[nightly](https://github.com/vibeBMS/BMSeeker/releases/tag/nightly) prerelease (`.github/workflows/nightly.yml`):
+`bmseeker-<system>` (the CLI) and `bmseeker-gui-<system>` for `linux-x64`, `linux-arm64`, `windows-x64`,
+`windows-arm64` and `macos-universal`, `bmseeker-web.zip`, and, as vibeBMS's nightly, `latest.json` (each file's
+version, SHA-256 and size, per channel) and `builds.json` (every build's). Its version is
+`<version>-nightly.<run>+<commit>` (`tools/ci_version.sh`), which `bmseeker --version`, the window's Settings and the
+web page's foot show; a tag `v<version>` releases `<version>` (`.github/workflows/release.yml`). Local builds are
+`<version>-dev` (`Cargo.toml`).
 
 ## In a web page
 
