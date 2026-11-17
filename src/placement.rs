@@ -828,26 +828,37 @@ pub fn clash(new: (i64, u64), old: Option<(i64, u64)>, is_chart: bool, times: bo
 /// Move `file` into the folder `dir` (a chart, or a file it came with), by
 /// [`clash`]: a chart of the same name there is not replaced (it comes in
 /// as `name_.bms`; the same chart again just goes); another file of the
-/// same name stays unless `file` is newer, and `file` goes. Returns where
-/// it is now (None: it was not needed, or could not move).
-pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> Option<PathBuf> {
+/// same name stays unless `file` is newer, and `file` goes (the one there
+/// set aside until it is in: a failure leaves it). Returns where it is now
+/// (None: it was not needed).
+pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     let name = file_name(file);
     let mut to = dir.join(&name);
     let chart = is_chart(file);
     if chart && fs.stamp(&to).is_some() {
         let same = |a: &Path, b: &Path| fs.read(a).ok().is_some_and(|x| fs.read(b).ok() == Some(x));
         if same(file, &to) {
-            fs.remove(file);
-            return Some(to);
+            fs.remove(file)?;
+            return Ok(Some(to));
         }
     }
     let new = fs.stamp(file).unwrap_or_default();
     match clash(new, fs.stamp(&to), chart, fs.keeps_times()) {
-        Clash::Move => fs.rename(file, &to).then_some(to),
-        Clash::Overwrite => (fs.remove(&to) && fs.rename(file, &to)).then_some(to),
+        Clash::Move => fs.rename(file, &to)?,
+        Clash::Overwrite => {
+            let old = dir.join(format!(".{name}.old"));
+            // (one an earlier failure left goes)
+            let _ = fs.remove(&old);
+            fs.rename(&to, &old)?;
+            if let Err(e) = fs.rename(file, &to) {
+                return fs.rename(&old, &to).and(Err(e));
+            }
+            // (one that cannot be removed stays beside it, hidden)
+            let _ = fs.remove(&old);
+        }
         Clash::Keep => {
-            fs.remove(file);
-            None
+            fs.remove(file)?;
+            return Ok(None);
         }
         Clash::Rename => {
             let (stem, ext) = match name.rsplit_once('.') {
@@ -859,9 +870,10 @@ pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> Option<PathBuf> {
                 to = dir.join(format!("{stem}{}{ext}", "_".repeat(n)));
                 n += 1;
             }
-            fs.rename(file, &to).then_some(to)
+            fs.rename(file, &to)?;
         }
     }
+    Ok(Some(to))
 }
 
 #[cfg(test)]
@@ -1032,13 +1044,13 @@ mod tests {
             self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::fs::Disk.read_dir(p)
         }
-        fn rename(&self, from: &Path, to: &Path) -> bool {
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
             crate::fs::Disk.rename(from, to)
         }
         fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
             crate::fs::Disk.stamp(p)
         }
-        fn remove(&self, p: &Path) -> bool {
+        fn remove(&self, p: &Path) -> std::io::Result<()> {
             crate::fs::Disk.remove(p)
         }
     }
@@ -1350,9 +1362,9 @@ mod tests {
         let pkg = Path::new("dl/pkg");
         unpack(Blob::Bytes(out.into_inner()), &mem, pkg, BUDGET).unwrap();
         let song = Path::new("bms/Song");
-        assert_eq!(bring(&mem, &pkg.join("01.ogg"), song), None);
+        assert_eq!(bring(&mem, &pkg.join("01.ogg"), song).unwrap(), None);
         assert_eq!(
-            bring(&mem, &pkg.join("02.ogg"), song),
+            bring(&mem, &pkg.join("02.ogg"), song).unwrap(),
             Some(song.join("02.ogg"))
         );
         assert_eq!(mem.get(&song.join("01.ogg")).unwrap().0, b"song's");
@@ -1371,13 +1383,13 @@ mod tests {
             fn read_dir(&self, p: &Path) -> std::io::Result<Vec<crate::fs::Entry>> {
                 self.0.read_dir(p)
             }
-            fn rename(&self, from: &Path, to: &Path) -> bool {
+            fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
                 self.0.rename(from, to)
             }
             fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
                 self.0.stamp(p)
             }
-            fn remove(&self, p: &Path) -> bool {
+            fn remove(&self, p: &Path) -> std::io::Result<()> {
                 self.0.remove(p)
             }
             fn keeps_times(&self) -> bool {
@@ -1387,7 +1399,10 @@ mod tests {
         let fs = NoTimes(Default::default());
         fs.0.put(Path::new("s/a.ogg"), b"old", 0);
         fs.0.put(Path::new("p/a.ogg"), b"newer", 100);
-        assert_eq!(bring(&fs, Path::new("p/a.ogg"), Path::new("s")), None);
+        assert_eq!(
+            bring(&fs, Path::new("p/a.ogg"), Path::new("s")).unwrap(),
+            None
+        );
         assert_eq!(fs.0.get(Path::new("s/a.ogg")).unwrap().0, b"old");
     }
 
@@ -1417,23 +1432,23 @@ mod tests {
         put(&song.join("b.ogg"), "keep", false);
         put(&pkg.join("b.ogg"), "stale", true);
         assert_eq!(
-            bring(&Disk, &pkg.join("a.ogg"), &song),
+            bring(&Disk, &pkg.join("a.ogg"), &song).unwrap(),
             Some(song.join("a.ogg"))
         );
         assert_eq!(std::fs::read_to_string(song.join("a.ogg")).unwrap(), "new");
-        assert_eq!(bring(&Disk, &pkg.join("b.ogg"), &song), None);
+        assert_eq!(bring(&Disk, &pkg.join("b.ogg"), &song).unwrap(), None);
         assert_eq!(std::fs::read_to_string(song.join("b.ogg")).unwrap(), "keep");
         assert!(!pkg.join("b.ogg").exists());
         // a chart: never over another, the same one just goes
         put(&song.join("x.bms"), "#TITLE A", false);
         put(&pkg.join("x.bms"), "#TITLE B", false);
         assert_eq!(
-            bring(&Disk, &pkg.join("x.bms"), &song),
+            bring(&Disk, &pkg.join("x.bms"), &song).unwrap(),
             Some(song.join("x_.bms"))
         );
         put(&pkg.join("x.bms"), "#TITLE A", false);
         assert_eq!(
-            bring(&Disk, &pkg.join("x.bms"), &song),
+            bring(&Disk, &pkg.join("x.bms"), &song).unwrap(),
             Some(song.join("x.bms"))
         );
         assert!(!pkg.join("x.bms").exists());

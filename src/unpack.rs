@@ -328,7 +328,7 @@ impl Sink for Into<'_> {
         self.out.push(m);
     }
     fn drop_partial(&mut self, rel: &Path) {
-        self.store.remove(&self.dest.join(rel));
+        let _ = self.store.remove(&self.dest.join(rel));
     }
 }
 
@@ -383,7 +383,7 @@ pub fn unpack(
             rel: into.join(n.rel),
             ..n
         }));
-        store.remove(&at);
+        let _ = store.remove(&at);
     }
     out.extend(inner);
     Ok(out)

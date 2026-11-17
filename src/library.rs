@@ -48,6 +48,9 @@ struct Songs {
     /// A sound file's key (its number): the folders (places in `list`)
     /// holding one.
     by_sound: HashMap<u32, Vec<usize>>,
+    /// Files come in where there is no song's folder (yet): a chart coming
+    /// in above them makes them its song's.
+    loose: Vec<PathBuf>,
 }
 
 struct Song {
@@ -219,7 +222,7 @@ impl Library {
 
     /// `file` is in the library now (moved there; `md5`: a chart's): the
     /// song's folder it is in holds it (a chart in a folder that was none:
-    /// a song's of its own).
+    /// a song's of its own, with the files that came below it before).
     pub fn add(&mut self, file: &Path, md5: Option<&str>) {
         let Some(dir) = file.parent() else {
             return;
@@ -242,8 +245,15 @@ impl Library {
             .map(|d| d.to_path_buf());
         match song {
             Some(d) if d == dir || !is_chart(file) => s.merge(&d, [rel(file, &d)]),
-            _ if is_chart(file) => s.merge(dir, [file_name(file)]),
-            _ => {}
+            _ if is_chart(file) => {
+                let (below, loose) = std::mem::take(&mut s.loose)
+                    .into_iter()
+                    .partition(|f: &PathBuf| f.starts_with(dir));
+                s.loose = loose;
+                let files = below.iter().map(|f| rel(f, dir));
+                s.merge(dir, std::iter::once(file_name(file)).chain(files));
+            }
+            _ => s.loose.push(file.to_path_buf()),
         }
     }
 
@@ -441,6 +451,15 @@ mod tests {
             lib.files(&m, Path::new("bms/New")).unwrap(),
             ["n.bms", "n.ogg"]
         );
+        // a song's sounds before its chart, file by file
+        lib.add(Path::new("bms/Later/sound/01.ogg"), None);
+        lib.add(Path::new("bms/Elsewhere/02.ogg"), None);
+        assert!(lib.files(&m, Path::new("bms/Later")).is_none());
+        lib.add(Path::new("bms/Later/l.bms"), None);
+        assert_eq!(
+            lib.files(&m, Path::new("bms/Later")).unwrap(),
+            ["l.bms", "sound/01.ogg"]
+        );
     }
 
     /// A library of 3,000 songs' folders with numbered sounds (`01.wav`
@@ -490,14 +509,14 @@ mod tests {
                     .cloned()
                     .ok_or(std::io::ErrorKind::NotFound.into())
             }
-            fn rename(&self, _: &Path, _: &Path) -> bool {
-                false
+            fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::Unsupported.into())
             }
             fn stamp(&self, _: &Path) -> Option<(i64, u64)> {
                 None
             }
-            fn remove(&self, _: &Path) -> bool {
-                false
+            fn remove(&self, _: &Path) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::Unsupported.into())
             }
         }
         let mut t = Tree::default();
@@ -558,13 +577,13 @@ mod tests {
             fn read_dir(&self, p: &Path) -> std::io::Result<Vec<crate::fs::Entry>> {
                 self.0.read_dir(p)
             }
-            fn rename(&self, from: &Path, to: &Path) -> bool {
+            fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
                 self.0.rename(from, to)
             }
             fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
                 self.0.stamp(p)
             }
-            fn remove(&self, p: &Path) -> bool {
+            fn remove(&self, p: &Path) -> std::io::Result<()> {
                 self.0.remove(p)
             }
         }

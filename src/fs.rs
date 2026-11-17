@@ -15,12 +15,13 @@ pub struct Entry {
 pub trait Fs: Sync {
     fn read(&self, p: &Path) -> io::Result<Vec<u8>>;
     fn read_dir(&self, p: &Path) -> io::Result<Vec<Entry>>;
-    /// Move a file; false when `to` exists or the move fails.
-    fn rename(&self, from: &Path, to: &Path) -> bool;
+    /// Move a file; an error when `to` exists (`AlreadyExists`) or the
+    /// move fails.
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// A file's (modification time in seconds, size); None: no such file.
     fn stamp(&self, p: &Path) -> Option<(i64, u64)>;
-    /// Delete a file; false when it could not be.
-    fn remove(&self, p: &Path) -> bool;
+    /// Delete a file.
+    fn remove(&self, p: &Path) -> io::Result<()>;
     /// Whether files keep the times they are written with ([`Store::create`])
     /// and those [`Fs::stamp`] gives can be compared (not so in a web
     /// page's storage).
@@ -62,6 +63,14 @@ pub trait Store: Fs + AsFs {
     /// Make the folder `p` and those above it (a store without folders of
     /// their own needs nothing).
     fn create_dir_all(&self, _p: &Path) {}
+    /// Copy the file `from` to the new file `to`, with its time: read
+    /// whole and written, unless the store can do better.
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let bytes = self.read(from)?;
+        let mut w = self.create(to, self.stamp(from).map(|(t, _)| t))?;
+        w.write_all(&bytes)?;
+        w.flush()
+    }
 }
 
 /// `mtime` (seconds since 1970) as a time (None: before it).
@@ -92,8 +101,18 @@ impl Fs for Disk {
             .collect())
     }
 
-    fn rename(&self, from: &Path, to: &Path) -> bool {
-        !to.exists() && std::fs::rename(from, to).is_ok()
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        // a link is made only where there is no file (a rename replaces
+        // one, and checking first leaves a moment for another to come)
+        match std::fs::hard_link(from, to) {
+            Ok(()) => std::fs::remove_file(from).inspect_err(|_| {
+                let _ = std::fs::remove_file(to);
+            }),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+            // no links there (FAT, exFAT; another device: the rename fails too)
+            Err(_) if to.exists() => Err(io::ErrorKind::AlreadyExists.into()),
+            Err(_) => std::fs::rename(from, to),
+        }
     }
 
     fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
@@ -106,8 +125,8 @@ impl Fs for Disk {
         Some((t, m.len()))
     }
 
-    fn remove(&self, p: &Path) -> bool {
-        std::fs::remove_file(p).is_ok()
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        std::fs::remove_file(p)
     }
 }
 
@@ -160,6 +179,18 @@ impl Store for Disk {
     fn create_dir_all(&self, p: &Path) {
         let _ = std::fs::create_dir_all(p);
     }
+
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::copy(from, to)?;
+        let mtime = std::fs::metadata(from)?.modified()?;
+        std::fs::File::options()
+            .write(true)
+            .open(to)?
+            .set_modified(mtime)
+    }
 }
 
 /// A store in memory, for tests: (bytes, time) by path.
@@ -209,24 +240,21 @@ impl Fs for Mem {
         }
         Ok(out)
     }
-    fn rename(&self, from: &Path, to: &Path) -> bool {
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let mut files = self.0.lock().unwrap();
         if files.contains_key(to) {
-            return false;
+            return Err(io::ErrorKind::AlreadyExists.into());
         }
-        match files.remove(from) {
-            Some(f) => {
-                files.insert(to.to_path_buf(), f);
-                true
-            }
-            None => false,
-        }
+        let f = files.remove(from).ok_or(io::ErrorKind::NotFound)?;
+        files.insert(to.to_path_buf(), f);
+        Ok(())
     }
     fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
         self.get(p).map(|(b, t)| (t, b.len() as u64))
     }
-    fn remove(&self, p: &Path) -> bool {
-        self.0.lock().unwrap().remove(p).is_some()
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        let removed = self.0.lock().unwrap().remove(p);
+        removed.map(drop).ok_or(io::ErrorKind::NotFound.into())
     }
 }
 
@@ -267,5 +295,34 @@ impl Store for Mem {
     }
     fn remove_dir(&self, p: &Path) {
         self.0.lock().unwrap().retain(|k, _| !k.starts_with(p));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A move never replaces a file; a copy keeps the time.
+    #[test]
+    fn disk_moves_and_copies() {
+        let d = std::env::temp_dir().join(format!("bmseeker-fs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let e = Disk.rename(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        assert!(a.is_file());
+        let t = 1_577_836_800;
+        let f = std::fs::File::options().write(true).open(&a).unwrap();
+        f.set_modified(system_time(t).unwrap()).unwrap();
+        let c = d.join("sub/c");
+        Disk.copy(&a, &c).unwrap();
+        assert_eq!(Disk.stamp(&c), Some((t, 1)));
+        Disk.rename(&a, &d.join("e")).unwrap();
+        assert!(!a.exists() && d.join("e").is_file());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

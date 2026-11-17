@@ -164,7 +164,7 @@ pub fn place_charts_in(fs: &dyn Fs, dir: &Path, index: &mut Library) -> Vec<Done
             let at = if whole { locate(false) } else { here };
             match at {
                 Some(Located::Move(to)) => {
-                    if let Some(at) = crate::placement::bring(fs, chart, &to) {
+                    if let Ok(Some(at)) = crate::placement::bring(fs, chart, &to) {
                         index.add(&at, md5_of(fs, &at).as_deref());
                         out.push(Done::Placed(at));
                         if !whole {
@@ -178,7 +178,7 @@ pub fn place_charts_in(fs: &dyn Fs, dir: &Path, index: &mut Library) -> Vec<Done
         // the files it came with (smart overwrite)
         if let Some(to) = song_dir {
             for f in files.iter().filter(|p| !crate::placement::is_chart(p)) {
-                if let Some(at) = crate::placement::bring(fs, f, &to) {
+                if let Ok(Some(at)) = crate::placement::bring(fs, f, &to) {
                     index.add(&at, None);
                 }
             }
@@ -364,9 +364,9 @@ pub fn keep_waiting(fs: &dyn Fs, done: Vec<Done>, downloads: &Path, md5: &str) -
                 let to = downloads.join(p.file_name()?);
                 // an older copy of it goes
                 if to != p && fs.stamp(&to).is_some() {
-                    fs.remove(&to);
+                    let _ = fs.remove(&to);
                 }
-                (to == p || fs.rename(&p, &to)).then_some(Done::Waiting(to))
+                (to == p || fs.rename(&p, &to).is_ok()).then_some(Done::Waiting(to))
             }
             d => Some(d),
         })
@@ -393,7 +393,7 @@ pub fn place_waiting_in(fs: &dyn Fs, downloads: &Path, index: &mut Library) -> V
             continue;
         }
         let at = match locate_in(fs, &e.path, index, false, Rules::default()) {
-            Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir),
+            Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir).ok().flatten(),
             _ => None,
         };
         if let Some(at) = at {

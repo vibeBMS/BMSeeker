@@ -146,13 +146,14 @@ pub fn library(r: &Run, c: Library) -> Result<(), String> {
         } => {
             if let Some(dir) = to {
                 return match placement::bring(&Disk, &chart, &dir) {
-                    Some(at) => {
+                    Ok(Some(at)) => {
                         r.out.record(json!({"state": "placed", "path": at}), || {
                             at.display().to_string()
                         });
                         Ok(())
                     }
-                    None => Err(format!("{} stays where it is", chart.display())),
+                    Ok(None) => Err(format!("{} stays where it is", chart.display())),
+                    Err(e) => Err(format!("{}: {e}", chart.display())),
                 };
             }
             let mut rules = Rules {
