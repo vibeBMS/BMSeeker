@@ -3,7 +3,7 @@ name = "bmseeker"
 description = "BMS library tools: difficulty tables, downloads from where authors link songs, unpacking, and putting charts into their songs' folders"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vibeBMS/BMSeeker"
 keywords = ["bms", "rhythm-game", "beatoraja", "lr2"]
@@ -33,16 +33,16 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"
 encoding_rs = "0.8"
-md-5 = "0.10"
-sha2 = "0.10"
+md-5 = "0.11"
+sha2 = "0.11"
 url = "2"
 web-time = "1"
-# archives (.zip; .7z; .rar: Apache-2.0 with the UnRAR license restriction;
-# .lzh: 0.6, 0.7 and later need a newer Rust)
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# archives (.zip: deflate by flate2's Rust backend, below, which builds for
+# wasm32; .7z; .rar: Apache-2.0 with the UnRAR license restriction; .lzh)
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd"] }
 unrar-rs = { version = "0.16.4", default-features = false, features = ["crypto-rust"] }
-delharc = "0.8.0"
+delharc = "0.8"
 # titles and artists compared in NFKC
 unicode-normalization = "0.1"
 # MEGA files are AES-128-CTR encrypted

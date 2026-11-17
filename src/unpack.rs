@@ -170,6 +170,7 @@ fn zip_time<R: std::io::Read>(e: &zip::read::ZipFile<'_, R>) -> Option<i64> {
                     return Some(m);
                 }
             }
+            _ => {}
         }
     }
     let d = e.last_modified().filter(|d| d.is_valid())?;
@@ -181,6 +182,78 @@ fn zip_time<R: std::io::Read>(e: &zip::read::ZipFile<'_, R>) -> Option<i64> {
         d.minute() as i64,
         d.second() as i64,
     ))
+}
+
+/// The zip `r`, refused when a member's local header names another file,
+/// or another method or encryption, than the central directory does: a
+/// tool that reads the local headers would unpack other files than these.
+/// (zip's own check refuses a Shift_JIS name with a `\` byte, as in `ソ`,
+/// beside its UTF-8 name.)
+fn zip_checked(
+    r: Box<dyn ReadSeek + Send>,
+) -> Result<zip::ZipArchive<Box<dyn ReadSeek + Send>>, String> {
+    let z = zip::ZipArchive::new(r).map_err(|e| e.to_string())?;
+    let at = (0..z.len())
+        .map(|i| {
+            let e = z.by_index_data(i)?;
+            Ok((e.central_header_start(), e.header_start()))
+        })
+        .collect::<zip::result::ZipResult<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let mut r = z.into_inner();
+    for (central, local) in at {
+        let c = zip_header(&mut r, central, true).map_err(|e| e.to_string())?;
+        let l = zip_header(&mut r, local, false).map_err(|e| e.to_string())?;
+        if c != l {
+            let name = crate::text::decode_text(&c.name);
+            return Err(format!(
+                "{name}: its local header differs from the central directory"
+            ));
+        }
+    }
+    zip::ZipArchive::new(r).map_err(|e| e.to_string())
+}
+
+/// What a zip member's local and central headers must agree on.
+#[derive(PartialEq)]
+struct ZipHeader {
+    /// Encrypted, sizes after the data, UTF-8 name.
+    flags: u16,
+    method: u16,
+    name: Vec<u8>,
+    /// The UTF-8 name of the extra field 0x7075.
+    utf8_name: Option<Vec<u8>>,
+}
+
+/// The header at `at`: a central directory entry, or a local header.
+fn zip_header(r: &mut dyn ReadSeek, at: u64, central: bool) -> std::io::Result<ZipHeader> {
+    use std::io::SeekFrom;
+    let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+    // where the flags and the name's length are (the method follows the flags)
+    let (len, flags, lens) = if central { (46, 8, 28) } else { (30, 6, 26) };
+    let mut fixed = vec![0; len];
+    r.seek(SeekFrom::Start(at))?;
+    r.read_exact(&mut fixed)?;
+    let mut name = vec![0; u16_at(&fixed, lens) as usize];
+    let mut extra = vec![0; u16_at(&fixed, lens + 2) as usize];
+    r.read_exact(&mut name)?;
+    r.read_exact(&mut extra)?;
+    let mut utf8_name = None;
+    let mut x = &extra[..];
+    while x.len() >= 4 {
+        let (id, n) = (u16_at(x, 0), u16_at(x, 2) as usize);
+        let body = &x[4..(4 + n).min(x.len())];
+        if id == 0x7075 {
+            utf8_name = Some(body.to_vec());
+        }
+        x = &x[4 + body.len()..];
+    }
+    Ok(ZipHeader {
+        flags: u16_at(&fixed, flags) & 0x0809,
+        method: u16_at(&fixed, flags + 2),
+        name,
+        utf8_name,
+    })
 }
 
 /// Unpack the archive `r` of `format` into `sink`, with at most `budget`
@@ -223,10 +296,11 @@ fn members(
     };
     match format {
         Format::Zip => {
-            let mut z = zip::ZipArchive::new(r).map_err(|e| e.to_string())?;
+            let mut z = zip_checked(r)?;
             for i in 0..z.len() {
                 let mut e = z.by_index(i).map_err(|e| e.to_string())?;
-                if e.is_dir() {
+                // a link is not unpacked (as a file, its target would be its data)
+                if e.is_dir() || e.is_symlink() {
                     continue;
                 }
                 // names in Shift_JIS / EUC-KR as BMS packs often have
@@ -519,6 +593,92 @@ mod tests {
         // no way out of the folder
         assert_eq!(got[1].0, PathBuf::from("evil.txt"));
         assert!(unpack_bytes(b"<!DOCTYPE html>".to_vec(), |_, _| {}).is_err());
+    }
+
+    /// The bytes `from` as `to` in `z`: in all its headers, or only in the
+    /// first (a member's local header).
+    fn renamed(z: &[u8], from: &[u8], to: &[u8], first: bool) -> Vec<u8> {
+        let mut z = z.to_vec();
+        let mut at = 0;
+        while let Some(i) = z[at..].windows(from.len()).position(|w| w == from) {
+            z[at + i..at + i + from.len()].copy_from_slice(to);
+            at += i + from.len();
+            if first {
+                break;
+            }
+        }
+        z
+    }
+
+    fn names(z: Vec<u8>) -> Result<Vec<PathBuf>, String> {
+        let mut got = Vec::new();
+        unpack_bytes(z, |p, _| got.push(p))?;
+        Ok(got)
+    }
+
+    /// A zip (stored) of `song/ソ.bms` ("#TITLE A"), its name in Shift_JIS
+    /// (`ソ` ending in `\`) and in UTF-8 in its extra field 0x7075.
+    const SJIS_UTF8_ZIP: [u8; 170] = [
+        80, 75, 3, 4, 10, 0, 0, 0, 0, 0, 34, 24, 34, 80, 221, 184, 73, 19, 8, 0, 0, 0, 8, 0, 0, 0,
+        11, 0, 21, 0, 115, 111, 110, 103, 47, 131, 92, 46, 98, 109, 115, 117, 112, 17, 0, 1, 145,
+        214, 247, 44, 115, 111, 110, 103, 47, 227, 130, 189, 46, 98, 109, 115, 35, 84, 73, 84, 76,
+        69, 32, 65, 80, 75, 1, 2, 30, 3, 10, 0, 0, 0, 0, 0, 34, 24, 34, 80, 221, 184, 73, 19, 8, 0,
+        0, 0, 8, 0, 0, 0, 11, 0, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 164, 129, 0, 0, 0, 0, 115, 111,
+        110, 103, 47, 131, 92, 46, 98, 109, 115, 117, 112, 17, 0, 1, 145, 214, 247, 44, 115, 111,
+        110, 103, 47, 227, 130, 189, 46, 98, 109, 115, 80, 75, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0, 78, 0,
+        0, 0, 70, 0, 0, 0, 0, 0,
+    ];
+
+    /// Names in Shift_JIS (`ソ` ending in `\`, not a folder's end) and
+    /// EUC-KR, and in UTF-8 beside them.
+    #[test]
+    fn zip_names_in_their_encodings() {
+        let z = crate::testkit::zip(&[("song/@@.bms", "#TITLE A"), ("song/##.ogg", "ogg")]);
+        let z = renamed(
+            &renamed(&z, b"@@", &[0x83, 0x5C], false),
+            b"##",
+            &[0xB0, 0xEE],
+            false,
+        );
+        assert_eq!(
+            names(z).unwrap(),
+            [PathBuf::from("song/ソ.bms"), PathBuf::from("song/곡.ogg")]
+        );
+        assert_eq!(
+            names(SJIS_UTF8_ZIP.to_vec()).unwrap(),
+            [PathBuf::from("song/ソ.bms")]
+        );
+    }
+
+    /// A member whose local header has another name, or another UTF-8
+    /// name, than the central directory says: the zip is refused.
+    #[test]
+    fn zip_whose_local_header_differs() {
+        let z = crate::testkit::zip(&[("song/a.bms", "#TITLE A"), ("song/b.bms", "#TITLE B")]);
+        assert_eq!(names(z.clone()).unwrap().len(), 2);
+        let e = names(renamed(&z, b"song/b.bms", b"song/c.bms", true)).unwrap_err();
+        assert!(e.contains("local header"), "{e}");
+        let utf8 = "song/ソ.bms".as_bytes();
+        let e = names(renamed(
+            &SJIS_UTF8_ZIP,
+            utf8,
+            "song/ン.bms".as_bytes(),
+            true,
+        ))
+        .unwrap_err();
+        assert!(e.contains("local header"), "{e}");
+    }
+
+    /// A symbolic link is not unpacked.
+    #[test]
+    fn zip_links_are_not_unpacked() {
+        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default();
+        z.add_symlink("song/a.bms", "/etc/passwd", o).unwrap();
+        z.start_file("song/b.bms", o).unwrap();
+        z.write_all(b"#TITLE B").unwrap();
+        let z = z.finish().unwrap().into_inner();
+        assert_eq!(names(z).unwrap(), [PathBuf::from("song/b.bms")]);
     }
 
     /// A RAR5 of `a.bms` (8 bytes) and `big.bin` (64 KiB of zeros).
