@@ -392,11 +392,11 @@ fn a_task_as_a_job() {
 #[test]
 fn files_in_order() {
     let sources = vec![
-        Source {
+        FileLink {
             url: "http://author.test/a.zip".into(),
             plain: false,
         },
-        Source {
+        FileLink {
             url: "http://mirror.test/b.mp4".into(),
             plain: true,
         },

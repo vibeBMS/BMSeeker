@@ -324,7 +324,7 @@ impl Job for Acquire {
 
 /// One of [`Files`]' links.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Source {
+pub struct FileLink {
     pub url: String,
     /// The file's own link (a mirror's: [`Acquire::plain`]), else an
     /// author's (through the hosts).
@@ -343,7 +343,7 @@ pub struct Missed {
 /// all of them, or where the first that did not come stopped it.
 pub struct Files {
     cx: Context,
-    sources: Vec<Source>,
+    links: Vec<FileLink>,
     slots: PathBuf,
     pages: bool,
     got: Vec<Got>,
@@ -351,11 +351,11 @@ pub struct Files {
 }
 
 impl Files {
-    /// `sources` in order, natively into files named after `slots`.
-    pub fn new(sources: Vec<Source>, slots: PathBuf, cx: &Context) -> Files {
+    /// `links` in order, natively into files named after `slots`.
+    pub fn new(links: Vec<FileLink>, slots: PathBuf, cx: &Context) -> Files {
         Files {
             cx: cx.clone(),
-            sources,
+            links,
             slots,
             pages: false,
             got: Vec::new(),
@@ -379,13 +379,13 @@ impl Files {
     /// The next file's job started, or the end.
     fn next(&mut self) -> Step<Result<Vec<Got>, Missed>> {
         let i = self.got.len();
-        let Some(src) = self.sources.get(i) else {
+        let Some(link) = self.links.get(i) else {
             return Step::Done(Ok(std::mem::take(&mut self.got)));
         };
         let slot = Files::slot(&self.slots, i);
-        let mut a = match src.plain {
-            true => Acquire::plain(&src.url, slot, &self.cx),
-            false => Acquire::new(&src.url, None, false, slot, &self.cx),
+        let mut a = match link.plain {
+            true => Acquire::plain(&link.url, slot, &self.cx),
+            false => Acquire::new(&link.url, None, false, slot, &self.cx),
         };
         if self.pages {
             a = a.failures_are_pages();
@@ -407,7 +407,7 @@ impl Files {
                 let index = self.got.len();
                 Step::Done(Err(Missed {
                     index,
-                    url: self.sources[index].url.clone(),
+                    url: self.links[index].url.clone(),
                     fetch,
                 }))
             }

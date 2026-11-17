@@ -35,16 +35,16 @@ pub fn fetch(
     }
 }
 
-/// The files of `sources`, one after another, into files named after
+/// The files of `links`, one after another, into files named after
 /// `slots` ([`Files::slot`]): all of them, or which did not come and why
 /// (the files that came are left for the caller to remove).
 pub fn fetch_files(
-    sources: Vec<job::Source>,
+    links: Vec<job::FileLink>,
     slots: &Path,
     cx: &Context,
 ) -> Result<Vec<job::Got>, job::Missed> {
     run_job(
-        &mut job::Files::new(sources, slots.to_path_buf(), cx),
+        &mut job::Files::new(links, slots.to_path_buf(), cx),
         &Native::new(cx),
     )
 }

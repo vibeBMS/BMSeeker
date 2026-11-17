@@ -237,14 +237,14 @@ impl Http for Client {
         if !self.user_agent.is_empty() {
             req.headers.insert("User-Agent", &self.user_agent);
         }
-        crate::hosts::retrying(self.progress.as_deref(), || fetch(&req))
+        crate::hosts::retrying(self.progress.as_deref(), || get_bytes(&req))
     }
 }
 
 /// `req`'s answer, its headers not looked at (ehttp gives up on one that
 /// is not ASCII, as a file name in Japanese).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn fetch(req: &ehttp::Request) -> Answer {
+pub(crate) fn get_bytes(req: &ehttp::Request) -> Answer {
     let mut r = req.fetch_raw_native(false).map_err(|e| e.to_string())?;
     if !r.status().is_success() {
         return Err(NetError::Status(r.status().as_u16()));

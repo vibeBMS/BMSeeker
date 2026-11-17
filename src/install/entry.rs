@@ -57,13 +57,13 @@ pub enum When {
 /// One download of an entry: its links (with none, those the sources
 /// find), what they are for, and when it is taken.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Step {
+pub struct EntryStep {
     pub links: Vec<String>,
     pub role: Role,
     pub when: When,
 }
 
-impl Step {
+impl EntryStep {
     /// Whether the step is taken, the library as it is now and `before`
     /// what the step before it came to.
     pub fn due(&self, e: &Entry, lib: &Library, before: &[Done]) -> bool {
@@ -87,8 +87,8 @@ pub fn has_song(e: &Entry, lib: &Library) -> bool {
 /// the song only if the chart is left waiting (none of the chart's own
 /// links: only if it is still missing); else the song, then the chart
 /// unless the song brought it.
-pub fn entry_steps(e: &Entry, lib: &Library) -> Vec<Step> {
-    let step = |links: &Vec<String>, role, when| Step {
+pub fn entry_steps(e: &Entry, lib: &Library) -> Vec<EntryStep> {
+    let step = |links: &Vec<String>, role, when| EntryStep {
         links: links.clone(),
         role,
         when,
@@ -178,7 +178,7 @@ pub fn entry_in(
     sources: &crate::sources::Sources,
     batch: &mut Batch,
     cx: &crate::hosts::Context,
-    mut each: impl FnMut(&Step, &[Done]),
+    mut each: impl FnMut(&EntryStep, &[Done]),
 ) -> Vec<Done> {
     let mut out = Vec::new();
     let mut last: Vec<Done> = Vec::new();
@@ -224,7 +224,7 @@ mod tests {
         }
     }
 
-    fn roles(steps: &[Step]) -> Vec<(Role, When)> {
+    fn roles(steps: &[EntryStep]) -> Vec<(Role, When)> {
         steps.iter().map(|s| (s.role, s.when)).collect()
     }
 
@@ -277,7 +277,7 @@ mod tests {
         m.put(Path::new("bms/Song/x.bms"), b"#TITLE Song [X]", 0);
         lib.add(Path::new("bms/Song/x.bms"), Some(&e.md5));
         assert!(!steps[1].due(&e, &lib, &waiting));
-        let missing = Step {
+        let missing = EntryStep {
             links: Vec::new(),
             role: Role::Diff,
             when: When::Missing,

@@ -11,7 +11,7 @@ pub mod entry;
 pub mod job;
 pub mod plan;
 
-pub use entry::{entry_steps, Batch, Entry, Step, When};
+pub use entry::{entry_steps, Batch, Entry, EntryStep, When};
 pub use plan::{apply, take, Item, Naming, Outcome, Request, Role};
 
 /// What became of one link.

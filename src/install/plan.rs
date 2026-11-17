@@ -10,7 +10,7 @@ use crate::chart::{md5_key, ChartInfo};
 use crate::fs::{file_name, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
-use crate::package::{classify, split, Class, Package, Staged};
+use crate::package::{classify, split, Package, PackageKind, Staged};
 use crate::placement::{self, covers, is_chart, Located, Rules};
 use crate::unpack::{unpack, Blob, Member, BUDGET};
 use std::collections::{HashMap, HashSet};
@@ -522,7 +522,7 @@ pub fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> 
     let mut new: Vec<&Package> = Vec::new();
     for p in &packages {
         match classify(p, s, lib, req.role, req.rules) {
-            Class::Owned => {
+            PackageKind::Owned => {
                 let dest = match owned_vote(s, p, lib) {
                     Vote::One(d) => Some(d),
                     _ => None,
@@ -542,8 +542,8 @@ pub fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> 
                     outcome: Outcome::Owned(at.unwrap_or_default()),
                 });
             }
-            Class::Song => new.push(p),
-            Class::Diff => {
+            PackageKind::Song => new.push(p),
+            PackageKind::Diff => {
                 let got = diff_items(fs, s, p, lib, req);
                 let sure = got.iter().all(|i| matches!(i.outcome, Outcome::Into(_)));
                 // a song's link: a folder of its own unless sure

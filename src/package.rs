@@ -2,8 +2,8 @@
 //! holds, and what each is to the library. A package is a song's folder
 //! (its charts with their files) or a chart on its own; one archive may
 //! hold several ([`split`], by the BeMusicSeeker fork's rules). Each is
-//! the library's already ([`Class::Owned`]), a song new to it
-//! ([`Class::Song`]), or charts for a song's folder there ([`Class::Diff`]):
+//! the library's already ([`PackageKind::Owned`]), a song new to it
+//! ([`PackageKind::Song`]), or charts for a song's folder there ([`PackageKind::Diff`]):
 //! [`classify`], the link it came from counting most. Where the rules are
 //! not sure, the whole download is one package.
 
@@ -12,7 +12,7 @@ use crate::fs::Fs;
 use crate::install::plan::Role;
 use crate::library::Library;
 use crate::placement::{class_of, covers, is_chart, key, rel, same_artist, same_song_title};
-use crate::placement::{Class as Kind, Rules};
+use crate::placement::{Class, Rules};
 use crate::unpack::Member;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -107,7 +107,7 @@ impl Package {
     pub fn has_audio(&self, s: &Staged) -> bool {
         self.files
             .iter()
-            .any(|&f| class_of(&rel(&s.members[f].rel, Path::new(""))) == Some(Kind::Audio))
+            .any(|&f| class_of(&rel(&s.members[f].rel, Path::new(""))) == Some(Class::Audio))
     }
 
     /// Its files below the folder of its chart `c`, by their path there
@@ -165,7 +165,7 @@ impl Tree {
 }
 
 /// The files below `dir` (paths in it) by kind, as a chart names them.
-fn keys_below(s: &Staged, dir: &Path) -> HashSet<(Kind, String)> {
+fn keys_below(s: &Staged, dir: &Path) -> HashSet<(Class, String)> {
     s.members
         .iter()
         .filter(|m| m.rel.starts_with(dir))
@@ -178,14 +178,17 @@ fn keys_below(s: &Staged, dir: &Path) -> HashSet<(Kind, String)> {
 
 /// Whether one of the files `info` uses (sounds, BGA, stage file, banner,
 /// back image, preview) is among `have`.
-fn uses_any(info: &ChartInfo, have: &HashSet<(Kind, String)>) -> bool {
+fn uses_any(info: &ChartInfo, have: &HashSet<(Class, String)>) -> bool {
     let has =
-        |kind: Kind, n: &str| matches!(key(n), Some(Ok(k)) if have.contains(&(kind, k.clone())));
-    info.sounds.iter().any(|n| has(Kind::Audio, n))
-        || info.images.iter().any(|n| has(Kind::Image, n))
-        || info.movies.iter().any(|n| has(Kind::Movie, n))
-        || info.extra_images().into_iter().any(|n| has(Kind::Image, n))
-        || has(Kind::Audio, &info.preview)
+        |kind: Class, n: &str| matches!(key(n), Some(Ok(k)) if have.contains(&(kind, k.clone())));
+    info.sounds.iter().any(|n| has(Class::Audio, n))
+        || info.images.iter().any(|n| has(Class::Image, n))
+        || info.movies.iter().any(|n| has(Class::Movie, n))
+        || info
+            .extra_images()
+            .into_iter()
+            .any(|n| has(Class::Image, n))
+        || has(Class::Audio, &info.preview)
 }
 
 /// A sound file right in `files` named `preview…` or `_preview…` (a song's
@@ -194,7 +197,7 @@ fn preview_sound(s: &Staged, files: &[usize]) -> bool {
     files.iter().any(|&f| {
         let name = crate::fs::file_name(&s.members[f].rel).to_lowercase();
         (name.starts_with("preview") || name.starts_with("_preview"))
-            && class_of(&name) == Some(Kind::Audio)
+            && class_of(&name) == Some(Class::Audio)
     })
 }
 
@@ -307,7 +310,7 @@ fn walk(s: &Staged, tree: &Tree, dir: &Path, out: &mut Vec<Package>) -> bool {
 
 /// What a package is to the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Class {
+pub enum PackageKind {
     /// Each of its charts is in the library.
     Owned,
     /// A song new to the library: a folder of its own.
@@ -318,24 +321,24 @@ pub enum Class {
 }
 
 /// What the package `p` of `s` is, the link it came from (`role`) counting
-/// most: all its charts in `lib`: [`Class::Owned`]; some: [`Class::Diff`]
+/// most: all its charts in `lib`: [`PackageKind::Owned`]; some: [`PackageKind::Diff`]
 /// (what is new goes into the song's folder). A chart on its own, or what a
-/// separate chart's link brought: a [`Class::Diff`]. A song's link: a
-/// [`Class::Song`] when it holds any sound. Anything else: a song when it
+/// separate chart's link brought: a [`PackageKind::Diff`]. A song's link: a
+/// [`PackageKind::Song`] when it holds any sound. Anything else: a song when it
 /// holds its charts' sounds (`rules`), else a 差分.
-pub fn classify(p: &Package, s: &Staged, lib: &Library, role: Role, rules: Rules) -> Class {
+pub fn classify(p: &Package, s: &Staged, lib: &Library, role: Role, rules: Rules) -> PackageKind {
     let owned = p.charts.iter().filter(|&&c| s.owned(c, lib)).count();
     if !p.charts.is_empty() && owned == p.charts.len() {
-        return Class::Owned;
+        return PackageKind::Owned;
     }
     if owned > 0 || s.loose {
-        return Class::Diff;
+        return PackageKind::Diff;
     }
     match role {
-        Role::Diff => Class::Diff,
-        Role::Song if p.has_audio(s) => Class::Song,
-        Role::Any if p.complete(s, rules) => Class::Song,
-        _ => Class::Diff,
+        Role::Diff => PackageKind::Diff,
+        Role::Song if p.has_audio(s) => PackageKind::Song,
+        Role::Any if p.complete(s, rules) => PackageKind::Song,
+        _ => PackageKind::Diff,
     }
 }
 
@@ -474,18 +477,21 @@ mod tests {
         let p = &split(&s)[0];
         let rules = Rules::default();
         let lib = Library::new(Path::new("bms"));
-        assert_eq!(classify(p, &s, &lib, Role::Song, rules), Class::Song);
-        assert_eq!(classify(p, &s, &lib, Role::Any, rules), Class::Song);
+        assert_eq!(classify(p, &s, &lib, Role::Song, rules), PackageKind::Song);
+        assert_eq!(classify(p, &s, &lib, Role::Any, rules), PackageKind::Song);
         // a separate chart's link: a 差分, whatever it holds
-        assert_eq!(classify(p, &s, &lib, Role::Diff, rules), Class::Diff);
+        assert_eq!(classify(p, &s, &lib, Role::Diff, rules), PackageKind::Diff);
         // charts only: a 差分 unless a song's link brought it
         let d = staged(&[("x.bms", SONG)]);
         let q = &split(&d)[0];
-        assert_eq!(classify(q, &d, &lib, Role::Any, rules), Class::Diff);
+        assert_eq!(classify(q, &d, &lib, Role::Any, rules), PackageKind::Diff);
         let d2 = staged(&[("x.bms", SONG), ("y.ogg", "x")]);
         let q2 = &split(&d2)[0];
-        assert_eq!(classify(q2, &d2, &lib, Role::Song, rules), Class::Song);
-        assert_eq!(classify(q2, &d2, &lib, Role::Any, rules), Class::Diff);
+        assert_eq!(
+            classify(q2, &d2, &lib, Role::Song, rules),
+            PackageKind::Song
+        );
+        assert_eq!(classify(q2, &d2, &lib, Role::Any, rules), PackageKind::Diff);
         // in the library: owned
         let owned = |md5: &str| Owned {
             path: "bms/Song/a.bms".into(),
@@ -493,7 +499,7 @@ mod tests {
             ..Default::default()
         };
         let lib = Library::from_catalog(Path::new("bms"), [owned(&s.charts[0].md5)]);
-        assert_eq!(classify(p, &s, &lib, Role::Song, rules), Class::Owned);
+        assert_eq!(classify(p, &s, &lib, Role::Song, rules), PackageKind::Owned);
         // some of its charts: what is new goes into the song's folder
         let more = staged(&[
             ("Song/a.bms", SONG),
@@ -501,6 +507,9 @@ mod tests {
             ("Song/01.ogg", "x"),
         ]);
         let m = &split(&more)[0];
-        assert_eq!(classify(m, &more, &lib, Role::Song, rules), Class::Diff);
+        assert_eq!(
+            classify(m, &more, &lib, Role::Song, rules),
+            PackageKind::Diff
+        );
     }
 }
