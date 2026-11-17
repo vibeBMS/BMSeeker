@@ -7,7 +7,7 @@
 //! read its library's charts when it likes).
 
 use crate::chart::ChartInfo;
-use crate::fs::{file_name, Fs};
+use crate::fs::{file_name, Fs, Store};
 use crate::placement::{is_chart, rel, song_folders_except, Class, Folder, Keys, Names};
 use crate::titles;
 use std::cell::{OnceCell, RefCell};
@@ -147,6 +147,78 @@ fn hash_key(h: &str) -> Option<String> {
     (!h.is_empty()).then(|| h.to_ascii_lowercase())
 }
 
+/// A chart file as the library knows it: its hashes and what it says
+/// (None: a chart it cannot make out).
+struct Read {
+    md5: String,
+    sha256: String,
+    info: Option<ChartInfo>,
+}
+
+impl Read {
+    /// The chart `p` (None: it cannot be read).
+    fn of(fs: &dyn Fs, p: &Path) -> Option<Read> {
+        let bytes = fs.read(p).ok()?;
+        Some(Read {
+            md5: crate::install::md5_hex(&bytes),
+            sha256: sha256_hex(&bytes),
+            info: crate::chart::info(p, &bytes),
+        })
+    }
+
+    /// The charts `paths`, in order (natively on as many threads as there
+    /// are cores, eight at most).
+    fn all(fs: &dyn Fs, paths: &[PathBuf]) -> Vec<Option<Read>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+            let chunk = paths.len().div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                let parts: Vec<_> = paths
+                    .chunks(chunk)
+                    .map(|part| s.spawn(move || part.iter().map(|p| Read::of(fs, p)).collect()))
+                    .collect();
+                let mut out: Vec<Option<Read>> = Vec::with_capacity(paths.len());
+                for h in parts {
+                    match h.join() {
+                        Ok(part) => out.extend::<Vec<_>>(part),
+                        Err(e) => std::panic::resume_unwind(e),
+                    }
+                }
+                out
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        paths.iter().map(|p| Read::of(fs, p)).collect()
+    }
+}
+
+/// A chart in the scan's cache ([`Library::scan_cached`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Cached {
+    path: PathBuf,
+    /// Its modification time (seconds) and size.
+    stamp: (i64, u64),
+    md5: String,
+    sha256: String,
+    title: String,
+    artist: String,
+}
+
+impl Cached {
+    fn read(&self) -> Read {
+        Read {
+            md5: self.md5.clone(),
+            sha256: self.sha256.clone(),
+            info: Some(ChartInfo {
+                title: self.title.clone(),
+                artist: self.artist.clone(),
+                ..Default::default()
+            }),
+        }
+    }
+}
+
 /// The SHA-256 of `bytes`, in hex.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
@@ -170,16 +242,6 @@ impl Library {
     #[cfg(test)]
     pub(crate) fn scan(fs: &dyn Fs, root: &Path) -> Library {
         let mut lib = Library::new(root);
-        lib.read_all(fs);
-        lib
-    }
-
-    /// The library below `root`, every chart read now, passing by the
-    /// folder `skip` (the downloads waiting for their songs, when they are
-    /// kept in the library).
-    pub fn scan_except(fs: &dyn Fs, root: &Path, skip: &Path) -> Library {
-        let mut lib = Library::new(root);
-        lib.skip = Some(skip.to_path_buf());
         lib.read_all(fs);
         lib
     }
@@ -332,31 +394,109 @@ impl Library {
         }
     }
 
+    /// The chart `p` as `r` says (its hashes kept).
+    fn know(&mut self, p: PathBuf, r: Read) {
+        if let Some(dir) = p.parent() {
+            self.hold(r.md5, dir);
+            self.hold(r.sha256, dir);
+        }
+        self.charts.get_mut().insert(p, r.info);
+    }
+
     /// The chart `p`, read (and its hashes kept).
     fn read_chart(&mut self, fs: &dyn Fs, p: &Path) {
-        let Ok(bytes) = fs.read(p) else {
-            return;
-        };
-        if let Some(dir) = p.parent() {
-            self.hold(crate::install::md5_hex(&bytes), dir);
-            self.hold(sha256_hex(&bytes), dir);
+        if let Some(r) = Read::of(fs, p) {
+            self.know(p.to_path_buf(), r);
         }
-        let info = crate::chart::info(p, &bytes);
-        self.charts.get_mut().insert(p.to_path_buf(), info);
+    }
+
+    /// The paths of its songs' charts.
+    fn chart_paths(&self, fs: &dyn Fs) -> Vec<PathBuf> {
+        let s = self.songs(fs);
+        s.list
+            .iter()
+            .flat_map(|s| s.charts.iter().map(|c| s.dir.join(c)))
+            .collect()
     }
 
     /// Every song's folder and chart, read now.
+    #[cfg(test)]
     fn read_all(&mut self, fs: &dyn Fs) {
-        self.songs(fs);
-        let charts: Vec<PathBuf> = self.songs.get().map_or(Vec::new(), |s| {
-            s.list
-                .iter()
-                .flat_map(|s| s.charts.iter().map(|c| s.dir.join(c)))
-                .collect()
-        });
-        for c in charts {
-            self.read_chart(fs, &c);
+        let paths = self.chart_paths(fs);
+        for (p, r) in paths.iter().zip(Read::all(fs, &paths)) {
+            if let Some(r) = r {
+                self.know(p.clone(), r);
+            }
         }
+    }
+
+    /// The library below `root`, every chart read now, passing by the
+    /// folder `skip` (the downloads waiting for their songs, when they are
+    /// kept in the library); but a chart whose time and size the file
+    /// `cache` (written by an earlier scan) holds is taken from it, not
+    /// read: its hashes, title and artist. `cache` written again after.
+    pub fn scan_cached(fs: &dyn Store, root: &Path, skip: &Path, cache: &Path) -> Library {
+        let mut lib = Library::new(root);
+        lib.skip = Some(skip.to_path_buf());
+        let read = fs.as_fs();
+        let mut known: HashMap<PathBuf, Cached> = read
+            .read(cache)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<Cached>>(&b).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.path.clone(), c))
+            .collect();
+        let paths = lib.chart_paths(read);
+        let stamps: Vec<_> = paths.iter().map(|p| read.stamp(p)).collect();
+        let hits: Vec<Option<Cached>> = paths
+            .iter()
+            .zip(&stamps)
+            .map(|(p, stamp)| known.remove(p).filter(|c| Some(c.stamp) == *stamp))
+            .collect();
+        let missed: Vec<PathBuf> = paths
+            .iter()
+            .zip(&hits)
+            .filter(|(_, hit)| hit.is_none())
+            .map(|(p, _)| p.clone())
+            .collect();
+        let mut fresh = Read::all(read, &missed).into_iter();
+        let mut kept = Vec::with_capacity(paths.len());
+        for ((p, stamp), hit) in paths.into_iter().zip(stamps).zip(hits) {
+            let r = match hit {
+                Some(c) => {
+                    let r = c.read();
+                    kept.push(c);
+                    r
+                }
+                None => {
+                    let Some(r) = fresh.next().flatten() else {
+                        continue;
+                    };
+                    if let (Some(stamp), Some(i)) = (stamp, &r.info) {
+                        kept.push(Cached {
+                            path: p.clone(),
+                            stamp,
+                            md5: r.md5.clone(),
+                            sha256: r.sha256.clone(),
+                            title: i.title.clone(),
+                            artist: i.artist.clone(),
+                        });
+                    }
+                    r
+                }
+            };
+            lib.know(p, r);
+        }
+        match fs.create(cache, None) {
+            Ok(w) => {
+                if let Err(e) = serde_json::to_writer(std::io::BufWriter::new(w), &kept) {
+                    log::warn!("{}: {e}", cache.display());
+                }
+            }
+            Err(e) => log::warn!("{}: {e}", cache.display()),
+        }
+        lib
     }
 
     fn songs(&self, fs: &dyn Fs) -> &Songs {
@@ -454,7 +594,8 @@ mod tests {
     #[test]
     fn scanned() {
         let m = library();
-        let lib = Library::scan_except(&m, Path::new("bms"), Path::new("bms/dl"));
+        let cache = Path::new("bms/dl/scan.json");
+        let lib = Library::scan_cached(&m, Path::new("bms"), Path::new("bms/dl"), cache);
         let md5 = crate::install::md5_hex(b"#TITLE Other\n#ARTIST y\n");
         assert!(lib.owns(&md5) && lib.owns(&md5.to_uppercase()));
         assert_eq!(lib.folders_of(&md5), [PathBuf::from("bms/Pack/Other")]);
@@ -473,6 +614,28 @@ mod tests {
             .map(|c| c.title)
             .collect();
         assert_eq!(titles, ["Other"]);
+        // scanned again: a chart of the time and size it had is the cache's
+        // (its hashes, title and artist); another is read
+        let new = b"#TITLE Newer\n#ARTIST y\n";
+        m.put(
+            Path::new("bms/Pack/Other/b.bme"),
+            b"#TITLE Wrong\n#ARTIST y\n",
+            0,
+        );
+        m.put(Path::new("bms/Song/a.bms"), new, 5);
+        let again = Library::scan_cached(&m, Path::new("bms"), Path::new("bms/dl"), cache);
+        assert!(again.owns(&md5) && again.owns(&crate::install::md5_hex(new)));
+        let titles = |lib: &Library| -> Vec<String> {
+            lib.charts_below(&m, Path::new("bms"))
+                .into_iter()
+                .map(|c| c.title)
+                .collect()
+        };
+        assert_eq!(titles(&again), ["Other", "Newer"]);
+        // a cache that cannot be read: every chart read
+        m.put(cache, b"{", 0);
+        let read = Library::scan_cached(&m, Path::new("bms"), Path::new("bms/dl"), cache);
+        assert_eq!(titles(&read), ["Wrong", "Newer"]);
         // a chart and a song coming in
         let mut lib = lib;
         lib.add(Path::new("bms/Song/c.bms"), Some("ABC"));

@@ -289,8 +289,11 @@ pub fn done_text(title: &str, d: &Done) -> String {
     }
 }
 
-/// The library below `dir`, every chart read (their MD5 and SHA-256);
-/// not those waiting in its `downloads` folder.
+/// The library below `dir`, every chart read (their MD5 and SHA-256), but
+/// those the last scan read as they are now (`downloads/scan.json`); not
+/// those waiting in its `downloads` folder.
 pub fn scan(dir: &Path, downloads: &str) -> bmseeker::library::Library {
-    bmseeker::library::Library::scan_except(&Disk, dir, &dir.join(downloads))
+    let downloads = dir.join(downloads);
+    let cache = downloads.join("scan.json");
+    bmseeker::library::Library::scan_cached(&Disk, dir, &downloads, &cache)
 }

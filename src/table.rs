@@ -113,18 +113,22 @@ fn str_list(v: &Value) -> Vec<String> {
 
 /// Find `<meta name="bmstable" content="...">` in an HTML page.
 pub(crate) fn find_bmstable_meta(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
+    let b = html.as_bytes();
     let mut from = 0;
-    while let Some(i) = lower[from..].find("<meta") {
+    while let Some(i) = b[from..].iter().position(|&c| c == b'<') {
         let start = from + i;
-        let end = lower[start..]
-            .find('>')
-            .map(|e| start + e)
-            .unwrap_or(lower.len());
+        from = start + 1;
+        if !b[start..]
+            .get(..5)
+            .is_some_and(|t| t.eq_ignore_ascii_case(b"<meta"))
+        {
+            continue;
+        }
+        let end = html[start..].find('>').map_or(html.len(), |e| start + e);
         let tag = &html[start..end];
-        let ltag = &lower[start..end];
+        let ltag = tag.to_ascii_lowercase();
         if ltag.contains("bmstable") {
-            if let Some(c) = attr(tag, ltag, "content") {
+            if let Some(c) = attr(tag, &ltag, "content") {
                 return Some(c);
             }
         }
@@ -234,43 +238,125 @@ fn hash(v: &str, len: usize) -> String {
     }
 }
 
-pub(crate) fn parse_data(v: &Value) -> Result<Vec<TableEntry>, TableError> {
-    let a = v
-        .as_array()
-        .ok_or_else(|| TableError::Format("data is not an array".into()))?;
-    Ok(a.iter()
-        .filter_map(Value::as_object)
-        .map(|o| {
-            let get = |k: &str| o.get(k).map(s).unwrap_or_default();
-            TableEntry {
-                md5: hash(&get("md5"), 32),
-                sha256: hash(&get("sha256"), 64),
-                level: get("level"),
-                title: get("title"),
-                artist: get("artist"),
-                url: get("url"),
-                url_diff: get("url_diff"),
-                comment: get("comment"),
-                org_md5: org_md5(o),
-            }
-        })
+/// A data JSON's entries (those with a hash), read straight from its
+/// text: a value of any JSON type where text is expected (a level as a
+/// number), anything but an object in the list passed by.
+pub(crate) fn parse_data(text: &str) -> Result<Vec<TableEntry>, TableError> {
+    let rows: Vec<Row> =
+        serde_json::from_str(text).map_err(|e| TableError::Format(format!("data: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.0)
         .filter(|e| !e.md5.is_empty() || !e.sha256.is_empty())
         .collect())
 }
 
-/// An entry's `org_md5` and `org_md5s` (a string or a list each), lower
-/// case, each once.
-fn org_md5(o: &serde_json::Map<String, Value>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for k in ["org_md5", "org_md5s"] {
-        for m in o.get(k).map(str_list).unwrap_or_default() {
-            let m = m.trim().to_ascii_lowercase();
-            if !m.is_empty() && !out.contains(&m) {
-                out.push(m);
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+
+/// A visitor's methods for the JSON values it takes as `$v` (a string, a
+/// number, a boolean as text; null, a list as nothing), the list read
+/// through.
+macro_rules! scalars {
+    ($t:ty, $v:expr) => {
+        fn visit_str<E>(self, v: &str) -> Result<$t, E> {
+            Ok($v(v.to_string()))
+        }
+        fn visit_string<E>(self, v: String) -> Result<$t, E> {
+            Ok($v(v))
+        }
+        fn visit_bool<E>(self, v: bool) -> Result<$t, E> {
+            Ok($v(v.to_string()))
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<$t, E> {
+            Ok($v(v.to_string()))
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<$t, E> {
+            Ok($v(v.to_string()))
+        }
+        fn visit_f64<E>(self, v: f64) -> Result<$t, E> {
+            let n = serde_json::Number::from_f64(v).map(|n| n.to_string());
+            Ok($v(n.unwrap_or_default()))
+        }
+        fn visit_unit<E>(self) -> Result<$t, E> {
+            Ok($v(String::new()))
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<$t, A::Error> {
+            while s.next_element::<IgnoredAny>()?.is_some() {}
+            Ok($v(String::new()))
+        }
+    };
+}
+
+/// A JSON value as text ([`s`]: a string, a number, a boolean; else
+/// nothing).
+struct Text(String);
+
+impl<'de> Deserialize<'de> for Text {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Text;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("text")
+            }
+            scalars!(Text, Text);
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Text, A::Error> {
+                while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Text(String::new()))
             }
         }
+        d.deserialize_any(V)
     }
-    out
+}
+
+/// An entry of a data JSON (None: not an object).
+struct Row(Option<TableEntry>);
+
+impl<'de> Deserialize<'de> for Row {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Row, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Row;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a table entry")
+            }
+            scalars!(Row, |_| Row(None));
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Row, A::Error> {
+                let mut e = TableEntry::default();
+                while let Some(k) = m.next_key::<std::borrow::Cow<str>>()? {
+                    let field = match &*k {
+                        "md5" => &mut e.md5,
+                        "sha256" => &mut e.sha256,
+                        "level" => &mut e.level,
+                        "title" => &mut e.title,
+                        "artist" => &mut e.artist,
+                        "url" => &mut e.url,
+                        "url_diff" => &mut e.url_diff,
+                        "comment" => &mut e.comment,
+                        // a string or a list each, lower case, each once
+                        "org_md5" | "org_md5s" => {
+                            for md5 in str_list(&m.next_value::<Value>()?) {
+                                let md5 = md5.trim().to_ascii_lowercase();
+                                if !md5.is_empty() && !e.org_md5.contains(&md5) {
+                                    e.org_md5.push(md5);
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {
+                            m.next_value::<IgnoredAny>()?;
+                            continue;
+                        }
+                    };
+                    *field = m.next_value::<Text>()?.0;
+                }
+                e.md5 = hash(&e.md5, 32);
+                e.sha256 = hash(&e.sha256, 64);
+                Ok(Row(Some(e)))
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 fn join(base: &str, rel: &str) -> Result<String, TableError> {
@@ -285,13 +371,18 @@ fn join(base: &str, rel: &str) -> Result<String, TableError> {
 }
 
 /// Decode a response body (UTF-8 with BOM, or Shift_JIS for old tables).
-pub(crate) fn decode_body(bytes: &[u8]) -> String {
+pub(crate) fn decode_body(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
-        Ok(s) => s.to_owned(),
-        Err(_) => encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned(),
+        Ok(s) => s.into(),
+        Err(_) => encoding_rs::SHIFT_JIS.decode(bytes).0,
     }
 }
+
+/// The largest table page, and header or data JSON, read (as the original
+/// BeMusicSeeker reads them).
+const PAGE_CAP: usize = 10 << 20;
+const JSON_CAP: usize = 100 << 20;
 
 /// The 発狂 / 通常 tables (ribbit.xyz's, kept by darksabun.club).
 pub const INSANE: &str = "https://darksabun.club/table/archive/insane1/";
@@ -356,13 +447,22 @@ impl TableLoader {
     }
 
     fn advance(&mut self, body: Answer) -> Result<Step, TableError> {
-        let text = decode_body(&body.map_err(|e| TableError::Http(e.to_string()))?);
+        let body = body.map_err(|e| TableError::Http(e.to_string()))?;
+        let cap = match self.stage {
+            Stage::Page(_) => PAGE_CAP,
+            _ => JSON_CAP,
+        };
+        if body.len() > cap {
+            let mib = body.len() >> 20;
+            return Err(TableError::Format(format!("{mib} MiB: too large")));
+        }
+        let text = decode_body(&body);
         let json = |t: &str| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}'));
         match std::mem::replace(&mut self.stage, Stage::Page(String::new())) {
             Stage::Page(url) => {
                 if text.trim_start().starts_with('{') {
                     self.stage = Stage::Header(url);
-                    return self.advance(Ok(text.into_bytes()));
+                    return self.advance(Ok(body));
                 }
                 let meta = find_bmstable_meta(&text).ok_or_else(|| {
                     TableError::Format("no <meta name=\"bmstable\"> found".into())
@@ -380,9 +480,7 @@ impl TableLoader {
                 Ok(Step::Get(du))
             }
             Stage::Data(header) => {
-                let entries = parse_data(
-                    &json(&text).map_err(|e| TableError::Format(format!("data: {e}")))?,
-                )?;
+                let entries = parse_data(text.trim_start_matches('\u{feff}'))?;
                 let fetched_at = web_time::SystemTime::now()
                     .duration_since(web_time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -525,22 +623,36 @@ mod tests {
     /// A separate chart's entry names its song's charts.
     #[test]
     fn the_songs_own_charts() {
-        let v: Value = serde_json::from_str(
+        let e = parse_data(
             r#"[{"md5":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","org_md5":"ABC"},{"md5":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","org_md5":["x","Y"],"org_md5s":["y","z"]},{"md5":"cccccccccccccccccccccccccccccccc"}]"#,
         )
         .unwrap();
-        let e = parse_data(&v).unwrap();
         assert_eq!(e[0].org_md5, ["abc"]);
         assert_eq!(e[1].org_md5, ["x", "y", "z"]);
         assert!(e[2].org_md5.is_empty());
         // hashes as tables write them: spaces, upper case; not a hash: no entry
-        let v: Value = serde_json::from_str(
+        let e = parse_data(
             r#"[{"md5":" 0123456789ABCDEF0123456789abcdef\n"},{"md5":"zz"},{"md5":"","sha256":"x"}]"#,
         )
         .unwrap();
-        let e = parse_data(&v).unwrap();
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].md5, "0123456789abcdef0123456789abcdef");
+        // any JSON where text is expected; what is no entry passed by
+        let e = parse_data(
+            r#"[1, "x", null, [2], {"md5":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","level":12,"title":true,"artist":{"a":1},"url":[1],"comment":null,"x":{"y":[]},"url_diff":1.5}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                e.len(),
+                &*e[0].level,
+                &*e[0].title,
+                &*e[0].artist,
+                &*e[0].url_diff
+            ),
+            (1, "12", "true", "", "1.5")
+        );
+        assert!(parse_data("{}").is_err());
         // a table kept before there were any
         let old: TableEntry = serde_json::from_str(r#"{"md5":"a","sha256":"","level":"1","title":"","artist":"","url":"","url_diff":"","comment":""}"#).unwrap();
         assert!(old.org_md5.is_empty());

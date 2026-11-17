@@ -105,9 +105,9 @@ pub(crate) fn info(path: &Path, bytes: &[u8]) -> Option<ChartInfo> {
     }
     let text = crate::text::decode_text(bytes);
     let mut out = ChartInfo::default();
-    // #WAVxx / #BMPxx in id order, each once
-    let mut wavs: Vec<(String, String)> = Vec::new();
-    let mut bmps: Vec<(String, String)> = Vec::new();
+    // #WAVxx / #BMPxx by id (case aside; in id order), the last of an id
+    let mut wavs = std::collections::BTreeMap::new();
+    let mut bmps = std::collections::BTreeMap::new();
     let first = |s: &mut String, arg: &str| {
         if s.is_empty() {
             *s = arg.to_string();
@@ -117,41 +117,45 @@ pub(crate) fn info(path: &Path, bytes: &[u8]) -> Option<ChartInfo> {
         let Some(l) = line.trim_start().strip_prefix('#') else {
             continue;
         };
+        // (note data: `#00111:…`, most of a chart)
+        if l.as_bytes().first().is_none_or(u8::is_ascii_digit) {
+            continue;
+        }
         let (cmd, arg) = l
             .split_once(|c: char| c.is_whitespace())
             .map_or((l, ""), |(c, a)| (c, a.trim()));
-        let cmd = cmd.to_ascii_uppercase();
-        match cmd.as_str() {
-            "TITLE" => out.title = arg.to_string(),
-            "ARTIST" => out.artist = arg.to_string(),
-            "STAGEFILE" => first(&mut out.stagefile, arg),
-            "BANNER" => first(&mut out.banner, arg),
-            "BACKBMP" => first(&mut out.backbmp, arg),
-            "PREVIEW" => first(&mut out.preview, arg),
-            _ => {
-                let defs = if let Some(id) = cmd.strip_prefix("WAV") {
-                    Some((id, &mut wavs))
-                } else {
-                    cmd.strip_prefix("BMP").map(|id| (id, &mut bmps))
-                };
-                if let Some((id, defs)) = defs.filter(|(id, _)| id.len() == 2) {
-                    if !arg.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()) {
-                        match defs.iter_mut().find(|(i, _)| i == id) {
-                            Some(w) => w.1 = arg.to_string(),
-                            None => defs.push((id.to_string(), arg.to_string())),
-                        }
-                    }
-                }
+        let is = |name: &str| cmd.eq_ignore_ascii_case(name);
+        if is("TITLE") {
+            out.title = arg.to_string();
+        } else if is("ARTIST") {
+            out.artist = arg.to_string();
+        } else if is("STAGEFILE") {
+            first(&mut out.stagefile, arg);
+        } else if is("BANNER") {
+            first(&mut out.banner, arg);
+        } else if is("BACKBMP") {
+            first(&mut out.backbmp, arg);
+        } else if is("PREVIEW") {
+            first(&mut out.preview, arg);
+        } else if let [a, b, c, x, y] = *cmd.as_bytes() {
+            let defs = match [a, b, c].map(|c| c.to_ascii_uppercase()) {
+                [b'W', b'A', b'V'] => &mut wavs,
+                [b'B', b'M', b'P'] => &mut bmps,
+                _ => continue,
+            };
+            if !arg.is_empty() && x.is_ascii_alphanumeric() && y.is_ascii_alphanumeric() {
+                defs.insert([x, y].map(|c| c.to_ascii_uppercase()), arg);
             }
         }
     }
-    wavs.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, f) in wavs {
-        push(&mut out.sounds, &f);
-    }
-    bmps.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, f) in bmps {
-        out.add_bga(&f);
+    let mut seen = std::collections::HashSet::new();
+    out.sounds = wavs
+        .into_values()
+        .filter(|f| seen.insert(*f))
+        .map(String::from)
+        .collect();
+    for f in bmps.into_values() {
+        out.add_bga(f);
     }
     Some(out)
 }
