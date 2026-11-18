@@ -6,7 +6,9 @@
 use super::Want;
 
 /// A download's key: `gdrive:ID`, `mediafire:ID`, `mega:HANDLE`,
-/// `dropbox:PATH`, else the URL without its fragment. A folder's link
+/// `dropbox:PATH`, else the URL without its scheme (`http://` and
+/// `https://` serve one file: an old link and a newer source's) and its
+/// fragment. A folder's link
 /// (Drive, MEGA) brings the archive of the song looked for in it: its key
 /// names that song too.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -32,19 +34,14 @@ impl DownloadKey {
     }
 }
 
-/// The URL without its fragment, its scheme and host in lower case.
+/// The URL without its scheme and fragment, its host in lower case.
 fn plain(url: &str) -> String {
     let url = url.split('#').next().unwrap_or(url);
     match url.find("://") {
         Some(i) => {
             let rest = &url[i + 3..];
             let end = rest.find(['/', '?']).unwrap_or(rest.len());
-            format!(
-                "{}://{}{}",
-                url[..i].to_ascii_lowercase(),
-                rest[..end].to_ascii_lowercase(),
-                &rest[end..]
-            )
+            format!("//{}{}", rest[..end].to_ascii_lowercase(), &rest[end..])
         }
         None => url.to_string(),
     }
@@ -155,7 +152,11 @@ mod tests {
         // anything else: the URL without its fragment
         assert_eq!(
             key("HTTP://Example.COM/a/B.zip?x=1#top"),
-            "http://example.com/a/B.zip?x=1"
+            "//example.com/a/B.zip?x=1"
+        );
+        assert_eq!(
+            key("https://manbow.nothing.sh/event/event.cgi?num=6"),
+            key("http://manbow.nothing.sh/event/event.cgi?num=6")
         );
         assert_eq!(key("not a link"), "not a link");
     }

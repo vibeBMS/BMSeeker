@@ -668,3 +668,79 @@ fn install_in_a_batch_and_cancelled() {
 }
 
 use std::path::{Path, PathBuf};
+
+/// 発狂 ★1 "Parousia [HARD]": the event's index and the work's page name
+/// the same dead links, a source names the work again (https, the table
+/// http) and another page naming them too. Each dead file is downloaded
+/// once, each costing the host's timeout (a Cloudflare 522 after 20 s, as
+/// measured): 40 s before the file that comes, not 80 s and more.
+#[test]
+fn dead_files_tried_once() {
+    use crate::install::{md5_hex, Batch, Done};
+    let mut hosts = Hosts::default();
+    hosts.first(Box::new(Venue));
+    let cx = Context {
+        hosts: Arc::new(hosts),
+        ..Default::default()
+    };
+    let song = zip(&[("Song/a.bms", SONG), ("Song/01.ogg", "x")]);
+    let d = Canned::default();
+    d.file(
+        "http://found.test/song.zip",
+        Ok(Served::bytes(song, None, None)),
+    );
+    let mut sources = crate::sources::Sources::default();
+    sources.push(Box::new(Known(
+        vec![
+            "https://venue.test/work/1".into(),
+            "https://venue.test/page/1".into(),
+            "http://found.test/song.zip".into(),
+        ],
+        false,
+    )));
+    let q = song_query(&md5_hex(SONG.as_bytes()));
+    let m = Arc::new(crate::fs::Mem::default());
+    let out = install(
+        &m,
+        &q,
+        &["http://venue.test/work/1"],
+        sources,
+        Batch::default(),
+        &cx,
+        &d,
+    );
+    assert!(matches!(&out.done[..], [Done::Added(..)]), "{:?}", out.done);
+    let downloads = steps(&d);
+    assert_eq!(
+        downloads,
+        [
+            "download http://author.test/a.zip",
+            "download http://mirror.test/a.zip",
+            "download http://found.test/song.zip"
+        ]
+    );
+    let dead = downloads.iter().filter(|s| !s.contains("found")).count();
+    assert_eq!(dead * 20, 40);
+    // the batch keeps them: the next entry's links to them fail at once
+    let d = Canned::default();
+    let out = install(
+        &Arc::new(crate::fs::Mem::default()),
+        &q,
+        &["http://venue.test/work/2"],
+        Default::default(),
+        out.batch,
+        &cx,
+        &d,
+    );
+    assert!(steps(&d).is_empty());
+    assert!(
+        matches!(
+            &out.done[..],
+            [Done::Failed(crate::install::Failure::Net(
+                NetError::Status(404)
+            ))]
+        ),
+        "{:?}",
+        out.done
+    );
+}

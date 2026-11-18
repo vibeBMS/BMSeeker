@@ -73,7 +73,8 @@ the community archive's "BMS Library" (`bmslibrary`: bms.kyouko.moe's `Title (by
 asked for separate charts too, as a song's archive often holds them), and dead uploaders' files by number
 (`uploaders`). What these sources bring goes into the library only if it holds the chart (its MD5); a song's archive
 also when its charts are the song's (title and artist), the chart wanted being a separate one. The sources are asked
-only for a chart whose MD5 is known, for its song or (the song in the library) for the chart itself.
+only for a chart whose MD5 is known, for its song or (the song in the library, as the song's download may have brought
+it) for the chart itself.
 `--own-links`: a song's own links only.
 
 What a download holds is sorted before anything goes into the library:
@@ -107,7 +108,8 @@ What a download holds is sorted before anything goes into the library:
   chart is downloaded first and the song only if the chart is left waiting (the song is never downloaded into a second
   folder); else the song, then its separate chart unless the song brought it.
 - **Each file once a run**, whatever link leads to it (Google Drive's `gdrive:ID`, MediaFire's, MEGA's, Dropbox's, else
-  the URL without its `#` part; a folder's link with the song looked for in it).
+  the URL without its scheme and `#` part; a folder's link with the song looked for in it). A file whose download
+  failed is not tried again that run, whatever link leads to it.
 - **Links on the way.** A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker knows (Dropbox, Google
   Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) on a download or a request
   (a page, an API) is tried again twice, after 3 and 10 seconds. Google

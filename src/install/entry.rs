@@ -12,9 +12,9 @@ use crate::hosts::{Context, DownloadKey, Want};
 use crate::library::Library;
 use crate::net::NetError;
 use crate::sources::{Query, Sources};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A table's entry: the chart wanted, its song, and their links.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -137,20 +137,28 @@ pub(crate) fn entry_steps(e: &Entry, lib: &Library) -> Vec<EntryStep> {
 }
 
 /// What a batch of downloads (a table's missing charts) shares: the files
-/// it has had (by their `DownloadKey`), and the charts it wants (a
-/// separate chart's archive of many keeps those waiting for their songs).
+/// it has had (by their `DownloadKey`), the charts it wants (a separate
+/// chart's archive of many keeps those waiting for their songs), and the
+/// files whose download failed (a copy shares them).
 #[derive(Clone, Debug, Default)]
 pub struct Batch {
     seen: HashSet<DownloadKey>,
     wanted: Vec<String>,
+    pub(super) dead: Dead,
 }
+
+/// The files whose download failed, and why: another link that leads to
+/// one (a venue's page naming the links its event's index named, a
+/// source's link to the work a table links) fails at once, not after the
+/// host's timeout again.
+pub(crate) type Dead = Arc<Mutex<HashMap<DownloadKey, NetError>>>;
 
 impl Batch {
     /// A batch for the charts `wanted` (MD5s).
     pub fn new(wanted: impl IntoIterator<Item = String>) -> Batch {
         Batch {
-            seen: HashSet::new(),
             wanted: wanted.into_iter().filter_map(|m| md5_key(&m)).collect(),
+            ..Batch::default()
         }
     }
 
@@ -191,13 +199,15 @@ impl Batch {
 /// each an [`Install`] into the library (what comes in added to it), the
 /// next one only when it is due (`EntryStep::due`). The sources are
 /// asked only with the chart's MD5, and only for the song or, with the
-/// song in the library, for the chart; never for an add-on. With the song
-/// in the library and none of the chart's links bringing it (nor leading
-/// to a page): [`Failure::NoChartLink`].
+/// song in the library when the chart's step comes (the song's step may
+/// have brought it), for the chart; never for an add-on. With the song in
+/// the library and none of the chart's links bringing it (nor leading to
+/// a page): [`Failure::NoChartLink`].
 pub struct EntryJob {
     install: Install,
     e: Entry,
-    /// The steps to come, and whether the sources are asked for each.
+    /// The steps to come, and whether the sources may be asked for each
+    /// (not for an add-on).
     steps: VecDeque<(EntryStep, bool)>,
     sources: Sources,
     have_song: bool,
@@ -217,15 +227,11 @@ impl EntryJob {
         cx: &Context,
     ) -> EntryJob {
         let have_song = has_song(&e, &lib);
-        let md5 = md5_key(&e.md5).is_some();
         let steps = entry_steps(&e, &lib)
             .into_iter()
-            .map(|s| {
-                let ask = md5 && (s.role == Role::Song || have_song);
-                (s, ask)
-            })
             // (nothing to try)
-            .filter(|(s, ask)| *ask || !s.links.is_empty())
+            .filter(|s| !s.links.is_empty() || asks(&e, s.role, &lib))
+            .map(|s| (s, true))
             .collect();
         let install = Install::new(store, downloads, lib, Query::default(), Vec::new(), cx);
         EntryJob {
@@ -275,7 +281,7 @@ impl EntryJob {
             if !step.due(&self.e, &self.install.lib, &self.last) {
                 continue;
             }
-            let sources = match ask {
+            let sources = match ask && asks(&self.e, step.role, &self.install.lib) {
                 true => self.sources.clone(),
                 false => Sources::default(),
             };
@@ -302,6 +308,13 @@ impl EntryJob {
             }
         }
     }
+}
+
+/// Whether the sources are asked for `e`'s step of `role`, the library as
+/// it is now: with the chart's MD5, for the song, or for the chart with
+/// the song in the library.
+fn asks(e: &Entry, role: Role, lib: &Library) -> bool {
+    md5_key(&e.md5).is_some() && (role == Role::Song || has_song(e, lib))
 }
 
 fn cancelled(done: &[Done]) -> bool {
@@ -564,6 +577,35 @@ mod tests {
                     Done::Failed(Failure::Net(_))
                 ]
             ),
+            "{:?}",
+            out.done
+        );
+    }
+
+    /// The song's step brings the song but not its separate chart, whose
+    /// own link is a page (an author's site): the sources are asked for the
+    /// chart then, the song being in the library (発狂 ★1 "Canon (blazing
+    /// summer mix) [EXTRA]": the song from its event, the chart in a
+    /// package found by its MD5).
+    #[test]
+    fn the_chart_asked_for_once_its_song_came() {
+        let song = zip(&[
+            (
+                "Another/n.bms",
+                "#TITLE Another [N]\n#ARTIST alpha\n#WAV01 01.wav\n",
+            ),
+            ("Another/01.ogg", "x"),
+        ]);
+        let mut e = entry("Another [X]", &["https://e/site/"]);
+        e.md5 = md5_hex(X.as_bytes());
+        let (m, _) = library();
+        let d = Canned::default();
+        d.file("https://e/song.zip", served(song));
+        d.file("https://e/site/", served(b"<html>".to_vec()));
+        let (out, asked) = entry_job(&Arc::new(m), &e, &[], &Context::default(), &d);
+        assert_eq!(asked, [true]);
+        assert!(
+            matches!(&out.done[..], [Done::Added(..), Done::Page(_)]),
             "{:?}",
             out.done
         );
