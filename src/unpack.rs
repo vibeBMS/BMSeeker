@@ -1,8 +1,8 @@
-//! Archives (.zip, .7z, .rar, .lzh) unpacked: into a [`Store`] (a disk, a
-//! player's files: [`unpack`]) or handed over member by member
-//! ([`unpack_bytes`]). Members by their path (made safe: `safe_rel`),
-//! within a budget (an archive can claim, or expand to, anything), with
-//! the archive's file times.
+//! Archives (.zip, .7z, .rar, .lzh, .tar, .tar.gz) unpacked: into a
+//! [`Store`] (a disk, a player's files: [`unpack`]) or handed over member
+//! by member ([`unpack_bytes`]). Members by their path (made safe:
+//! `safe_rel`), within a budget (an archive can claim, or expand to,
+//! anything), with the archive's file times.
 
 use crate::fs::{ReadSeek, Store};
 use std::io::{Cursor, Write};
@@ -25,6 +25,9 @@ pub enum Format {
     SevenZ,
     Rar,
     Lzh,
+    Tar,
+    /// A tar compressed with gzip (`.tar.gz`, `.tgz`).
+    TarGz,
 }
 
 impl Format {
@@ -35,11 +38,24 @@ impl Format {
             Format::SevenZ => "7z",
             Format::Rar => "rar",
             Format::Lzh => "lzh",
+            Format::Tar => "tar",
+            Format::TarGz => "tar.gz",
         }
     }
 }
 
-/// The archive format of a file's first bytes.
+/// How many first bytes of a file [`sniff`] is given (a tar's first
+/// header is in them; a gzip's too, compressed).
+pub const HEAD: usize = 4096;
+
+/// A tar's first header (512 bytes) holds `ustar` at 257 (`ustar\0` in a
+/// POSIX one, `ustar ` in a GNU one).
+fn is_tar(h: &[u8]) -> bool {
+    h.get(257..262) == Some(b"ustar")
+}
+
+/// The archive format of a file's first bytes (a tar's: its first 512; a
+/// gzip's is a tar's if what they decompress to is one).
 pub fn sniff(h: &[u8]) -> Option<Format> {
     if h.starts_with(b"PK\x03\x04") || h.starts_with(b"PK\x05\x06") {
         Some(Format::Zip)
@@ -50,27 +66,52 @@ pub fn sniff(h: &[u8]) -> Option<Format> {
     } else if h.len() >= 7 && h[2] == b'-' && h[6] == b'-' && matches!(&h[3..5], b"lh" | b"lz") {
         // an LHA header: `-lh5-` (its method) after its size and checksum
         Some(Format::Lzh)
+    } else if is_tar(h) {
+        Some(Format::Tar)
+    } else if h.starts_with(&[0x1f, 0x8b]) {
+        // (what decompresses before the bytes end, or are not gzip)
+        use std::io::Read;
+        let mut tar = Vec::with_capacity(512);
+        let _ = flate2::read::GzDecoder::new(h)
+            .take(512)
+            .read_to_end(&mut tar);
+        is_tar(&tar).then_some(Format::TarGz)
     } else {
         None
     }
 }
 
+/// The first [`HEAD`] bytes `r` reads (fewer if it ends).
+fn head(r: &mut dyn std::io::Read) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(HEAD);
+    r.take(HEAD as u64).read_to_end(&mut head)?;
+    Ok(head)
+}
+
 /// The archive format of the file `p` on a disk, from its first bytes.
 pub fn sniff_file(p: &Path) -> Option<Format> {
-    use std::io::Read;
-    let mut head = [0u8; 8];
-    let n = std::fs::File::open(p).ok()?.read(&mut head).ok()?;
-    sniff(&head[..n])
+    sniff(&head(&mut std::fs::File::open(p).ok()?).ok()?)
+}
+
+/// Archive file name extensions (`tar.gz`: a name's last two).
+pub const EXTS: &[&str] = &["zip", "7z", "rar", "lzh", "lha", "tar", "tgz", "tar.gz"];
+
+/// The file name `name` without its archive extension, if it has one, in
+/// any case (`Song.TAR.GZ`: `Song`).
+pub fn archive_stem(name: &str) -> Option<&str> {
+    EXTS.iter().find_map(|e| {
+        let at = name.len().checked_sub(e.len() + 1)?;
+        let (stem, ext) = (name.get(..at)?, name.get(at..)?);
+        (ext.starts_with('.') && ext[1..].eq_ignore_ascii_case(e) && !stem.is_empty())
+            .then_some(stem)
+    })
 }
 
 /// Whether a file is an archive by its name.
 pub(crate) fn is_archive(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "zip" | "7z" | "rar" | "lzh" | "lha"
-        )
-    })
+    p.file_name()
+        .is_some_and(|n| archive_stem(&n.to_string_lossy()).is_some())
 }
 
 /// An archive: a file in the store, or bytes.
@@ -390,8 +431,71 @@ fn members(
                 }
             }
         }
+        Format::Tar | Format::TarGz => {
+            let r: Box<dyn std::io::Read> = if format == Format::TarGz {
+                // a few bytes can decompress to anything: what is passed by
+                // (links, folders) counts too, up to twice the budget
+                Box::new(Within {
+                    // (gzip members one after another are one stream)
+                    r: flate2::read::MultiGzDecoder::new(std::io::BufReader::new(r)),
+                    left: limit.saturating_mul(2),
+                    budget: limit,
+                })
+            } else {
+                r
+            };
+            let mut a = tar::Archive::new(r);
+            for e in a.entries().map_err(|e| e.to_string())? {
+                let mut e = e.map_err(|e| e.to_string())?;
+                use tar::EntryType as T;
+                // files only: a link (symbolic or hard) is not unpacked, as
+                // its target would be its data, nor a folder or a device
+                let kind = e.header().entry_type();
+                if !matches!(kind, T::Regular | T::Continuous | T::GNUSparse) {
+                    continue;
+                }
+                let mtime = e.header().mtime().ok().map(|t| t as i64);
+                // names are bytes: UTF-8 (a PAX name is), else Shift_JIS or
+                // EUC-KR; an old tar's folder ends in `/`
+                let raw = e.path_bytes();
+                if raw.ends_with(b"/") {
+                    continue;
+                }
+                let Some(rel) = safe_rel(&crate::text::decode_text(&raw)) else {
+                    continue;
+                };
+                put(sink, rel, mtime, &mut |w| {
+                    std::io::copy(&mut e, w).map_err(|e| e.to_string())
+                })?;
+            }
+        }
     }
     Ok(())
+}
+
+/// A reader that fails past `left` bytes, `budget` being the whole's
+/// limit (for the message).
+struct Within<R> {
+    r: R,
+    left: u64,
+    budget: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for Within<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 && !buf.is_empty() {
+            // (the end may be here)
+            let mut one = [0u8];
+            return match self.r.read(&mut one)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::other(too_large(self.budget))),
+            };
+        }
+        let max = buf.len().min(self.left.min(usize::MAX as u64) as usize);
+        let n = self.r.read(&mut buf[..max])?;
+        self.left -= n as u64;
+        Ok(n)
+    }
 }
 
 /// An LHA member's path (names in Shift_JIS as LHA archives from Japan
@@ -421,17 +525,16 @@ fn lzh_name(h: &delharc::LhaHeader) -> String {
 
 /// The format of the archive `blob` and something to read it with.
 fn reader(blob: Blob, store: &dyn Store) -> Result<(Format, Box<dyn ReadSeek + Send>), String> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom};
     let mut r: Box<dyn ReadSeek + Send> = match blob {
         Blob::Bytes(b) => Box::new(Cursor::new(b)),
         Blob::File(p) => store
             .open(&p)
             .map_err(|e| format!("{}: {e}", p.display()))?,
     };
-    let mut head = [0u8; 8];
-    let n = r.read(&mut head).map_err(|e| e.to_string())?;
+    let head = head(&mut r).map_err(|e| e.to_string())?;
     r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    let format = sniff(&head[..n]).ok_or("not an archive")?;
+    let format = sniff(&head).ok_or("not an archive")?;
     Ok((format, r))
 }
 
@@ -486,7 +589,11 @@ pub fn unpack(
     let mut inner = Vec::new();
     for &i in nested.iter().rev() {
         let at = dest.join(&out[i].rel);
-        let into = out[i].rel.with_extension("");
+        let rel = &out[i].rel;
+        let stem = (rel.file_name().map(|n| n.to_string_lossy()))
+            .and_then(|n| archive_stem(&n).map(str::to_owned))
+            .unwrap_or_else(|| "archive".into());
+        let into = rel.with_file_name(stem);
         let mut sink = Into {
             store,
             dest: &dest.join(&into),
@@ -776,10 +883,13 @@ mod tests {
             ]
         };
         let z = zip(&[("song/a.bms", b"#TITLE A"), ("song/01.ogg", b"ogg")]);
+        let files = [("song/a.bms", "#TITLE A"), ("song/01.ogg", "ogg")];
         for (bytes, t) in [
             (z, T - 1),
             (SEVEN.to_vec(), T),
             (crate::testkit::SONG_RAR.to_vec(), T),
+            (crate::testkit::tar(&files), T),
+            (crate::testkit::tar_gz(&files), T),
         ] {
             let mem = Mem::default();
             let got = unpack(Blob::Bytes(bytes), &mem, Path::new("d"), BUDGET).unwrap();
@@ -842,6 +952,142 @@ mod tests {
         assert!(unpack(Blob::Bytes(bad), &mem, Path::new("e"), BUDGET).is_err());
         let mut n = 0;
         assert_eq!(unpack_bytes(LZH.to_vec(), |_, _| n += 1), Ok(2));
+    }
+
+    #[test]
+    fn tar_by_its_bytes_and_its_name() {
+        use crate::testkit::{gzip, tar, tar_gz};
+        let t = tar(&[("a.bms", "#TITLE A")]);
+        assert_eq!(sniff(&t), Some(Format::Tar));
+        assert_eq!(
+            sniff(&tar_gz(&[("a.bms", "#TITLE A")])),
+            Some(Format::TarGz)
+        );
+        // a gzip of something else (a beatoraja table cache), or cut short
+        assert_eq!(sniff(&gzip(b"{\"name\": \"table\"}")), None);
+        assert_eq!(sniff(&gzip(&t)[..12]), None);
+        assert_eq!(sniff(&t[..200]), None);
+        for (name, stem) in [
+            ("Song.tar.gz", Some("Song")),
+            ("Song.TGZ", Some("Song")),
+            ("a.b.tar", Some("a.b")),
+            ("x.zip", Some("x")),
+            ("x.gz", None),
+            (".tar.gz", None),
+            ("tar", None),
+        ] {
+            assert_eq!(archive_stem(name), stem, "{name}");
+            assert_eq!(is_archive(Path::new(name)), stem.is_some(), "{name}");
+        }
+        assert_eq!(Format::TarGz.ext(), "tar.gz");
+    }
+
+    /// A tar's names kept in its folder; links, folders and devices not
+    /// unpacked; names in Shift_JIS, long ones (GNU, PAX).
+    #[test]
+    fn tar_members() {
+        use tar::{EntryType, Header};
+        let mut t = tar::Builder::new(Vec::new());
+        let put = |t: &mut tar::Builder<Vec<u8>>,
+                   kind: EntryType,
+                   name: &[u8],
+                   link: &[u8],
+                   body: &[u8]| {
+            let mut h = Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_size(body.len() as u64);
+            h.as_old_mut().name[..name.len()].copy_from_slice(name);
+            h.as_old_mut().linkname[..link.len()].copy_from_slice(link);
+            h.set_cksum();
+            t.append(&h, body).unwrap();
+        };
+        put(&mut t, EntryType::Directory, b"song/", b"", b"");
+        put(&mut t, EntryType::Regular, b"song/a.bms", b"", b"#TITLE A");
+        put(&mut t, EntryType::Regular, b"../../evil.txt", b"", b"x");
+        put(&mut t, EntryType::Regular, b"/etc/abs.txt", b"", b"y");
+        put(
+            &mut t,
+            EntryType::Symlink,
+            b"song/b.bms",
+            b"/etc/passwd",
+            b"",
+        );
+        put(&mut t, EntryType::Link, b"song/c.bms", b"song/a.bms", b"");
+        // (data a link should not have: passed by)
+        put(&mut t, EntryType::Symlink, b"song/d.bms", b"x", b"#TITLE D");
+        put(&mut t, EntryType::Char, b"song/tty", b"", b"");
+        put(&mut t, EntryType::Fifo, b"song/fifo", b"", b"");
+        put(&mut t, EntryType::Regular, b"old/", b"", b"");
+        put(
+            &mut t,
+            EntryType::Regular,
+            &[b's', b'/', 0x83, 0x5C, b'.', b'o', b'g', b'g'],
+            b"",
+            b"ogg",
+        );
+        let long = format!("song/{}.wav", "x".repeat(150));
+        let mut h = Header::new_gnu();
+        h.set_size(3);
+        t.append_data(&mut h, &long, &b"wav"[..]).unwrap();
+        let pax = format!("song/{}/ソ.bmp", "y".repeat(120));
+        t.append_pax_extensions([("path", pax.as_bytes())]).unwrap();
+        put(&mut t, EntryType::Regular, b"short.bmp", b"", b"bmp");
+        let t = t.into_inner().unwrap();
+        let expect = [
+            PathBuf::from("song/a.bms"),
+            "evil.txt".into(),
+            "etc/abs.txt".into(),
+            "s/ソ.ogg".into(),
+            long.into(),
+            pax.into(),
+        ];
+        assert_eq!(names(t.clone()).unwrap(), expect);
+        assert_eq!(names(crate::testkit::gzip(&t)).unwrap(), expect);
+        let mut got = Vec::new();
+        unpack_bytes(t, |p, b| got.push((p, b))).unwrap();
+        assert_eq!(got[0].1, b"#TITLE A");
+    }
+
+    #[test]
+    fn tar_within_the_budget() {
+        use crate::testkit::{gzip, tar, tar_gz};
+        let big = vec![0u8; 64 << 10];
+        let files = [("a.bms", &b"#TITLE A"[..]), ("big.bin", &big)];
+        for t in [tar(&files), tar_gz(&files)] {
+            let mut got = Vec::new();
+            let e = unpack_within(t, 1 << 10, |p, _| got.push(p)).unwrap_err();
+            assert!(e.contains("larger than"), "{e}");
+            assert_eq!(got, [PathBuf::from("a.bms")]);
+        }
+        // a gzip expanding to more than twice the budget in what is not
+        // unpacked (a link's data) fails too, as it comes
+        let mut t = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(big.len() as u64);
+        h.set_path("x").unwrap();
+        h.set_cksum();
+        t.append(&h, &big[..]).unwrap();
+        let t = t.into_inner().unwrap();
+        assert_eq!(unpack_within(t.clone(), 1 << 10, |_, _| {}), Ok(0));
+        let e = unpack_within(gzip(&t), 1 << 10, |_, _| {}).unwrap_err();
+        assert!(e.ends_with(&too_large(1 << 10)), "{e}");
+        assert_eq!(unpack_within(gzip(&t), 64 << 10, |_, _| {}), Ok(0));
+    }
+
+    /// A .tar.gz in an archive holding no chart: into a folder of its name
+    /// without `.tar.gz`.
+    #[test]
+    fn tar_gz_in_an_archive() {
+        use crate::fs::Mem;
+        let inner = crate::testkit::tar_gz(&[("Song/song.bms", "#TITLE A")]);
+        let outer = zip(&[("Song_ogg.tar.gz", &inner)]);
+        let mem = Mem::default();
+        let got = unpack(Blob::Bytes(outer), &mem, Path::new("d"), BUDGET).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].rel, PathBuf::from("Song_ogg/Song/song.bms"));
+        assert_eq!(got[0].mtime, Some(T));
+        assert!(mem.get(Path::new("d/Song_ogg.tar.gz")).is_none());
     }
 
     #[test]

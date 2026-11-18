@@ -184,6 +184,27 @@ mod tests {
         );
     }
 
+    /// A .tar.gz (and a .tgz) as a zip: into a folder of its name without
+    /// `.tar.gz`.
+    #[test]
+    fn unpacks_a_tar_gz() {
+        let root = tmp("import-tar");
+        let library = root.join("bms");
+        std::fs::create_dir_all(&library).unwrap();
+        let files = [("song.bms", CHART), ("01.ogg", "ogg")];
+        let pack = root.join("Song.tar.gz");
+        std::fs::write(&pack, crate::testkit::tar_gz(&files)).unwrap();
+        let dest = library.join("Song");
+        assert_eq!(
+            import_to(&Disk, &pack, &library).unwrap(),
+            Imported::Unpacked(dest.clone(), 2)
+        );
+        assert!(dest.join("01.ogg").is_file() && !pack.exists());
+        let m = crate::fs::Mem::default();
+        let t = Blob::Bytes(crate::testkit::tar(&files));
+        assert_eq!(unpack_into(&m, t, "x.tgz", Path::new("d")), Ok(2));
+    }
+
     /// Two songs of one title: the second gets a folder of its own; the
     /// same song again goes into its folder.
     #[test]
