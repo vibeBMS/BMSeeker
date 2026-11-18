@@ -444,8 +444,13 @@ fn new_item(
             let stem = req
                 .file
                 .as_deref()
-                .and_then(|f| Path::new(f).file_stem())
-                .map(|s| safe_name(&s.to_string_lossy()))
+                .and_then(|f| {
+                    // (`song.tar.gz`: `song`)
+                    let name = Path::new(f).file_name()?.to_string_lossy();
+                    let stem = crate::unpack::archive_stem(&name).map(str::to_owned);
+                    stem.or_else(|| Some(Path::new(f).file_stem()?.to_string_lossy().into()))
+                })
+                .map(|s| safe_name(&s))
                 .unwrap_or_else(|| "download".into());
             (named(&stem), None)
         }

@@ -132,7 +132,7 @@
       return new Promise((resolve) => {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = ".zip,.rar,.7z,.lzh,.bms,.bme,.bml,.pms,.bmson";
+        input.accept = ".zip,.rar,.7z,.lzh,.lha,.tar,.tgz,.tar.gz,.gz,.bms,.bme,.bml,.pms,.bmson";
         input.onchange = () => {
           picked = input.files[0] || null;
           resolve(picked ? picked.name : "");

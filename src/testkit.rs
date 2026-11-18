@@ -28,6 +28,40 @@ fn zipped<B: AsRef<[u8]>>(files: &[(&str, B)], o: zip::write::SimpleFileOptions)
     out.into_inner()
 }
 
+/// A tar (ustar) of `files` (name, contents), each of 2020-01-02 03:04:05
+/// UTC; a name as it is (`..` or `/` too) if it fits in 100 bytes.
+pub fn tar<B: AsRef<[u8]>>(files: &[(&str, B)]) -> Vec<u8> {
+    let mut t = tar::Builder::new(Vec::new());
+    for (name, body) in files {
+        let body = body.as_ref();
+        let mut h = tar::Header::new_ustar();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_mtime(1_577_934_245);
+        h.set_entry_type(tar::EntryType::Regular);
+        if name.len() <= 100 {
+            h.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+            h.set_cksum();
+            t.append(&h, body).unwrap();
+        } else {
+            t.append_data(&mut h, name, body).unwrap();
+        }
+    }
+    t.into_inner().unwrap()
+}
+
+/// [`tar`] compressed with gzip (a `.tar.gz`).
+pub fn tar_gz<B: AsRef<[u8]>>(files: &[(&str, B)]) -> Vec<u8> {
+    gzip(&tar(files))
+}
+
+/// `bytes` compressed with gzip.
+pub fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(bytes).unwrap();
+    z.finish().unwrap()
+}
+
 /// A RAR5 (stored) of `song/a.bms` ("#TITLE A") and `song/01.ogg`
 /// ("ogg"), both of 2020-01-02 03:04:05 UTC.
 pub const SONG_RAR: [u8; 117] = [

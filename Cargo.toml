@@ -46,7 +46,9 @@ sha2 = "0.11"
 url = "2"
 web-time = "1"
 # archives (.zip: deflate by flate2's Rust backend, below, which builds for
-# wasm32; .7z; .rar: Apache-2.0 with the UnRAR license restriction; .lzh)
+# wasm32; .7z; .rar: Apache-2.0 with the UnRAR license restriction; .lzh;
+# .tar, .tar.gz: gzip by flate2 too; tar without its xattr feature, which
+# only tar's own unpacking onto a disk uses)
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd"] }
 unrar-rs = { version = "0.16.4", default-features = false, features = ["crypto-rust"] }
@@ -55,7 +57,8 @@ delharc = "0.8"
 unicode-normalization = "0.1"
 # MEGA files are AES-128-CTR encrypted
 aes = "0.9"
-# beatoraja table caches (.bmt) are gzip
+tar = { version = "0.4.46", default-features = false }
+# beatoraja table caches (.bmt) are gzip, as .tar.gz archives
 flate2 = "1"
 
 # Natively (desktop, iOS, Android): HTTP. 3.5 for its transport API (a
