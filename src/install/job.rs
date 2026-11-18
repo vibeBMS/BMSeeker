@@ -227,6 +227,7 @@ pub struct Acquire {
     again: Again,
     /// The link is the file's own ([`Acquire::plain`]).
     plain: bool,
+    dead: super::entry::Dead,
 }
 
 impl Acquire {
@@ -251,7 +252,14 @@ impl Acquire {
             moves: 0,
             again: Again::default(),
             plain: false,
+            dead: Default::default(),
         }
+    }
+
+    /// A file in `dead` failing at once; one whose download fails put
+    /// there.
+    pub(crate) fn dead(self, dead: super::entry::Dead) -> Acquire {
+        Acquire { dead, ..self }
     }
 
     /// The file `url` itself (a mirror's), not through the hosts: whatever
@@ -265,6 +273,7 @@ impl Acquire {
 
     fn resolved(&mut self, next: Next<Result<Target, Fetch>>) -> Step<Result<Got, Fetch>> {
         self.again = Again::default();
+        self.cx.at(self.r.link());
         match next {
             Next::Ask(r) => {
                 self.asked = Some(r.clone());
@@ -272,6 +281,10 @@ impl Acquire {
             }
             Next::Done(Ok(t)) => {
                 self.asked = None;
+                let failed = self.dead.lock().unwrap().get(&dead_key(&t)).cloned();
+                if let Some(e) = failed {
+                    return self.failed(Fetch::Failed(e), None);
+                }
                 self.target = Some(t);
                 self.download()
             }
@@ -325,10 +338,15 @@ impl Acquire {
             return Step::Do(wait);
         }
         let t = self.target.take().expect("a target");
-        if self.cx.failures_are_pages && u.error != NetError::Cancelled {
+        if u.error == NetError::Cancelled {
+            return self.failed(Fetch::Failed(u.error), None);
+        }
+        if self.cx.failures_are_pages {
             let moved = u.at.filter(|a| *a != t.url);
             return self.failed(Fetch::Page, moved);
         }
+        let e = u.error.clone();
+        self.dead.lock().unwrap().insert(dead_key(&t), e);
         self.failed(Fetch::Failed(u.error), None)
     }
 
@@ -364,6 +382,10 @@ impl Acquire {
             (e, _) => Step::Done(Err(e)),
         }
     }
+}
+
+fn dead_key(t: &Target) -> crate::hosts::DownloadKey {
+    crate::hosts::DownloadKey::of(&t.url, None)
 }
 
 impl Job for Acquire {
@@ -631,13 +653,14 @@ impl Install {
             let job = self.downloads.join(format!(".job-{}", super::unique()));
             self.store.create_dir_all(&job);
             let chart = super::chart_link(&link);
-            let mut acquire = if chart {
+            let acquire = if chart {
                 Acquire::plain(&link, job.join(super::chart_name(&link)), &self.cx)
             } else {
                 // the song's own link may be a pack of many songs: its archive
                 let want = (!self.q.diff).then(|| self.q.want.clone());
                 Acquire::new(&link, want, false, job.join("download"), &self.cx)
             };
+            let mut acquire = acquire.dead(self.batch.dead.clone());
             let step = acquire.start();
             let t = Trying {
                 acquire,
@@ -656,6 +679,7 @@ impl Install {
         };
         self.next_source += 1;
         self.checked = source.checked();
+        self.cx.at(source.name());
         let mut find = TaskJob::new(source.find(&self.q));
         let step = find.start();
         self.finding(find, step)

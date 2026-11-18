@@ -16,6 +16,18 @@ use ureq::{Agent, Timeout};
 /// How long a page or an API answer may take to come.
 const ANSWER: Duration = Duration::from_secs(30);
 
+/// How long a server may take to accept a connection: one that is gone
+/// (or behind a dead route) fails in this time, not the OS's (75 s and
+/// more).
+const CONNECT: Duration = Duration::from_secs(15);
+
+/// How long a server may take to begin its answer (a page's or an API's;
+/// a download's: [`FIRST_BYTES`]) once asked.
+const ANSWER_STARTS: Duration = Duration::from_secs(20);
+
+/// How long a download's server may take to begin its answer.
+const FIRST_BYTES: Duration = Duration::from_secs(30);
+
 /// How often a download that waits for data looks at its progress.
 const TICK: Duration = Duration::from_millis(200);
 
@@ -33,8 +45,14 @@ fn config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
 }
 
 /// The agent of every request (not of downloads: [`download`]).
-static AGENT: std::sync::LazyLock<Agent> =
-    std::sync::LazyLock::new(|| config().timeout_recv_body(Some(ANSWER)).build().into());
+static AGENT: std::sync::LazyLock<Agent> = std::sync::LazyLock::new(|| {
+    config()
+        .timeout_connect(Some(CONNECT))
+        .timeout_recv_response(Some(ANSWER_STARTS))
+        .timeout_recv_body(Some(ANSWER))
+        .build()
+        .into()
+});
 
 /// `r`'s answer, once, sent with `user_agent`.
 pub(super) fn send(r: &Request, user_agent: &str) -> Answer {
@@ -70,10 +88,14 @@ pub(super) fn download(
     let failed = |e: ureq::Error| match e {
         _ if p.is_some_and(Progress::cancelled) => NetError::Cancelled,
         ureq::Error::Timeout(Timeout::PerRead) => NetError::Stalled(STALL.as_secs()),
+        ureq::Error::Timeout(Timeout::RecvResponse) => NetError::Stalled(FIRST_BYTES.as_secs()),
         e => NetError::Other(e.to_string()),
     };
     let agent = Agent::with_parts(
-        config().timeout_connect(Some(STALL)).build(),
+        config()
+            .timeout_connect(Some(CONNECT))
+            .timeout_recv_response(Some(FIRST_BYTES))
+            .build(),
         DefaultConnector::new().chain(Watch(progress.cloned())),
         ureq::unversioned::resolver::DefaultResolver::default(),
     );
