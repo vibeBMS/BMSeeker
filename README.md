@@ -112,7 +112,8 @@ What a download holds is sorted before anything goes into the library:
   failed is not tried again that run, whatever link leads to it.
 - **Links on the way.** A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker knows (Dropbox, Google
   Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) on a download or a request
-  (a page, an API) is tried again twice, after 3 and 10 seconds. Google
+  (a page, an API) is tried again twice, after 3 and 10 seconds. A server has 15 seconds to take the connection
+  and 20 (a page, an API) or 30 (a download) to begin its answer; a download then 60 without data. Google
   Drive's "Quota exceeded" (a file downloaded too often lately) is reported as such: it passes within a day.
 
 Dead uploaders' links (with `--third-party`) are downloaded from copies by number (`uploaders`). By default: gnqg
