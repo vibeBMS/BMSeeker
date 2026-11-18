@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -39,6 +39,9 @@ pub struct Progress {
     /// 0: not known
     total: AtomicU64,
     cancelled: AtomicBool,
+    /// Where it is looking or downloading from ("pixeldrain.net", a
+    /// source's name), for the person waiting.
+    at: Mutex<String>,
 }
 
 /// What a cancelled download fails with.
@@ -89,16 +92,33 @@ impl Progress {
         total.map(|t| (got as f64 / t as f64).min(1.0) as f32)
     }
 
-    /// A short line for a person: "12.3 / 40.0 MB", "Unpacking…".
+    /// It is looking or downloading at `place` (a host, a source's name).
+    pub fn set_at(&self, place: &str) {
+        let mut at = self.at.lock().unwrap();
+        if *at != place {
+            place.clone_into(&mut at);
+        }
+    }
+
+    /// A short line for a person: "12.3 / 40.0 MB · pixeldrain.net",
+    /// "Finding the file… (ginger)", "Unpacking…".
     pub fn label(&self) -> String {
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+        let at = self.at.lock().unwrap();
         match self.stage() {
             Stage::Waiting => "Waiting…".into(),
-            Stage::Finding => "Finding the file…".into(),
-            Stage::Downloading => match self.bytes() {
-                (got, Some(t)) => format!("{:.1} / {:.1} MB", mb(got), mb(t)),
-                (got, None) => format!("{:.1} MB", mb(got)),
-            },
+            Stage::Finding if at.is_empty() => "Finding the file…".into(),
+            Stage::Finding => format!("Finding the file… ({at})"),
+            Stage::Downloading => {
+                let size = match self.bytes() {
+                    (got, Some(t)) => format!("{:.1} / {:.1} MB", mb(got), mb(t)),
+                    (got, None) => format!("{:.1} MB", mb(got)),
+                };
+                match at.is_empty() {
+                    true => size,
+                    false => format!("{size} · {at}"),
+                }
+            }
             Stage::Unpacking => "Unpacking…".into(),
             Stage::Adding => "Adding to the library…".into(),
         }
@@ -148,6 +168,12 @@ mod tests {
         assert!(current().is_none());
         assert_eq!(p.label(), "1.0 / 4.0 MB");
         assert_eq!(p.fraction(), Some(0.25));
+        // where from
+        p.set_at("pixeldrain.net");
+        assert_eq!(p.label(), "1.0 / 4.0 MB · pixeldrain.net");
+        p.set_stage(Stage::Finding);
+        p.set_at("ginger");
+        assert_eq!(p.label(), "Finding the file… (ginger)");
     }
 
     #[test]

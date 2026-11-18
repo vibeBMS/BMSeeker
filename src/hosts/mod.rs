@@ -246,6 +246,16 @@ impl Context {
             p.set_stage(s);
         }
     }
+
+    /// Tell the progress (if there is one) where it is looking: `place`,
+    /// a source's name or a link's host.
+    pub(crate) fn at(&self, place: &str) {
+        if let Some(p) = self.progress() {
+            let host = Link::parse(place, 0).map(|l| l.host);
+            let at = host.as_deref().unwrap_or(place);
+            p.set_at(at.strip_prefix("www.").unwrap_or(at));
+        }
+    }
 }
 
 /// How long a download may go without data before it is given up (ms).

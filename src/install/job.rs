@@ -273,6 +273,7 @@ impl Acquire {
 
     fn resolved(&mut self, next: Next<Result<Target, Fetch>>) -> Step<Result<Got, Fetch>> {
         self.again = Again::default();
+        self.cx.at(self.r.link());
         match next {
             Next::Ask(r) => {
                 self.asked = Some(r.clone());
@@ -678,6 +679,7 @@ impl Install {
         };
         self.next_source += 1;
         self.checked = source.checked();
+        self.cx.at(source.name());
         let mut find = TaskJob::new(source.find(&self.q));
         let step = find.start();
         self.finding(find, step)
