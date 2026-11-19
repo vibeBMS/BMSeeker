@@ -49,9 +49,12 @@ pub struct Library {
 /// took files since.
 #[derive(Clone, Default)]
 pub(crate) struct Waiting {
-    pub(crate) charts: HashMap<PathBuf, (Option<(i64, u64)>, Option<ChartInfo>)>,
+    pub(crate) charts: HashMap<PathBuf, (Stamp, Option<ChartInfo>)>,
     pub(crate) changed: HashSet<PathBuf>,
 }
+
+/// A file's (modification time, size) ([`Fs::stamp`]).
+type Stamp = Option<(i64, u64)>;
 
 /// Charts read or given, by path (None: it could not be read), by their
 /// artist as compared: (title as compared, path), and those of the songs'
