@@ -461,9 +461,9 @@ Chromium).
 
 ## Releases
 
-Each push to `main` that changes the code publishes the
+Each push to `main` whose checks pass publishes the
 [nightly](https://github.com/vibeBMS/BMSeeker/releases/tag/nightly)
-prerelease (`.github/workflows/nightly.yml`): `bmseeker-<system>` (the
+prerelease (`.github/workflows/ci.yml`): `bmseeker-<system>` (the
 CLI) and `bmseeker-gui-<system>` for `linux-x64`, `linux-arm64`,
 `windows-x64`, `windows-arm64` and `macos-universal`, `bmseeker-web.zip`,
 and, as vibeBMS's nightly, `latest.json` (each file's version, SHA-256 and

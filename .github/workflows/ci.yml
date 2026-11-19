@@ -1,9 +1,15 @@
 name: CI
 
+# Checks, then the release builds (build.yml); for main, the "nightly"
+# prerelease and the web site on GitHub Pages, both with the version
+# <version>-nightly.<run>+<commit> (tools/ci_version.sh). A build that failed
+# keeps its previous file; the notes say which files this commit brought.
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # A newer commit on the same branch or pull request cancels the older run
 # (the organization's hosted runners are limited: 20 jobs, 5 macOS).
@@ -13,12 +19,12 @@ concurrency:
 
 jobs:
   # Only the default branch's newest cache of each job stays (this
-  # workflow's and the nightly's, build.yml): other refs' entries and the default branch's older ones (left when
-  # Cargo.lock, the toolchain or go.sum changed) are deleted, so the
-  # repository's 10 GB hold one set. It runs first, beside the builds, so a
-  # newer push cancelling this run does not skip it, and the space is free
-  # before this run saves. A replaced key stays until the next push: it is
-  # what this run's jobs restore from.
+  # workflow's and build.yml's): other refs' entries and the default
+  # branch's older ones (left when Cargo.lock, the toolchain or go.sum
+  # changed) are deleted, so the repository's 10 GB hold one set. It runs
+  # first, beside the builds, so a newer push cancelling this run does not
+  # skip it, and the space is free before this run saves. A replaced key
+  # stays until the next push: it is what this run's jobs restore from.
   cache-prune:
     if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-latest
@@ -96,12 +102,12 @@ jobs:
         with:
           go-version-file: gui/go.mod
           cache-dependency-path: gui/go.sum
+      # (build.yml builds it)
       - run: go vet ./...
       - run: go test ./...
-      - run: go build ./...
 
-  # BMSeeker web (web/build.sh): the commands' wasm, its tests, and the GUI
-  # for js/wasm (the nightly, nightly.yml, publishes it to GitHub Pages)
+  # BMSeeker web: the commands' wasm and its tests, and the GUI for js/wasm
+  # (build.yml builds the site, web/build.sh)
   web:
     runs-on: ubuntu-latest
     steps:
@@ -125,9 +131,102 @@ jobs:
       - run: cargo test -p bmseeker-web
       - run: GOOS=js GOARCH=wasm go vet ./...
         working-directory: gui
-      - run: cargo install wasm-bindgen-cli --locked --version "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)"
-      - run: web/build.sh
-      - uses: actions/upload-artifact@v7
+
+  # the release builds, once the checks pass (a pull request's too, as
+  # artifacts)
+  build:
+    needs: [test, wasm, gui, web]
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: nightly
+
+  # main -> the site root (https://vibebms.github.io/BMSeeker/, beside
+  # vibeBMS's /vibe/)
+  pages:
+    needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'failure') && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # one publish at a time
+    concurrency:
+      group: web-pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
         with:
-          name: BMSeeker-web
-          path: web/dist
+          name: bmseeker-web
+      - run: unzip -q bmseeker-web.zip -d site
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          commit_message: "web build ${{ github.sha }}"
+
+  release:
+    name: nightly release
+    needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'failure') && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # one release at a time: release.yml's writes latest.json and
+    # builds.json here too (a newer push cancels this whole run, and its
+    # own publishes; the release step publishes only the branch's head)
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      # the version the builds were given
+      - run: tools/ci_version.sh
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bmseeker-*
+          path: out
+          merge-multiple: true
+      - run: tools/release_manifests.sh out
+      - name: release
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          # only the branch's head is published: a newer push has its own run,
+          # and GitHub lets this token point the tag only at a branch's head
+          head() { gh api "repos/$GH_REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha; }
+          if [ "$(head)" != "$SHA" ]; then
+            echo "$GITHUB_REF_NAME has moved on from ${SHA:0:7}; its own run publishes it"
+            exit 0
+          fi
+          # the tag follows the latest commit
+          if ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$SHA" -F force=true >/dev/null \
+            && ! gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$SHA" >/dev/null; then
+            [ "$(head)" != "$SHA" ] && { echo "$GITHUB_REF_NAME moved on meanwhile"; exit 0; }
+            exit 1
+          fi
+          # shellcheck disable=SC2016 # Markdown's backquotes
+          files="$(cd out && printf '`%s` ' *)"
+          notes="$(
+            echo "The latest build of \`${GITHUB_REF_NAME}\`: version $BMSEEKER_VERSION ($(date -u '+%Y-%m-%d %H:%M UTC'))."
+            echo
+            echo "Files from this commit: $files"
+            echo
+            echo "- \`bmseeker-*\` is the command-line tool, \`bmseeker-gui-*\` the window (with the tool inside it)."
+            echo "- Linux / macOS: \`chmod +x bmseeker-*\`; on macOS also \`xattr -d com.apple.quarantine bmseeker-*\`."
+            echo "  The macOS files are universal (Apple silicon and Intel). Linux needs glibc 2.35."
+            echo "- Web: unzip \`bmseeker-web.zip\` and serve the folder over HTTP(S), or use https://vibebms.github.io/BMSeeker/."
+          )"
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --prerelease --title "Nightly" --notes "$notes" --target "$SHA"
+          else
+            gh release create nightly --prerelease --title "Nightly" --notes "$notes" --target "$SHA"
+          fi
+          gh release upload nightly out/* --clobber
+          # files no build makes any more; a failed build's stay (latest.json
+          # keeps their entries)
+          keep="$(ls out; jq -r '.channels.nightly.files | keys[]' out/latest.json; echo bmseeker-web.zip)"
+          gh release view nightly --json assets --jq '.assets[].name' | while read -r a; do
+            grep -qxF "$a" <<< "$keep" || gh release delete-asset nightly "$a" --yes
+          done

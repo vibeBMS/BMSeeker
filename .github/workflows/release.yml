@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # latest.json and builds.json are the nightly's too (nightly.yml)
+    # latest.json and builds.json are the nightly's too (ci.yml)
     concurrency:
       group: nightly-release
       cancel-in-progress: false
