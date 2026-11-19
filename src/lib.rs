@@ -29,8 +29,9 @@
 //! its hosts' strategies), [`table::TableLoader`], BMS SEARCH's lookup. A
 //! download is an [`install::job::Job`] (requests, files downloaded, waits
 //! as effects a platform's driver does): [`install::job::Acquire`] takes a
-//! link to its file. Natively `native::Native` drives both. Every place
-//! read from is in [`config::Config`].
+//! link to its file. Natively `native::Native` drives both, kept to the
+//! run's refusals by [`refusal::Guarded`]; a web page's driver builds on
+//! [`web`]. Every place read from is in [`config::Config`].
 
 #![warn(unreachable_pub)]
 
@@ -67,3 +68,4 @@ pub mod testkit;
 mod text;
 mod titles;
 pub mod unpack;
+pub mod web;

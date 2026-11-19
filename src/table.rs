@@ -382,7 +382,7 @@ pub(crate) fn decode_body(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 /// The largest table page, and header or data JSON, read (as the original
 /// BeMusicSeeker reads them).
 const PAGE_CAP: usize = 10 << 20;
-const JSON_CAP: usize = 100 << 20;
+pub(crate) const JSON_CAP: usize = 100 << 20;
 
 /// The 発狂 / 通常 tables (ribbit.xyz's, kept by darksabun.club).
 pub const INSANE: &str = "https://darksabun.club/table/archive/insane1/";

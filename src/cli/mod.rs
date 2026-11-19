@@ -20,7 +20,7 @@ use crate::fs::Store;
 use crate::hosts::{Context, Want};
 use crate::install::job::{run_job, Driver, TaskJob};
 use crate::net::Task;
-use crate::refusal::Guarded;
+use crate::refusal::{Guarded, Refusal};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,25 +94,23 @@ impl Cli {
         if r.cx.config.third_party {
             r.out.note(THIRD_PARTY_NOTICE);
         }
-        let out = r.out.clone();
-        let guarded = Guarded {
-            net: r.net,
-            refusals: r.cx.refused.clone(),
-            progress: r.cx.progress(),
-            told: Box::new(move |refusal| refused(&out, refusal)),
-        };
-        let r = &Run {
+        let told = |refusal: &Refusal| refused(&r.out, refusal);
+        let guarded = Guarded::new(r.net, &r.cx).telling(&told);
+        let run = &Run {
             net: &guarded,
             ..r.clone()
         };
-        match self.command {
-            Command::Link(c) => link::link(r, c),
-            Command::Song(c) => link::song(r, c),
-            Command::Table(c) => table::table(r, c),
-            Command::Library(c) => library::library(r, c),
+        let done = match self.command {
+            Command::Link(c) => link::link(run, c),
+            Command::Song(c) => link::song(run, c),
+            Command::Table(c) => table::table(run, c),
+            Command::Library(c) => library::library(run, c),
             #[cfg(not(target_arch = "wasm32"))]
-            Command::Event(c) => event::event(r, c),
-        }
+            Command::Event(c) => event::event(run, c),
+        };
+        // (one a task kept from the last answer: MEGA's -4)
+        guarded.tell();
+        done
     }
 }
 
@@ -124,7 +122,7 @@ the copyright holders' rights is up to you";
 
 /// A service that refused: a `refused` record (`{"refused": host,
 /// "code", "status"?, "error"}`), and a note.
-fn refused(out: &Out, r: &crate::refusal::Refusal) {
+fn refused(out: &Out, r: &Refusal) {
     let mut v = serde_json::json!({
         "refused": r.host,
         "code": r.code(),
@@ -182,5 +180,50 @@ impl Run<'_> {
     /// `url`'s body.
     fn get(&self, url: &str) -> crate::net::Answer {
         self.task(&mut crate::net::get_then(url.to_string(), |a| a))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::install::job::{Effect, Fed};
+    use crate::net::NetError;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// MEGA's API answers -4 (it limits BMSeeker's requests): the only
+    /// request of the run, and still a `refused` record.
+    #[test]
+    fn the_last_refusal_is_written() {
+        struct Limiting;
+        impl Driver for Limiting {
+            fn perform(&self, effect: Effect) -> Fed {
+                match effect {
+                    Effect::Http(_) => Fed::Http(Ok(b"-4".to_vec())),
+                    Effect::Download { .. } => Fed::Downloaded(Err(NetError::Status(404).into())),
+                    Effect::Sleep(_) => Fed::Woke,
+                }
+            }
+        }
+        let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+        let sink = lines.clone();
+        let run = Run {
+            out: Out::new(true, move |l| {
+                if let Line::Record(r) = l {
+                    sink.borrow_mut().push(r.to_string());
+                }
+            }),
+            cx: Context::default(),
+            fs: Arc::new(crate::fs::Mem::default()),
+            net: &Limiting,
+        };
+        let link = "https://mega.nz/file/bzQy3bYS#Og0LBoWkfbKwxUceGvzLHDl2exyI0l1DiQ3XNw79zMw";
+        let cli = Cli::try_parse_from(["bmseeker", "--json", "link", "resolve", link]).unwrap();
+        cli.run(&run).unwrap();
+        let lines = lines.borrow();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let refused: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(refused["refused"], "mega.nz");
+        assert_eq!(refused["code"], "rate_limited");
     }
 }

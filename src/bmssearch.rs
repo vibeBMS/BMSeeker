@@ -5,8 +5,7 @@
 //! title and artist.
 //!
 //! [`Lookup`] is a [`Task`] (`api.bmssearch.net` sends CORS headers, so a
-//! web page asks it itself) that ends with the links; [`lookup`] runs it
-//! natively.
+//! web page asks it itself) that ends with the links.
 
 use crate::hosts::Want;
 use crate::net::{Answer, Next, Request, Task};
@@ -182,13 +181,6 @@ impl Task for Lookup {
     }
 }
 
-/// [`Lookup`] run natively (blocking).
-#[cfg(test)]
-pub(crate) fn lookup(md5: &str, want: &Want, config: &crate::config::Config) -> Vec<String> {
-    let cx = crate::hosts::Context::new(config.clone());
-    crate::native::Native::new(&cx).run(&mut Lookup::new(md5, want, &config.bmssearch_api))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +269,10 @@ mod tests {
             &std::env::var("BMSEEKER_TITLE").unwrap_or_default(),
             &std::env::var("BMSEEKER_ARTIST").unwrap_or_default(),
         );
-        println!("{:?}", lookup(&md5, &w, &crate::config::Config::default()));
+        let cx = crate::hosts::Context::default();
+        let mut job =
+            crate::install::job::TaskJob::new(Lookup::new(&md5, &w, &cx.config.bmssearch_api));
+        let found = crate::install::job::run_job(&mut job, &crate::native::Native::new(&cx));
+        println!("{found:?}");
     }
 }

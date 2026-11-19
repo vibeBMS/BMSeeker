@@ -18,9 +18,10 @@ only the tool does: an event's works, probing a link, exporting a table),
 
 ```
 net            Request, Answer, NetError (code() for programs), Task / Next: requests as data
-refusal        Refusals: the services that refused in a run (Context::refused); guard, Guarded; challenge pages
+refusal        Refusals: the services that refused in a run (Context::refused); Guarded (the guard); challenge pages
 install::job   Effect / Fed / Job / Driver: downloads as data; run_job, TaskJob; Acquire, Files, Install
-native         Native: the driver natively (one HTTP agent, downloads on the calling thread); fetch, fetch_files
+native         Native: the transport natively (an HTTP agent for requests, one for downloads on the calling thread); fetch, fetch_files
+web            what a web page's drivers share: the CORS proxy's URLs, a served download, an answer's error
 hosts          Host strategies (a link -> a file, other links, or a page), Resolver, Context
 sources        Source strategies (a chart's MD5, a song's title and artist -> links)
 unpack         archives (zip, 7z, rar, lzh; nested) into an fs::Store, capped
@@ -51,28 +52,32 @@ driver retries alike and none needs to.
 ### Refusals
 
 A service that answers 429, 401, 403 or 451, or with a browser check
-whatever the status (`cf-mitigated: challenge`; a page with "Just a
-moment...", `_cf_chl_opt` or `challenges.cloudflare.com`; Google's
-"unusual traffic" CAPTCHA), or whose API says it limits us (MEGA's -4),
+(`cf-mitigated: challenge`; a page with "Just a moment...", `_cf_chl_opt`
+or Google's "unusual traffic" CAPTCHA whatever the status; a Turnstile
+widget, `challenges.cloudflare.com`, only in an answer that failed), or
+whose API says it limits us (MEGA's -4),
 has refused BMSeeker. A file host's (Google Drive's, MEGA's, Dropbox's,
 MediaFire's, pixeldrain's) 401, 403 or 451 is one file's or link's
 failure (`refusal::refuses`): Drive answers 403 for a file's quota or
 sharing. The drivers read a failed answer's start to tell
-(`native::http::answer_error`; Drive's quota said as such). `refusal::Refusals` keeps it for the run, by
+(`refusal::answer_error`, natively and through `web::unserved`; Drive's
+quota said as such). `refusal::Refusals` keeps it for the run, by
 its host (`refusal::service`: `www.` and the port left out; the hosts of
 Google Drive, MEGA, Dropbox, MediaFire, pixeldrain and BMS SEARCH as one
 each). It lives in the run's `Context` (`refused`, shared by its clones),
-so every source, host and job sees it. `Refusals::guard` keeps a
-driver's effects to it: an effect for a refused service is not done but
+so every source, host and job sees it. `refusal::Guarded` keeps a
+driver's effects to it (`Refusals::before` and `after`, which a driver
+that answers asynchronously calls itself): an effect for a refused service is not done but
 fed back `NetError::Refused` at once (no other URL, query or header
 tried, no wait), and an answer that refuses is kept and fed back so. It
 is no passing failure, so nothing retries it, and no page (not even with
 `failures_are_pages`). A source fed it finds nothing and the next is
 asked; a host's link fails and its page's other links are tried.
-`native::Native` guards itself; `refusal::Guarded` wraps any other driver
-and hands each new refusal to a callback: the CLI's `Cli::run` wraps its
-driver so (both the native and the web page's), writing a `refused`
-record, and tells the progress (`Progress::refusals`). A run is one CLI
+A transport keeps to no refusals itself (`native::Native`, the web
+page's): `Guarded` is the one guard, and hands each new refusal to a
+callback. The CLI's `Cli::run` wraps its driver so, writing a `refused`
+record (also for one a task kept from the run's last answer, MEGA's -4),
+and the guard tells the progress (`Progress::refusals`). A run is one CLI
 process; the window keeps refusals for its session and hands them to the
 next runs (`--skip-host`).
 
@@ -88,13 +93,14 @@ next runs (`--skip-host`).
   with the chart's MD5, and only for the song step or, with the song in the
   library, the chart step; never for an add-on.
 
-`native::Native` is the driver natively. Requests go through one
+`native::Native` is the transport natively. Requests go through one
 process-wide `ureq` agent, so a host's connection is kept for the next
-request. A download has an agent of its own whose connections watch its
-progress while they wait for data: a cancel or a minute of silence ends it
-on the calling thread (no helper thread, no queue); a MEGA file is
-decrypted as it comes. Waits are slept, ended by a cancel. `Native::run`
-and `Native::get` are blocking conveniences for tasks.
+request. Its downloads have an agent of their own (a host's connection
+kept for the next file) whose connections watch its progress while they
+wait for data: a cancel or a minute of silence ends one on the calling
+thread (no helper thread, no queue); a MEGA file is decrypted as it comes,
+and the file's head kept as it is written. Waits are slept, ended by a
+cancel.
 
 ### Hosts (strategy)
 

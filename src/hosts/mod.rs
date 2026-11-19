@@ -371,7 +371,10 @@ impl Resolver {
             Next::Done(Resolved::Failed(e)) => {
                 // (a refusal an API said in its answer: MEGA's)
                 if let NetError::Refused(r) = &e {
-                    self.cx.refused.keep(r.clone());
+                    let r = self.cx.refused.keep(r.clone());
+                    if let Some(p) = self.cx.progress() {
+                        p.refused(&r.host);
+                    }
                 }
                 self.or_next(Fetch::Failed(e))
             }

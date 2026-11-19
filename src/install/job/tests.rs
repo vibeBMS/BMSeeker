@@ -753,13 +753,8 @@ fn dead_files_tried_once() {
 }
 
 /// `d` kept to `cx`'s refusals, as a run's driver is.
-fn guarded<'a>(d: &'a Canned, cx: &Context) -> crate::refusal::Guarded<'a> {
-    crate::refusal::Guarded {
-        net: d,
-        refusals: cx.refused.clone(),
-        progress: cx.progress(),
-        told: Box::new(|_| {}),
-    }
+fn guarded<'a>(d: &'a Canned, cx: &'a Context) -> crate::refusal::Guarded<'a> {
+    crate::refusal::Guarded::new(d, cx)
 }
 
 /// An API source that answers 403 is not asked again in the run: not for
@@ -878,10 +873,9 @@ fn drive_file(id: &str) -> String {
 
 /// A Google Drive file's 403 (its quota, its sharing) is that file's: the
 /// next Drive file is still tried.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_drive_files_403_is_its_own() {
-    use crate::native::http::answer_error;
+    use crate::refusal::answer_error;
     let d = Canned::default();
     let quota = drive_file("Q1");
     let error = answer_error(&quota, &quota, 403, None, DRIVE_QUOTA_PAGE);
@@ -908,10 +902,9 @@ fn a_drive_files_403_is_its_own() {
 }
 
 /// Google's "unusual traffic" CAPTCHA (`/sorry/`) refuses all of Drive.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn googles_sorry_page_refuses_drive() {
-    use crate::native::http::answer_error;
+    use crate::refusal::answer_error;
     let d = Canned::default();
     let first = drive_file("A1");
     let sorry = "https://www.google.com/sorry/index?continue=https://drive.usercontent.google.com/";

@@ -1,7 +1,16 @@
 use super::*;
 use crate::hosts::Target;
+use crate::install::job::{Served, TaskJob};
 use crate::net::Request;
 use crate::testkit::{serve, tmp, Reply};
+
+/// `url`'s body, through `n`.
+fn get(n: &Native, url: &str) -> crate::net::Answer {
+    run_job(
+        &mut TaskJob::new(crate::net::get_then(url.to_string(), |a| a)),
+        n,
+    )
+}
 
 #[test]
 fn file_names() {
@@ -34,7 +43,7 @@ fn busy_then_answered() {
         ("/gone", Reply::status(404, "")),
     ]);
     let n = Native::new(&Context::default());
-    let get = |p: &str| n.get(&format!("{}{p}", s.url));
+    let get = |p: &str| get(&n, &format!("{}{p}", s.url));
     let t = std::time::Instant::now();
     assert_eq!(get("/t"), Ok(b"table".to_vec()));
     assert!(t.elapsed() >= Duration::from_secs(3));
@@ -56,7 +65,7 @@ fn downloads() {
     ]);
     let dir = tmp("native-dl");
     let n = Native::new(&Context::default());
-    let download = |url: String, mega_key| {
+    let download = |url: String, mega_key| -> Served {
         let target = Target {
             mega_key,
             ..Target::url(url)
@@ -80,6 +89,62 @@ fn downloads() {
     assert_eq!((got.name, got.at), (None, None));
     assert_eq!(got.head.len(), 20);
     assert_eq!(&got.head[..4], &[0x66, 0xe9, 0x4b, 0xd4]);
+    // the head is the file's first bytes
+    let crate::unpack::Blob::File(f) = &got.blob else {
+        panic!("not a file")
+    };
+    assert_eq!(std::fs::read(f).unwrap(), got.head);
+}
+
+/// A driver's downloads from one host share a connection; a big file's
+/// head is its first [`HEAD`](crate::unpack::HEAD) bytes.
+#[test]
+fn downloads_share_a_connection() {
+    let big: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
+    let s = serve(vec![
+        ("/a.zip", Reply::ok("PK a")),
+        ("/b.zip", Reply::ok(big.clone())),
+    ]);
+    let dir = tmp("native-dl2");
+    let n = Native::new(&Context::default());
+    let mut heads = Vec::new();
+    for p in ["/a.zip", "/b.zip", "/a.zip"] {
+        let effect = Effect::Download {
+            target: Target::url(format!("{}{p}", s.url)),
+            slot: dir.join("slot"),
+            any: false,
+        };
+        match n.perform(effect) {
+            Fed::Downloaded(Ok(got)) => heads.push(got.head),
+            _ => panic!("no file"),
+        }
+    }
+    assert_eq!(s.connections(), 1);
+    assert_eq!(heads[1], big[..crate::unpack::HEAD]);
+}
+
+/// The transport keeps to no refusals; under [`Guarded`] (one guard) a
+/// service that refused is not asked again.
+#[test]
+fn one_guard() {
+    let s = serve(vec![("/a", Reply::status(403, "")), ("/b", Reply::ok("b"))]);
+    let cx = Context::default();
+    cx.refused.earlier(&s.url);
+    let n = Native::new(&cx);
+    let ask =
+        |d: &dyn Driver, p: &str| d.perform(Effect::Http(Request::Get(format!("{}{p}", s.url))));
+    assert!(matches!(ask(&n, "/b"), Fed::Http(Ok(_))));
+    let cx = Context::default();
+    let g = Guarded::new(&n, &cx);
+    assert!(matches!(
+        ask(&g, "/a"),
+        Fed::Http(Err(NetError::Refused(_)))
+    ));
+    assert!(matches!(
+        ask(&g, "/b"),
+        Fed::Http(Err(NetError::Refused(_)))
+    ));
+    assert_eq!(s.asked(), ["/b", "/a"]);
 }
 
 /// A server that sends a little and then nothing: cancelling ends it at
@@ -108,6 +173,7 @@ fn a_stalled_download_cancels() {
     let dir = tmp("stall");
     let t = std::time::Instant::now();
     let r = http::download(
+        &http::downloads(Some(p.clone())),
         &Target::url(format!("http://{addr}/a.zip")),
         &dir.join("a"),
         "",
@@ -143,7 +209,9 @@ fn cancelled() {
 fn fetch_url() {
     let url = std::env::var("BMSEEKER_FETCH").expect("BMSEEKER_FETCH");
     let out = std::env::temp_dir().join("bmseeker-fetch");
-    match fetch(&url, None, &out, false, &Context::default()) {
+    let cx = Context::default();
+    let net = Native::new(&cx);
+    match fetch(&url, None, &out, false, &cx, &Guarded::new(&net, &cx)) {
         Ok(name) => println!(
             "OK {name} {:?} {} bytes",
             crate::unpack::sniff_file(&out),
@@ -190,7 +258,7 @@ fn user_agents_sent() {
 
     let n = Native::new(&Context::default());
     let sent = user_agent_heard(|url| {
-        n.get(&url).unwrap();
+        get(&n, &url).unwrap();
     });
     assert_eq!(sent, format!("{HTTP_CLIENT} {USER_AGENT}"));
 

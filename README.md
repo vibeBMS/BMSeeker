@@ -50,8 +50,8 @@ install), `unpack`.
 
 **Refusals.** A service that answers HTTP 429, or 401, 403 or 451 (from an API or a page BMSeeker reads: BMS SEARCH,
 Stella, manbow and the venues, Ginger, Konmai, tables, mirrors), or a browser check whatever the status (a Cloudflare
-challenge page, a Turnstile widget: `cf-mitigated: challenge`, "Just a moment...", `challenges.cloudflare.com`;
-Google's "unusual traffic" CAPTCHA, `/sorry/`), or whose API says it limits requests (MEGA's `-4`), is not asked again for the rest of the run: no other query, no other URL on that host,
+challenge page: `cf-mitigated: challenge`, "Just a moment..."; Google's "unusual traffic" CAPTCHA, `/sorry/`; a
+Turnstile widget, `challenges.cloudflare.com`, in an answer that failed), or whose API says it limits requests (MEGA's `-4`), is not asked again for the rest of the run: no other query, no other URL on that host,
 no other headers, no waiting and trying again (a `Retry-After` is kept to by not coming back in this run). The run goes
 on with the other sources and hosts. A file host's (Google Drive's, MEGA's, Dropbox's, MediaFire's, pixeldrain's) 401,
 403 or 451 is that file's or link's failure only (Google Drive's quota, a file shared privately), as its 404 is. A host

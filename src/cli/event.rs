@@ -279,7 +279,7 @@ impl Checks<'_> {
         if time_up {
             return String::new();
         }
-        let c = crate::probe::probe(url, Some(want.clone()), &self.tmp, &self.r.cx);
+        let c = crate::probe::probe(url, Some(want.clone()), &self.tmp, &self.r.cx, self.r.net);
         self.r.out.note(format!(
             "{}{} | {:?} {:?} {} MB {} charts {} | {url}",
             want.title,

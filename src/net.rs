@@ -1,7 +1,7 @@
 //! Requests as data. Whatever reads the network here is a [`Task`]: it says
 //! which request it needs next ([`Next::Ask`]) and is fed the answer, until
 //! it is done. A task does no I/O itself, so the same task runs natively
-//! (`native::Native::run`), in a web page (through a CORS proxy,
+//! (`native::Native`), in a web page (through a CORS proxy,
 //! asynchronously) and in tests (canned answers).
 
 /// A request a task needs answered.
@@ -39,8 +39,8 @@ pub enum NetError {
     Cancelled,
     /// A host says the file is no more (MEGA's -9 / -2): its words.
     Gone(String),
-    /// The service refused BMSeeker (a status of
-    /// [`refusing`](crate::refusal::refusing), a browser check) now or
+    /// The service refused BMSeeker (a status it
+    /// [`refuses`](crate::refusal::refuses) with, a browser check) now or
     /// earlier in the run: it is not asked again ([`crate::refusal`]).
     Refused(crate::refusal::Refusal),
     /// Anything else (the connection, a host's own message), as said.
