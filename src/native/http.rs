@@ -105,9 +105,8 @@ pub(super) fn download(
     user_agent: &str,
     progress: Option<&Progress>,
 ) -> Result<Served, NetError> {
-    let p = progress;
     let failed = |e: ureq::Error| match e {
-        _ if p.is_some_and(Progress::cancelled) => NetError::Cancelled,
+        _ if progress.is_some_and(Progress::cancelled) => NetError::Cancelled,
         ureq::Error::Timeout(Timeout::PerRead) => NetError::Stalled(STALL.as_secs()),
         ureq::Error::Timeout(Timeout::RecvResponse) => NetError::Stalled(FIRST_BYTES.as_secs()),
         e => NetError::Other(e.to_string()),
@@ -129,7 +128,7 @@ pub(super) fn download(
         .mega_key
         .is_none()
         .then(|| ureq::ResponseExt::get_uri(&res).to_string());
-    if let Some(p) = p {
+    if let Some(p) = progress {
         p.start_file(header("content-length").and_then(|l| l.trim().parse().ok()));
     }
     let mut mega = target
@@ -154,7 +153,7 @@ pub(super) fn download(
         let more = (HEAD - head.len()).min(n);
         head.extend_from_slice(&buf[..more]);
         w.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        if let Some(p) = p {
+        if let Some(p) = progress {
             p.add(n as u64);
         }
     }
