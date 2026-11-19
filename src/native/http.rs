@@ -7,7 +7,7 @@ use crate::hosts::{Target, STALL_MS};
 use crate::install::job::Served;
 use crate::net::{disposition_name, Answer, NetError, Request};
 use crate::progress::Progress;
-use crate::unpack::{Blob, HEAD};
+use crate::unpack::{Blob, BUDGET, HEAD};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -128,8 +128,14 @@ pub(super) fn download(
         .mega_key
         .is_none()
         .then(|| ureq::ResponseExt::get_uri(&res).to_string());
+    // (no larger than an archive may unpack to)
+    let too_large = || crate::unpack::Error::TooLarge(BUDGET).to_string();
+    let length = header("content-length").and_then(|l| l.trim().parse().ok());
+    if length.is_some_and(|l| l > BUDGET) {
+        return Err(too_large().into());
+    }
     if let Some(p) = progress {
-        p.start_file(header("content-length").and_then(|l| l.trim().parse().ok()));
+        p.start_file(length);
     }
     let mut mega = target
         .mega_key
@@ -140,6 +146,7 @@ pub(super) fn download(
     let mut body = res.body_mut().as_reader();
     let mut buf = vec![0u8; 1 << 16];
     let mut head = Vec::with_capacity(HEAD);
+    let mut got = 0;
     loop {
         let n = match &mut mega {
             // (whole buffers, so its chunks stay on 16-byte blocks)
@@ -149,6 +156,10 @@ pub(super) fn download(
         .map_err(|e| failed(e.into()))?;
         if n == 0 {
             break;
+        }
+        got += n as u64;
+        if got > BUDGET {
+            return Err(too_large().into());
         }
         let more = (HEAD - head.len()).min(n);
         head.extend_from_slice(&buf[..more]);

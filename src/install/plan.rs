@@ -7,14 +7,14 @@
 
 use super::{md5_hex, safe_name, unique, Done, Failure};
 use crate::chart::{md5_key, ChartInfo};
-use crate::fs::{file_name, Fs, Store};
+use crate::fs::{file_name, move_file, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
 use crate::package::{classify, split, Package, PackageKind, Staged};
 use crate::placement::{self, covers, is_chart, Located, Rules};
 use crate::unpack::{unpack, Blob, Member, BUDGET};
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// What the link a download came from was for: it counts most in what a
@@ -539,19 +539,24 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
                     Vote::One(d) => Some(d),
                     _ => None,
                 };
-                // more than one folder holds it: none is picked
+                // more than one folder holds it: none is picked (one named)
                 let at = dest.clone().or_else(|| {
-                    let c = &s.charts[p.charts[0]];
-                    lib.folders_of(&c.md5)
-                        .first()
-                        .or(lib.folders_of(&c.sha256).first())
-                        .cloned()
+                    p.charts.iter().find_map(|&c| {
+                        let c = &s.charts[c];
+                        let at = lib.folders_of(&c.md5).first();
+                        at.or(lib.folders_of(&c.sha256).first()).cloned()
+                    })
                 });
+                // (no folder holds it after all: a song new to it)
+                let Some(at) = at else {
+                    new.push(p);
+                    continue;
+                };
                 items.push(Item {
                     moves: dest
                         .map(|d| laid_out(fs, s, p, lib, &d, !req.reinstall))
                         .unwrap_or_default(),
-                    outcome: Outcome::Owned(at.unwrap_or_default()),
+                    outcome: Outcome::Owned(at),
                 });
             }
             PackageKind::Song => new.push(p),
@@ -592,68 +597,57 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
     items
 }
 
-/// Move the file `from` to `to` (none there; its folder made): renamed,
-/// else copied with its time.
-fn move_file(store: &dyn Store, from: &Path, to: &Path) -> io::Result<()> {
-    if let Some(d) = to.parent() {
-        store.create_dir_all(d);
-    }
-    match store.rename(from, to) {
-        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
-            store.copy(from, to)?;
-            // (what cannot be removed stays where it was)
-            let _ = store.remove(from);
-            Ok(())
-        }
-        r => r,
-    }
-}
-
-/// Move files in (`moves`), replacing those there: each beside its place
-/// first (what can fail: a copy to another disk), then into it, those
-/// there set aside until all are in. A failure (and where) leaves the files
-/// there as they were.
-fn move_in(store: &dyn Store, moves: &[(PathBuf, PathBuf)]) -> Result<(), (PathBuf, io::Error)> {
-    let tag = unique();
-    let aside =
-        |to: &Path, what: &str| to.with_file_name(format!(".{}.{tag}.{what}", file_name(to)));
+/// Move files in (`moves`, each to a path below `root`), replacing those
+/// there: each into a folder of `root` first (what can fail: a copy to
+/// another disk), then into its place, those there set aside in that folder
+/// until all are in. A failure (and where) leaves the files there as they
+/// were.
+fn move_in(
+    store: &dyn Store,
+    root: &Path,
+    moves: &[(PathBuf, PathBuf)],
+) -> Result<(), (PathBuf, io::Error)> {
+    // (short names: a file's name near the disk's limit moves as well)
+    let aside = root.join(format!(".in-{}", unique()));
+    let new = |i: usize| aside.join(i.to_string());
+    let old = |i: usize| aside.join(format!("{i}.old"));
     for (i, (from, to)) in moves.iter().enumerate() {
-        if let Err(e) = move_file(store, from, &aside(to, "new")) {
-            for (_, to) in &moves[..i] {
-                let _ = store.remove(&aside(to, "new"));
-            }
+        if let Err(e) = move_file(store, from, &new(i)) {
+            store.remove_dir(&aside);
             return Err((to.clone(), e));
         }
     }
     // (each in, and whether one was there)
-    let mut done: Vec<(&Path, bool)> = Vec::new();
-    for (_, to) in moves {
+    let mut done: Vec<(&Path, usize, bool)> = Vec::new();
+    for (i, (_, to)) in moves.iter().enumerate() {
         let had = store.stamp(to).is_some();
+        if let Some(d) = to.parent() {
+            store.create_dir_all(d);
+        }
         let set = match had {
-            true => store.rename(to, &aside(to, "old")),
+            true => store.rename(to, &old(i)),
             false => Ok(()),
         };
-        let r = set.and_then(|()| match store.rename(&aside(to, "new"), to) {
-            Err(e) if had => store.rename(&aside(to, "old"), to).and(Err(e)),
+        let r = set.and_then(|()| match store.rename(&new(i), to) {
+            Err(e) if had => store.rename(&old(i), to).and(Err(e)),
             r => r,
         });
         if let Err(e) = r {
-            for &(to, had) in done.iter().rev() {
+            for &(to, i, had) in done.iter().rev() {
                 let _ = store.remove(to);
                 if had {
-                    let _ = store.rename(&aside(to, "old"), to);
+                    let _ = store.rename(&old(i), to);
                 }
             }
-            for (_, to) in &moves[done.len()..] {
-                let _ = store.remove(&aside(to, "new"));
+            // (a file that could not be put back stays aside)
+            if (0..moves.len()).all(|i| store.stamp(&old(i)).is_none()) {
+                store.remove_dir(&aside);
             }
             return Err((to.clone(), e));
         }
-        done.push((to, had));
+        done.push((to, i, had));
     }
-    for (to, _) in done.into_iter().filter(|(_, had)| *had) {
-        let _ = store.remove(&aside(to, "old"));
-    }
+    store.remove_dir(&aside);
     Ok(())
 }
 
@@ -684,7 +678,7 @@ fn applied(
     downloads: &Path,
     lib: &mut Library,
 ) -> Vec<(Outcome, Vec<Done>)> {
-    let fs = store.as_fs();
+    let fs: &dyn Fs = store;
     // into a folder by the overwrite rule (a chart never over another)
     // (None: not needed; a failure as a Done)
     let bring = |lib: &mut Library, from: &Path, to: &Path| -> Result<Option<PathBuf>, Done> {
@@ -692,7 +686,7 @@ fn applied(
             return Ok(None);
         };
         store.create_dir_all(dir);
-        let at = placement::bring(fs, from, dir).map_err(|e| failed(to, e))?;
+        let at = placement::bring(store, from, dir).map_err(|e| failed(to, e))?;
         if let Some(at) = &at {
             let md5 = is_chart(at)
                 .then(|| fs.read(at).ok().map(|b| md5_hex(&b)))
@@ -706,9 +700,16 @@ fn applied(
         let done = match &item.outcome {
             Outcome::Rejected(f) => vec![Done::Failed(f.clone())],
             Outcome::New(dir) => {
+                // a folder of its own: the files straight in; else the same
+                // song again, its files replaced
                 let fresh = fs.read_dir(dir).is_err();
-                // (the same song again: its files replaced)
-                match move_in(store, &item.moves) {
+                let moved = match fresh {
+                    true => (item.moves.iter()).try_for_each(|(from, to)| {
+                        move_file(store, from, to).map_err(|e| (to.clone(), e))
+                    }),
+                    false => move_in(store, dir, &item.moves),
+                };
+                match moved {
                     Ok(()) => {
                         lib.add_folder(fs, dir);
                         vec![Done::Added(dir.clone(), item.moves.len())]
@@ -742,8 +743,8 @@ fn applied(
                 .filter_map(|(from, name)| {
                     let to = downloads.join(name);
                     // (an older copy of it replaced)
-                    let moved =
-                        to == *from || move_in(store, &[(from.clone(), to.clone())]).is_ok();
+                    let moved = to == *from
+                        || move_in(store, downloads, &[(from.clone(), to.clone())]).is_ok();
                     moved.then_some(Done::Waiting(to))
                 })
                 .collect(),
@@ -765,23 +766,22 @@ pub fn take(
     downloads: &Path,
     lib: &mut Library,
 ) -> Vec<Done> {
-    taken(store, blob, req, downloads, lib, true)
-        .into_iter()
-        .flat_map(|(_, d)| d)
+    let (out, placed) = taken(store, blob, req, downloads, lib);
+    (out.into_iter().flat_map(|(_, d)| d))
+        .chain(placed.into_iter().map(Done::Placed))
         .collect()
 }
 
-/// [`take`], each package's outcome with what came of it; with
-/// `place_waiting`, the charts waiting for a song that came in placed.
+/// [`take`]: each package's outcome with what came of it, and the charts
+/// that waited in `downloads` placed.
 pub(crate) fn taken(
     store: &dyn Store,
     blob: Blob,
     req: &Request,
     downloads: &Path,
     lib: &mut Library,
-    place_waiting: bool,
-) -> Vec<(Outcome, Vec<Done>)> {
-    let fs = store.as_fs();
+) -> (Vec<(Outcome, Vec<Done>)>, Vec<PathBuf>) {
+    let fs: &dyn Fs = store;
     let file = match &blob {
         Blob::File(p) => Some(p.clone()),
         Blob::Bytes(_) => None,
@@ -801,7 +801,10 @@ pub(crate) fn taken(
         Err(e) => {
             store.remove_dir(&stage);
             let f = Failure::Other(e);
-            return vec![(Outcome::Rejected(f.clone()), vec![Done::Failed(f)])];
+            return (
+                vec![(Outcome::Rejected(f.clone()), vec![Done::Failed(f)])],
+                Vec::new(),
+            );
         }
     };
     // (it is in the folder now)
@@ -810,31 +813,24 @@ pub(crate) fn taken(
     }
     let s = Staged::read(fs, &stage, members, loose.is_some());
     let items = plan(fs, &s, lib, &req);
-    let mut out = applied(store, items, downloads, lib);
+    let out = applied(store, items, downloads, lib);
     // (a song added, or files a song's folder lacked brought in)
-    if place_waiting {
-        if let Some((_, done)) = out.iter_mut().find(|(o, d)| match o {
-            Outcome::New(_) => matches!(d.as_slice(), [Done::Added(..)]),
-            Outcome::Owned(_) | Outcome::Into(_) => true,
-            _ => false,
-        }) {
-            let placed = super::place_waiting(fs, downloads, lib);
-            done.extend(placed.into_iter().map(Done::Placed));
-        }
-    }
+    let came = out.iter().any(|(o, d)| match o {
+        Outcome::New(_) => matches!(d.as_slice(), [Done::Added(..)]),
+        Outcome::Owned(_) | Outcome::Into(_) => true,
+        _ => false,
+    });
+    let placed = match came {
+        true => super::place_waiting(store, downloads, lib),
+        false => Vec::new(),
+    };
     store.remove_dir(&stage);
-    out
+    (out, placed)
 }
 
 /// A chart on its own (`blob`) as the file `to`.
 fn put_loose(store: &dyn Store, blob: Blob, to: &Path) -> Result<Vec<Member>, String> {
-    match blob {
-        Blob::File(p) => move_file(store, &p, to),
-        Blob::Bytes(b) => store
-            .create(to, None)
-            .and_then(|mut w| w.write_all(&b).and_then(|_| w.flush())),
-    }
-    .map_err(|e| format!("{}: could not be written: {e}", to.display()))?;
+    (blob.put(store, to)).map_err(|e| format!("{}: could not be written: {e}", to.display()))?;
     Ok(vec![Member {
         rel: PathBuf::from(file_name(to)),
         size: store.stamp(to).map_or(0, |s| s.1),

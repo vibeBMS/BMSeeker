@@ -35,19 +35,8 @@ pub trait ReadSeek: Read + Seek {}
 
 impl<T: Read + Seek> ReadSeek for T {}
 
-/// A store as files to read (`&dyn Store` as `&dyn Fs`).
-pub trait AsFs {
-    fn as_fs(&self) -> &dyn Fs;
-}
-
-impl<T: Fs> AsFs for T {
-    fn as_fs(&self) -> &dyn Fs {
-        self
-    }
-}
-
 /// Files written as well as read: where archives are unpacked.
-pub trait Store: Fs + AsFs {
+pub trait Store: Fs {
     /// A new file `p` (its folders made, a file there replaced), written
     /// through what this gives; once that is dropped, its modification
     /// time is `mtime` (seconds) if the store can keep it (a failure to is
@@ -70,6 +59,23 @@ pub trait Store: Fs + AsFs {
         let mut w = self.create(to, self.stamp(from).map(|(t, _)| t))?;
         w.write_all(&bytes)?;
         w.flush()
+    }
+}
+
+/// Move the file `from` to `to` (none there; its folder made): renamed,
+/// else copied with its time.
+pub(crate) fn move_file(store: &dyn Store, from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(d) = to.parent() {
+        store.create_dir_all(d);
+    }
+    match store.rename(from, to) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+            store.copy(from, to)?;
+            // (what cannot be removed stays where it was)
+            let _ = store.remove(from);
+            Ok(())
+        }
+        r => r,
     }
 }
 
@@ -180,7 +186,8 @@ impl Store for Disk {
     }
 
     fn open(&self, p: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
-        Ok(Box::new(std::fs::File::open(p)?))
+        // (the archives' readers read headers a few bytes at a time)
+        Ok(Box::new(io::BufReader::new(std::fs::File::open(p)?)))
     }
 
     fn create_dir_all(&self, p: &Path) {

@@ -4,19 +4,49 @@
 //! `safe_rel`), within a budget (an archive can claim, or expand to,
 //! anything), with the archive's file times.
 
-use crate::fs::{ReadSeek, Store};
-use std::io::{Cursor, Write};
+use crate::fs::{move_file, ReadSeek, Store};
+use std::cell::Cell;
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 
-/// What an archive may unpack to in memory.
-const MEMORY: u64 = 2 << 30;
+/// What an archive may unpack to in memory: 2 GiB natively; in a web page,
+/// where it sits beside the archive (and its own growth) in a heap of 4 GiB
+/// at most that never shrinks, 1 GiB.
+const MEMORY: u64 = if cfg!(target_arch = "wasm32") {
+    1 << 30
+} else {
+    2 << 30
+};
 
-/// What an archive may unpack to: 4 GiB natively, 2 GiB in a web page.
+/// What an archive may unpack to: 4 GiB natively, [`MEMORY`] in a web page.
 pub const BUDGET: u64 = if cfg!(target_arch = "wasm32") {
     MEMORY
 } else {
     4 << 30
 };
+
+/// What unpacking fails with.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Error {
+    /// More than the budget (bytes) unpacked.
+    TooLarge(u64),
+    Other(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::TooLarge(budget) => write!(f, "larger than {} MB unpacked", budget >> 20),
+            Error::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<Error> for String {
+    fn from(e: Error) -> String {
+        e.to_string()
+    }
+}
 
 /// An archive's format, known by its first bytes ([`sniff`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +151,20 @@ pub enum Blob {
     Bytes(Vec<u8>),
 }
 
+impl Blob {
+    /// The blob as the file `to` of `store` (a file moved there).
+    pub(crate) fn put(self, store: &dyn Store, to: &Path) -> io::Result<()> {
+        match self {
+            Blob::File(p) => move_file(store, &p, to),
+            Blob::Bytes(b) => {
+                let mut w = store.create(to, None)?;
+                w.write_all(&b)?;
+                w.flush()
+            }
+        }
+    }
+}
+
 /// A file unpacked: its path below the folder, size, and time in the
 /// archive (seconds since 1970; None: not given).
 #[derive(Clone, Debug, PartialEq)]
@@ -140,29 +184,25 @@ pub(crate) fn safe_rel(name: &str) -> Option<PathBuf> {
     (!rel.as_os_str().is_empty()).then_some(rel)
 }
 
-/// What an archive larger than `budget` unpacked fails with.
-pub(crate) fn too_large(budget: u64) -> String {
-    format!("larger than {} MB unpacked", budget >> 20)
-}
-
 /// A writer that fails past `left` bytes (an archive member larger than it
-/// claims), `budget` being the whole's limit (for the message).
-pub(crate) struct Capped<W> {
-    pub(crate) w: W,
-    pub(crate) left: u64,
-    pub(crate) budget: u64,
+/// claims), telling `over` (the archive's reader may wrap the error).
+struct Capped<'a, W> {
+    w: W,
+    left: u64,
+    over: &'a Cell<bool>,
 }
 
-impl<W: std::io::Write> std::io::Write for Capped<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl<W: Write> Write for Capped<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.len() as u64 > self.left {
-            return Err(std::io::Error::other(too_large(self.budget)));
+            self.over.set(true);
+            return Err(io::ErrorKind::FileTooLarge.into());
         }
         let n = self.w.write(buf)?;
         self.left -= n as u64;
         Ok(n)
     }
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         self.w.flush()
     }
 }
@@ -298,13 +338,29 @@ fn zip_header(r: &mut dyn ReadSeek, at: u64, central: bool) -> std::io::Result<Z
 }
 
 /// Unpack the archive `r` of `format` into `sink`, with at most `budget`
-/// bytes in all (`limit`: the whole's, for the message).
+/// bytes in all (`limit`: the whole's).
 fn members(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
     limit: u64,
     budget: &mut u64,
     sink: &mut dyn Sink,
+) -> Result<(), Error> {
+    let over = Cell::new(false);
+    each_member(r, format, limit, budget, sink, &over).map_err(|e| match over.get() {
+        true => Error::TooLarge(limit),
+        false => Error::Other(e),
+    })
+}
+
+/// [`members`], telling `over` when the budget is what failed.
+fn each_member(
+    r: Box<dyn ReadSeek + Send>,
+    format: Format,
+    limit: u64,
+    budget: &mut u64,
+    sink: &mut dyn Sink,
+    over: &Cell<bool>,
 ) -> Result<(), String> {
     // one member: written through the cap, kept or dropped
     let mut put = |sink: &mut dyn Sink,
@@ -317,7 +373,7 @@ fn members(
             let mut capped = Capped {
                 w: &mut w,
                 left: *budget,
-                budget: limit,
+                over,
             };
             copy(&mut capped)
                 .and_then(|n| capped.flush().map(|_| n).map_err(|e| e.to_string()))
@@ -357,6 +413,16 @@ fn members(
         Format::SevenZ => {
             let mut a =
                 sevenz_rust2::ArchiveReader::new(r, "".into()).map_err(|e| e.to_string())?;
+            // LZMA2 on several threads buffers whole runs of input and
+            // output (a 64 MB 7z of 120 MB: 218 MB at its peak on 4 threads,
+            // 18 MB on one, 1.7 times as long): one where memory is short
+            if cfg!(any(
+                target_arch = "wasm32",
+                target_os = "android",
+                target_os = "ios"
+            )) {
+                a.set_thread_count(1);
+            }
             let mut err = None;
             a.for_each_entries(|entry, r| {
                 if entry.is_directory() {
@@ -437,9 +503,9 @@ fn members(
                 // (links, folders) counts too, up to twice the budget
                 Box::new(Within {
                     // (gzip members one after another are one stream)
-                    r: flate2::read::MultiGzDecoder::new(std::io::BufReader::new(r)),
+                    r: flate2::read::MultiGzDecoder::new(r),
                     left: limit.saturating_mul(2),
-                    budget: limit,
+                    over,
                 })
             } else {
                 r
@@ -473,23 +539,23 @@ fn members(
     Ok(())
 }
 
-/// A reader that fails past `left` bytes, `budget` being the whole's
-/// limit (for the message).
-struct Within<R> {
+/// A reader that fails past `left` bytes, telling `over`.
+struct Within<'a, R> {
     r: R,
     left: u64,
-    budget: u64,
+    over: &'a Cell<bool>,
 }
 
-impl<R: std::io::Read> std::io::Read for Within<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+impl<R: io::Read> io::Read for Within<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.left == 0 && !buf.is_empty() {
             // (the end may be here)
             let mut one = [0u8];
-            return match self.r.read(&mut one)? {
-                0 => Ok(0),
-                _ => Err(std::io::Error::other(too_large(self.budget))),
-            };
+            if self.r.read(&mut one)? == 0 {
+                return Ok(0);
+            }
+            self.over.set(true);
+            return Err(io::ErrorKind::FileTooLarge.into());
         }
         let max = buf.len().min(self.left.min(usize::MAX as u64) as usize);
         let n = self.r.read(&mut buf[..max])?;
@@ -523,19 +589,40 @@ fn lzh_name(h: &delharc::LhaHeader) -> String {
     crate::text::decode_text(&raw)
 }
 
+/// A blob opened: an archive (its format, by its first bytes, and
+/// something to read it with), or none (the blob as it was).
+pub(crate) enum Opened {
+    Archive(Format, Box<dyn ReadSeek + Send>),
+    Not(Blob),
+}
+
+/// `blob` (in `store`, if a file) opened.
+pub(crate) fn open(blob: Blob, store: &dyn Store) -> Result<Opened, String> {
+    use std::io::{Seek, SeekFrom};
+    match blob {
+        Blob::Bytes(b) => Ok(match sniff(&b) {
+            Some(format) => Opened::Archive(format, Box::new(Cursor::new(b))),
+            None => Opened::Not(Blob::Bytes(b)),
+        }),
+        Blob::File(p) => {
+            let failed = |e: io::Error| format!("{}: {e}", p.display());
+            let mut r = store.open(&p).map_err(failed)?;
+            let head = head(&mut r).map_err(failed)?;
+            r.seek(SeekFrom::Start(0)).map_err(failed)?;
+            Ok(match sniff(&head) {
+                Some(format) => Opened::Archive(format, r),
+                None => Opened::Not(Blob::File(p)),
+            })
+        }
+    }
+}
+
 /// The format of the archive `blob` and something to read it with.
 fn reader(blob: Blob, store: &dyn Store) -> Result<(Format, Box<dyn ReadSeek + Send>), String> {
-    use std::io::{Seek, SeekFrom};
-    let mut r: Box<dyn ReadSeek + Send> = match blob {
-        Blob::Bytes(b) => Box::new(Cursor::new(b)),
-        Blob::File(p) => store
-            .open(&p)
-            .map_err(|e| format!("{}: {e}", p.display()))?,
-    };
-    let head = head(&mut r).map_err(|e| e.to_string())?;
-    r.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    let format = sniff(&head).ok_or("not an archive")?;
-    Ok((format, r))
+    match open(blob, store)? {
+        Opened::Archive(format, r) => Ok((format, r)),
+        Opened::Not(_) => Err("not an archive".into()),
+    }
 }
 
 /// Members into a store, below a folder.
@@ -548,6 +635,17 @@ struct Into<'a> {
 impl Sink for Into<'_> {
     fn open(&mut self, rel: &Path, mtime: Option<i64>) -> Result<Box<dyn Write + '_>, String> {
         let p = self.dest.join(rel);
+        // a path met before (a tar's file appended again, names alike once
+        // made safe, or but for their case on a disk that does not tell
+        // them apart): the later member replaces the earlier
+        if self.store.stamp(&p).is_some() {
+            let folded = |r: &Path| r.to_string_lossy().to_lowercase();
+            let at = (self.out.iter().position(|m| m.rel == rel))
+                .or_else(|| self.out.iter().position(|m| folded(&m.rel) == folded(rel)));
+            if let Some(i) = at {
+                self.out.remove(i);
+            }
+        }
         self.store
             .create(&p, mtime)
             .map_err(|e| format!("{}: {e}", p.display()))
@@ -574,6 +672,17 @@ pub fn unpack(
     budget: u64,
 ) -> Result<Vec<Member>, String> {
     let (format, r) = reader(blob, store)?;
+    Ok(unpack_from(r, format, store, dest, budget)?)
+}
+
+/// [`unpack`] of the archive `r` of `format`.
+pub(crate) fn unpack_from(
+    r: Box<dyn ReadSeek + Send>,
+    format: Format,
+    store: &dyn Store,
+    dest: &Path,
+    budget: u64,
+) -> Result<Vec<Member>, Error> {
     let mut left = budget;
     let mut sink = Into {
         store,
@@ -594,13 +703,17 @@ pub fn unpack(
             .and_then(|n| archive_stem(&n).map(str::to_owned))
             .unwrap_or_else(|| "archive".into());
         let into = rel.with_file_name(stem);
+        let sub = dest.join(&into);
+        // (a folder of its own, unless the archive has one of that name)
+        let fresh = store.read_dir(&sub).is_err() && store.stamp(&sub).is_none();
         let mut sink = Into {
             store,
-            dest: &dest.join(&into),
+            dest: &sub,
             out: Vec::new(),
         };
         let was = left;
         let read = reader(Blob::File(at.clone()), store)
+            .map_err(Error::Other)
             .and_then(|(format, r)| members(r, format, budget, &mut left, &mut sink));
         match read {
             Ok(()) => {
@@ -612,10 +725,13 @@ pub fn unpack(
                     ..n
                 }));
             }
-            Err(e) if e.ends_with(&too_large(budget)) => return Err(e),
-            Err(_) => {
+            Err(e @ Error::TooLarge(_)) => return Err(e),
+            Err(Error::Other(_)) => {
                 for n in &sink.out {
-                    let _ = store.remove(&sink.dest.join(&n.rel));
+                    let _ = store.remove(&sub.join(&n.rel));
+                }
+                if fresh {
+                    store.remove_dir(&sub);
                 }
                 left = was;
             }
@@ -954,6 +1070,22 @@ mod tests {
         assert_eq!(unpack_bytes(LZH.to_vec(), |_, _| n += 1), Ok(2));
     }
 
+    /// An archive in an archive that fails once some of it is written
+    /// (its second member is not what its checksum says): nothing of it is
+    /// left, not even its folder.
+    #[test]
+    fn a_nested_archive_that_fails_midway() {
+        use crate::fs::Disk;
+        let mut bad = LZH.to_vec();
+        bad[77] = b'X';
+        let outer = zip(&[("Song.lzh", &bad[..]), ("readme.txt", b"hi")]);
+        let d = crate::testkit::tmp("nested-bad");
+        let got = unpack(Blob::Bytes(outer), &Disk, &d, BUDGET).unwrap();
+        let rels: Vec<PathBuf> = sorted(got).into_iter().map(|m| m.rel).collect();
+        assert_eq!(rels, [PathBuf::from("Song.lzh"), "readme.txt".into()]);
+        assert!(!d.join("Song").exists());
+    }
+
     #[test]
     fn tar_by_its_bytes_and_its_name() {
         use crate::testkit::{gzip, tar, tar_gz};
@@ -1071,7 +1203,7 @@ mod tests {
         let t = t.into_inner().unwrap();
         assert_eq!(unpack_within(t.clone(), 1 << 10, |_, _| {}), Ok(0));
         let e = unpack_within(gzip(&t), 1 << 10, |_, _| {}).unwrap_err();
-        assert!(e.ends_with(&too_large(1 << 10)), "{e}");
+        assert_eq!(e, Error::TooLarge(1 << 10).to_string());
         assert_eq!(unpack_within(gzip(&t), 64 << 10, |_, _| {}), Ok(0));
     }
 
@@ -1197,15 +1329,18 @@ mod tests {
 
     #[test]
     fn capped_writer() {
-        use std::io::Write;
+        let over = Cell::new(false);
         let mut w = Capped {
             w: Vec::new(),
             left: 4,
-            budget: 4 << 20,
+            over: &over,
         };
-        assert!(w.write_all(b"abcd").is_ok());
-        let e = w.write_all(b"e").unwrap_err();
-        assert_eq!(e.to_string(), "larger than 4 MB unpacked");
+        assert!(w.write_all(b"abcd").is_ok() && !over.get());
+        assert!(w.write_all(b"e").is_err() && over.get());
         assert_eq!(w.w, b"abcd");
+        assert_eq!(
+            Error::TooLarge(4 << 20).to_string(),
+            "larger than 4 MB unpacked"
+        );
     }
 }

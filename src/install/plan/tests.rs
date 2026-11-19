@@ -1,6 +1,6 @@
 use super::*;
 use crate::fs::Mem;
-use std::io;
+use std::io::{self, Write};
 
 /// A zip of `files` (name, contents), each of the start of `year`.
 fn zip(files: &[(&str, &str)], year: u16) -> Vec<u8> {
@@ -511,17 +511,152 @@ fn a_failed_move_keeps_the_song() {
 fn a_failed_overwrite_keeps_the_file() {
     let mem = store(&[("bms/Song/song.bms", SONG), ("bms/Song/01.ogg", "old")]);
     mem.put(Path::new("dl/s/01.ogg"), b"new", 2000);
+    // (the downloads on another disk, a full one: no copy is written)
     let fs = Failing {
         mem,
-        fails: |from, _| from.starts_with("dl"),
+        fails: |from, to| from.starts_with("dl") || from == to,
     };
     let item = Item {
         outcome: Outcome::Into("bms/Song".into()),
         moves: vec![("dl/s/01.ogg".into(), "bms/Song/01.ogg".into())],
     };
     let mut lib = Library::scan(&fs, Path::new("bms"));
-    let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
+    let done = apply(&fs, vec![item.clone()], Path::new(DL), &mut lib);
     assert!(matches!(&done[..], [Done::Failed(_)]), "{done:?}");
     assert_eq!(text(&fs.mem, "bms/Song/01.ogg").as_deref(), Some("old"));
     assert!(text(&fs.mem, "bms/Song/.01.ogg.old").is_none());
+    // another disk with room: copied in
+    let fs = Failing {
+        mem: fs.mem,
+        fails: |from, _| from.starts_with("dl"),
+    };
+    let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
+    assert!(done.is_empty(), "{done:?}");
+    assert_eq!(text(&fs.mem, "bms/Song/01.ogg").as_deref(), Some("new"));
+    assert!(text(&fs.mem, "dl/s/01.ogg").is_none());
+}
+
+/// A tar holding one path twice (a file appended again): the later one
+/// comes in.
+#[test]
+fn a_path_twice_in_a_tar() {
+    let m = store(&[]);
+    let files = [
+        ("Song/song.bms", SONG),
+        ("Song/sound/01.ogg", "old"),
+        ("Song/sound/01.ogg", "new"),
+    ];
+    let tar = Blob::Bytes(crate::testkit::tar(&files));
+    let done = take(&m, tar, &req(Role::Song), Path::new(DL), &mut lib(&m));
+    let [Done::Added(d, 2)] = &done[..] else {
+        panic!("{done:?}");
+    };
+    let ogg = d.join("Song/sound/01.ogg");
+    assert_eq!(text(&m, &ogg.to_string_lossy()).as_deref(), Some("new"));
+    no_stage(&m);
+}
+
+/// The downloads on another disk, a full one: the n-th copy fails midway.
+/// The song's folder stays as it was, nothing of the copies left.
+#[test]
+fn a_copy_failing_midway_leaves_nothing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    /// Writes a byte, then fails.
+    struct Half<'a>(Box<dyn Write + 'a>);
+    impl Write for Half<'_> {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.write_all(&b[..b.len().min(1)])?;
+            Err(io::ErrorKind::StorageFull.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    /// Copies: this many in full, the next one in part.
+    struct Full {
+        mem: Mem,
+        copies: AtomicUsize,
+    }
+    impl Fs for Full {
+        fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+            self.mem.read(p)
+        }
+        fn read_dir(&self, p: &Path) -> io::Result<Vec<crate::fs::Entry>> {
+            self.mem.read_dir(p)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            match from.starts_with("dl") {
+                true => Err(io::ErrorKind::CrossesDevices.into()),
+                false => self.mem.rename(from, to),
+            }
+        }
+        fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
+            self.mem.stamp(p)
+        }
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            self.mem.remove(p)
+        }
+    }
+    impl Store for Full {
+        fn create(&self, p: &Path, mtime: Option<i64>) -> io::Result<Box<dyn Write + '_>> {
+            let w = self.mem.create(p, mtime)?;
+            match self.copies.fetch_sub(1, Ordering::Relaxed) {
+                0 => Ok(Box::new(Half(w))),
+                _ => Ok(w),
+            }
+        }
+        fn remove_dir(&self, p: &Path) {
+            self.mem.remove_dir(p)
+        }
+    }
+    for n in 0..3 {
+        let mem = store(&[
+            ("bms/Song/song.bms", "old"),
+            ("bms/Song/01.ogg", "old"),
+            ("dl/s/song.bms", "new"),
+            ("dl/s/01.ogg", "new"),
+            ("dl/s/02.ogg", "new"),
+        ]);
+        let fs = Full {
+            mem,
+            copies: AtomicUsize::new(n),
+        };
+        let moves = ["song.bms", "01.ogg", "02.ogg"]
+            .map(|n| (Path::new("dl/s").join(n), Path::new("bms/Song").join(n)));
+        let item = Item {
+            outcome: Outcome::New("bms/Song".into()),
+            moves: moves.to_vec(),
+        };
+        let mut lib = Library::scan(&fs, Path::new("bms"));
+        let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
+        assert!(matches!(&done[..], [Done::Failed(_)]), "{done:?}");
+        let left: Vec<PathBuf> = fs.mem.0.lock().unwrap().keys().cloned().collect();
+        let song: Vec<&PathBuf> = left.iter().filter(|p| p.starts_with("bms")).collect();
+        assert_eq!(song, ["bms/Song/01.ogg", "bms/Song/song.bms"], "{n}");
+        assert_eq!(text(&fs.mem, "bms/Song/01.ogg").as_deref(), Some("old"));
+    }
+}
+
+/// A file whose name is near the disk's limit (255 bytes) comes in: into
+/// a new folder, and over itself.
+#[test]
+fn a_long_name_moves_in() {
+    use crate::fs::Disk;
+    let d = crate::testkit::tmp("long-name");
+    // (250 bytes)
+    let name = format!("{}.ogg", "あ".repeat(82));
+    let (from, song) = (d.join("dl/s").join(&name), d.join("bms/Song"));
+    let mut lib = Library::new(&d.join("bms"));
+    for body in ["one", "two"] {
+        std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+        std::fs::write(&from, body).unwrap();
+        let item = Item {
+            outcome: Outcome::New(song.clone()),
+            moves: vec![(from.clone(), song.join(&name))],
+        };
+        let done = apply(&Disk, vec![item], &d.join("dl"), &mut lib);
+        assert!(matches!(&done[..], [Done::Added(_, 1)]), "{done:?}");
+        assert_eq!(std::fs::read(song.join(&name)).unwrap(), body.as_bytes());
+        assert_eq!(std::fs::read_dir(&song).unwrap().count(), 1);
+    }
 }

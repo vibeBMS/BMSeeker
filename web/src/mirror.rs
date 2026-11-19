@@ -6,23 +6,37 @@
 //! size and time; its bytes are read when a command reads it, through
 //! `source`), the command runs on the mirror, and what it changed is written
 //! to the target after it ([`Mirror::changes`], then [`Mirror::settle`]).
+//! What a command writes is handed over as each file is done ([`Held`]):
+//! the mirror keeps its path, size and time.
 
 use bmseeker::fs::{Entry, Fs, Store};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 /// Reads a file of the target by its path there.
 pub type Source = Box<dyn Fn(&Path) -> io::Result<Vec<u8>> + Send + Sync>;
+
+/// Where the bytes of the files a command writes wait until they are
+/// written to the target: in a page, the page's memory (a `--get` of many
+/// songs does not fit in wasm's, which has 4 GiB at most and never
+/// shrinks).
+pub trait Held: Send + Sync {
+    /// Keep a copy of `bytes`: its key.
+    fn keep(&self, bytes: &[u8]) -> u32;
+    fn read(&self, key: u32) -> io::Result<Vec<u8>>;
+    /// It is needed no more.
+    fn forget(&self, key: u32);
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Data {
     /// The target's file at this path (where it was listed or last written).
     Target(PathBuf),
-    /// Written by a command, not yet to the target.
-    Bytes(Arc<Vec<u8>>),
+    /// Written by a command, not yet to the target: its bytes' key.
+    Held(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -49,17 +63,14 @@ pub enum Change {
     Remove { path: PathBuf, dir: bool },
     /// Move the target's file `from` to `to`.
     Move { from: PathBuf, to: PathBuf },
-    /// Write the file.
-    Write {
-        path: PathBuf,
-        bytes: Arc<Vec<u8>>,
-        mtime: i64,
-    },
+    /// Write the file, its bytes held under `key`.
+    Write { path: PathBuf, key: u32, mtime: i64 },
 }
 
 pub struct Mirror {
     tree: Mutex<Tree>,
     source: Source,
+    held: Box<dyn Held>,
     /// The folders the commands may change (the vibeBMS library: `/bms`
     /// and `/bmseeker`, never its player's own files).
     writable: Vec<PathBuf>,
@@ -88,6 +99,7 @@ fn below<'a>(
 impl Mirror {
     pub fn new(
         source: Source,
+        held: Box<dyn Held>,
         writable: Vec<PathBuf>,
         keeps_times: bool,
         now: fn() -> i64,
@@ -95,6 +107,7 @@ impl Mirror {
         Mirror {
             tree: Mutex::default(),
             source,
+            held,
             writable,
             keeps_times,
             now,
@@ -163,10 +176,10 @@ impl Mirror {
             }
         }
         for (p, n) in &t.files {
-            if let Data::Bytes(b) = &n.data {
+            if let Data::Held(key) = n.data {
                 out.push(Change::Write {
                     path: p.clone(),
-                    bytes: b.clone(),
+                    key,
                     mtime: n.mtime,
                 });
             }
@@ -191,66 +204,55 @@ impl Mirror {
         let mut t = self.tree();
         for (p, size, mtime) in written {
             if let Some(n) = t.files.get_mut(p) {
-                *n = Node {
-                    data: Data::Target(p.clone()),
-                    size: *size,
-                    mtime: *mtime,
-                };
+                let was = std::mem::replace(&mut n.data, Data::Target(p.clone()));
+                (n.size, n.mtime) = (*size, *mtime);
+                if let Data::Held(key) = was {
+                    self.held.forget(key);
+                }
             }
         }
         for p in failed {
-            t.files.remove(p);
+            if let Some(Node {
+                data: Data::Held(key),
+                ..
+            }) = t.files.remove(p)
+            {
+                self.held.forget(key);
+            }
         }
         t.gone.clear();
         t.gone_dirs.clear();
     }
 
-    /// Every file's bytes (`skip`: but those below it), with its time: what
-    /// a zip of the mirror holds.
-    pub fn contents(&self, skip: &Path) -> Vec<(PathBuf, io::Result<Vec<u8>>, i64)> {
-        let nodes: Vec<(PathBuf, Node)> = self
-            .tree()
-            .files
-            .iter()
-            .filter(|(p, _)| !p.starts_with(skip))
-            .map(|(p, n)| (p.clone(), n.clone()))
-            .collect();
-        nodes
-            .into_iter()
-            .map(|(p, n)| {
-                let bytes = self.bytes(&n);
-                (p, bytes, n.mtime)
-            })
-            .collect()
+    /// Every file but those below `skip`, with its time: what a zip of the
+    /// mirror holds.
+    pub fn dated(&self, skip: &Path) -> Vec<(PathBuf, i64)> {
+        let t = self.tree();
+        let files = t.files.iter().filter(|(p, _)| !p.starts_with(skip));
+        files.map(|(p, n)| (p.clone(), n.mtime)).collect()
     }
 
-    fn bytes(&self, n: &Node) -> io::Result<Vec<u8>> {
-        match &n.data {
-            Data::Bytes(b) => Ok(b.as_ref().clone()),
-            Data::Target(at) => (self.source)(at),
-        }
-    }
-
-    /// Put `node` at `p`: a target's file moved there before is not
-    /// moved after all (it goes).
-    fn put(t: &mut Tree, p: PathBuf, node: Node) {
-        if let Some(Node {
-            data: Data::Target(from),
-            ..
-        }) = t.files.insert(p.clone(), node)
-        {
-            if from != p {
-                t.gone.insert(from);
+    /// What was at `p` goes: a target's file (from elsewhere: it is not
+    /// moved after all) into `gone`, held bytes forgotten.
+    fn drop_data(&self, gone: &mut BTreeSet<PathBuf>, data: Data, p: &Path) {
+        match data {
+            Data::Target(from) if from != p => {
+                gone.insert(from);
             }
+            Data::Target(_) => {}
+            Data::Held(key) => self.held.forget(key),
         }
     }
 }
 
 impl Fs for Mirror {
     fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
-        let node = self.tree().files.get(p).cloned();
-        // (the lock let go of while the target's file is read)
-        self.bytes(&node.ok_or_else(|| not_found(p))?)
+        let data = self.tree().files.get(p).map(|n| n.data.clone());
+        // (the lock let go of while the file is read)
+        match data.ok_or_else(|| not_found(p))? {
+            Data::Target(at) => (self.source)(&at),
+            Data::Held(key) => self.held.read(key),
+        }
     }
 
     fn read_dir(&self, p: &Path) -> io::Result<Vec<Entry>> {
@@ -296,12 +298,9 @@ impl Fs for Mirror {
     fn remove(&self, p: &Path) -> io::Result<()> {
         self.check(p)?;
         let mut t = self.tree();
-        match t.files.remove(p).ok_or_else(|| not_found(p))?.data {
-            Data::Target(from) => {
-                t.gone.insert(from);
-            }
-            Data::Bytes(_) => {}
-        }
+        let n = t.files.remove(p).ok_or_else(|| not_found(p))?;
+        // (the target's file goes from where it is there)
+        self.drop_data(&mut t.gone, n.data, Path::new(""));
         Ok(())
     }
 
@@ -330,13 +329,17 @@ impl Write for Writing<'_> {
 
 impl Drop for Writing<'_> {
     fn drop(&mut self) {
-        let bytes = std::mem::take(&mut self.buf);
+        let m = self.mirror;
         let node = Node {
-            size: bytes.len() as u64,
-            data: Data::Bytes(Arc::new(bytes)),
+            size: self.buf.len() as u64,
+            data: Data::Held(m.held.keep(&self.buf)),
             mtime: self.mtime,
         };
-        Mirror::put(&mut self.mirror.tree(), std::mem::take(&mut self.p), node);
+        self.buf = Vec::new();
+        let mut t = m.tree();
+        if let Some(was) = t.files.insert(self.p.clone(), node) {
+            m.drop_data(&mut t.gone, was.data, &self.p);
+        }
     }
 }
 
@@ -362,15 +365,42 @@ impl Store for Mirror {
         let mut t = self.tree();
         let inside: Vec<PathBuf> = below(&t.files, p).map(|(k, _)| k.clone()).collect();
         for k in inside {
-            if let Some(Node {
-                data: Data::Target(from),
-                ..
-            }) = t.files.remove(&k)
-            {
-                t.gone.insert(from);
+            if let Some(n) = t.files.remove(&k) {
+                self.drop_data(&mut t.gone, n.data, Path::new(""));
             }
         }
         t.gone_dirs.insert(p.to_path_buf());
+    }
+}
+
+/// Bytes held in memory (tests): by key, `None` once forgotten.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Kept(pub(crate) std::sync::Arc<Mutex<Vec<Option<Vec<u8>>>>>);
+
+#[cfg(test)]
+impl Kept {
+    /// How many are held.
+    pub(crate) fn count(&self) -> usize {
+        self.0.lock().unwrap().iter().flatten().count()
+    }
+}
+
+#[cfg(test)]
+impl Held for Kept {
+    fn keep(&self, bytes: &[u8]) -> u32 {
+        let mut k = self.0.lock().unwrap();
+        k.push(Some(bytes.to_vec()));
+        k.len() as u32 - 1
+    }
+    fn read(&self, key: u32) -> io::Result<Vec<u8>> {
+        let k = self.0.lock().unwrap();
+        k[key as usize]
+            .clone()
+            .ok_or(io::ErrorKind::NotFound.into())
+    }
+    fn forget(&self, key: u32) {
+        self.0.lock().unwrap()[key as usize] = None;
     }
 }
 
@@ -378,18 +408,21 @@ impl Store for Mirror {
 mod tests {
     use super::*;
 
-    /// A target of two files, read through `source`.
-    fn mirror() -> Mirror {
+    /// A target of two files, read through `source`; what it holds.
+    fn mirror() -> (Mirror, Kept) {
         let source: Source = Box::new(|p: &Path| match p.to_str() {
             Some("/bms/a/x.bms") => Ok(b"#TITLE x".to_vec()),
             Some("/bms/a/1.ogg") => Ok(b"ogg".to_vec()),
             _ => Err(io::ErrorKind::NotFound.into()),
         });
-        let m = Mirror::new(source, vec!["/bms".into(), "/bmseeker".into()], false, || 7);
+        let kept = Kept::default();
+        let held = Box::new(Kept(kept.0.clone()));
+        let writable = vec!["/bms".into(), "/bmseeker".into()];
+        let m = Mirror::new(source, held, writable, false, || 7);
         m.mount("/bms/a/x.bms".into(), 8, 1);
         m.mount("/bms/a/1.ogg".into(), 3, 2);
         m.mount("/store/ir.json".into(), 2, 3);
-        m
+        (m, kept)
     }
 
     fn write(m: &Mirror, p: &str, body: &[u8]) {
@@ -399,7 +432,7 @@ mod tests {
 
     #[test]
     fn reads_the_target_and_what_was_written() {
-        let m = mirror();
+        let (m, _) = mirror();
         assert_eq!(m.read(Path::new("/bms/a/x.bms")).unwrap(), b"#TITLE x");
         assert_eq!(m.stamp(Path::new("/bms/a/1.ogg")), Some((2, 3)));
         let dir = m.read_dir(Path::new("/bms")).unwrap();
@@ -416,7 +449,7 @@ mod tests {
 
     #[test]
     fn changes_only_what_is_its_own() {
-        let m = mirror();
+        let (m, _) = mirror();
         let denied = |r: io::Result<()>| r.unwrap_err().kind() == io::ErrorKind::PermissionDenied;
         assert!(denied(m.remove(Path::new("/store/ir.json"))));
         assert!(denied(
@@ -430,7 +463,7 @@ mod tests {
 
     #[test]
     fn changes_in_order() {
-        let m = mirror();
+        let (m, kept) = mirror();
         // a download staged, then moved into the library
         write(&m, "/bmseeker/downloads/s/2.ogg", b"22");
         m.rename(
@@ -458,8 +491,9 @@ mod tests {
                     format!("rm{} {}", if *dir { " -r" } else { "" }, path.display())
                 }
                 Change::Move { from, to } => format!("mv {} {}", from.display(), to.display()),
-                Change::Write { path, bytes, .. } => {
-                    format!("write {} {}", path.display(), bytes.len())
+                Change::Write { path, key, .. } => {
+                    let n = kept.read(*key).unwrap().len();
+                    format!("write {} {n}", path.display())
                 }
             })
             .collect();
@@ -480,13 +514,15 @@ mod tests {
             &["/bms/a/2.ogg".into()],
         );
         assert!(m.changes().is_empty());
+        // (nothing held once written, or not)
+        assert_eq!(kept.count(), 0);
         assert_eq!(m.stamp(Path::new("/bms/a/1.ogg")), Some((50, 3)));
         assert_eq!(m.stamp(Path::new("/bms/a/2.ogg")), None);
     }
 
     #[test]
     fn a_folder_removed_and_written_again() {
-        let m = mirror();
+        let (m, _) = mirror();
         m.remove_dir(Path::new("/bms/a"));
         assert!(m.read_dir(Path::new("/bms/a")).is_err());
         write(&m, "/bms/a/x.bms", b"again");
@@ -504,7 +540,7 @@ mod tests {
                 },
                 Change::Write {
                     path: "/bms/a/x.bms".into(),
-                    bytes: Arc::new(b"again".to_vec()),
+                    key: 0,
                     mtime: 7
                 },
             ]
@@ -514,13 +550,18 @@ mod tests {
     #[test]
     fn a_zip_keeps_times() {
         let source: Source = Box::new(|_| Err(io::ErrorKind::NotFound.into()));
-        let m = Mirror::new(source, vec!["/".into()], true, || 7);
+        let m = Mirror::new(
+            source,
+            Box::new(Kept::default()),
+            vec!["/".into()],
+            true,
+            || 7,
+        );
         write(&m, "/s/a.bms", b"a");
         write(&m, "/.bmseeker/scan.json", b"[]");
         assert_eq!(m.stamp(Path::new("/s/a.bms")), Some((100, 1)));
-        let got = m.contents(Path::new("/.bmseeker"));
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, Path::new("/s/a.bms"));
-        assert_eq!(got[0].1.as_ref().unwrap(), b"a");
+        let got = m.dated(Path::new("/.bmseeker"));
+        assert_eq!(got, [(PathBuf::from("/s/a.bms"), 100)]);
+        assert_eq!(m.read(Path::new("/s/a.bms")).unwrap(), b"a");
     }
 }

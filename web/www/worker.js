@@ -25,6 +25,22 @@ self.bmseekerRead = (path) => {
   return new Uint8Array(new FileReaderSync().readAsArrayBuffer(f));
 };
 
+// What a command writes, each file as it is done, by key, until it is
+// written to the target: here, not in the wasm memory (which has 4 GiB at
+// most and never shrinks).
+let held = new Map();
+let nextKey = 0;
+self.bmseekerHold = (bytes) => {
+  held.set(nextKey, bytes.slice());
+  return nextKey++;
+};
+self.bmseekerHeld = (key) => {
+  const b = held.get(key);
+  if (!b) throw new Error("not held");
+  return b;
+};
+self.bmseekerForget = (key) => held.delete(key);
+
 // The vibeBMS player's library: songs in bms/ (what it mounts), BMSeeker's
 // downloads in bmseeker/. Nothing else of the player's is read or written.
 const VIBE_DIRS = ["bms", "bmseeker"];
@@ -165,7 +181,10 @@ async function flush(say) {
           folders.add(top(path));
           path = a;
         } else {
-          f = await write(path, a);
+          // (let go of as it is written)
+          const bytes = held.get(a);
+          held.delete(a);
+          f = await write(path, bytes);
         }
         folders.add(top(path));
         if (f) {
@@ -211,6 +230,7 @@ async function handle(id, m) {
       if (m.kind === "vibe") root = await navigator.storage.getDirectory();
       else if (m.kind === "folder") root = m.dir;
       target = { kind: m.kind, proxy: m.proxy, root };
+      held = new Map();
       await relist(say);
       return { library: session.library, files: session.count() };
     }

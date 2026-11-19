@@ -1,15 +1,14 @@
-//! Downloaded songs: archives (.zip, .7z, .rar, .lzh) are unpacked into the
-//! library, a chart on its own goes into its song's folder (see
-//! `placement`), as [`install::take`](crate::install::take) does with a
-//! song's download. On any [`Store`] (a disk, a player's files).
+//! Downloaded songs: archives (.zip, .7z, .rar, .lzh, .tar, .tar.gz) are
+//! unpacked into the library, a chart on its own goes into its song's
+//! folder (see `placement`), as [`install::take`](crate::install::take)
+//! does with a song's download. On any [`Store`] (a disk, a player's files).
 
-use crate::fs::{file_name, Store};
+use crate::fs::Store;
 use crate::install::plan::{taken, Outcome, Request};
 use crate::install::Done;
 use crate::library::Library;
 use crate::placement;
-use crate::unpack::{is_archive, safe_rel, unpack, Blob, BUDGET};
-use std::io::Write;
+use crate::unpack::{is_archive, open, safe_rel, unpack_from, Blob, Opened, BUDGET};
 use std::path::{Path, PathBuf};
 
 /// What became of a downloaded file.
@@ -40,29 +39,19 @@ pub enum Imported {
 /// song the library has all the charts of stays as it is (the files its
 /// folder lacks brought in); charts for a song's folder there go into it.
 /// The archive goes. What it unpacks passes through a folder beside it; a
-/// chart that waits stays there.
+/// chart that waits stays there. With what it is, the charts that waited
+/// there for what came in, placed.
 pub fn import(
     store: &dyn Store,
     file: &Path,
     lib: &mut Library,
     req: &Request,
-) -> Result<Imported, String> {
+) -> Result<(Imported, Vec<PathBuf>), String> {
     if !is_archive(file) && !placement::is_chart(file) {
-        return Ok(Imported::Other(file.to_path_buf()));
+        return Ok((Imported::Other(file.to_path_buf()), Vec::new()));
     }
-    let downloads = file.parent().unwrap_or(Path::new("")).to_path_buf();
-    let req = Request {
-        file: Some(file_name(file)),
-        ..req.clone()
-    };
-    let out = taken(
-        store,
-        Blob::File(file.to_path_buf()),
-        &req,
-        &downloads,
-        lib,
-        false,
-    );
+    let downloads = file.parent().unwrap_or(Path::new(""));
+    let (out, placed) = taken(store, Blob::File(file.to_path_buf()), req, downloads, lib);
     // what counts most: a song added, a chart placed, ... what failed
     let rank = |o: &Outcome, d: &Done| -> Option<(u8, Imported)> {
         Some(match (o, d) {
@@ -79,7 +68,7 @@ pub fn import(
         .flat_map(|(o, done)| done.iter().filter_map(move |d| rank(o, d)))
         .min_by_key(|(r, _)| *r);
     if let Some((_, i)) = best {
-        return Ok(i);
+        return Ok((i, placed));
     }
     Err(out
         .iter()
@@ -92,9 +81,11 @@ pub fn import(
 }
 
 /// Put `blob` (published as `name`: a file, or its bytes in memory) into
-/// the folder `dest` of `store`: an archive is unpacked there (with the
-/// archives in it, if it holds no chart), anything else (an add-on chart
-/// or movie) is put in as it is. Returns the number of files written.
+/// the folder `dest` of `store`: an archive (by its first bytes) is
+/// unpacked there (with the archives in it, if it holds no chart), anything
+/// else (an add-on chart or movie) is put in as it is (a file moved there);
+/// but a file named as an archive is none. Returns the number of files
+/// written.
 pub fn unpack_into(
     store: &dyn Store,
     blob: Blob,
@@ -102,17 +93,16 @@ pub fn unpack_into(
     dest: &Path,
 ) -> Result<usize, String> {
     store.create_dir_all(dest);
-    if is_archive(Path::new(name)) {
-        return unpack(blob, store, dest, BUDGET).map(|m| m.len());
-    }
-    let to = dest.join(safe_rel(name).unwrap_or_else(|| PathBuf::from("download")));
-    let put = match blob {
-        Blob::File(file) => store.copy(&file, &to),
-        Blob::Bytes(bytes) => store
-            .create(&to, None)
-            .and_then(|mut w| w.write_all(&bytes)),
+    let blob = match open(blob, store)? {
+        Opened::Archive(format, r) => {
+            return Ok(unpack_from(r, format, store, dest, BUDGET)?.len());
+        }
+        Opened::Not(_) if is_archive(Path::new(name)) => return Err("not an archive".into()),
+        Opened::Not(blob) => blob,
     };
-    put.map_err(|e| format!("{}: {e}", to.display()))?;
+    let to = dest.join(safe_rel(name).unwrap_or_else(|| PathBuf::from("download")));
+    blob.put(store, &to)
+        .map_err(|e| format!("{}: {e}", to.display()))?;
     Ok(1)
 }
 
@@ -124,7 +114,7 @@ mod tests {
 
     /// [`import`] into the library below `library`, as by hand.
     fn import_to(store: &dyn Store, file: &Path, library: &Path) -> Result<Imported, String> {
-        import(store, file, &mut Library::new(library), &Request::default())
+        import(store, file, &mut Library::new(library), &Request::default()).map(|(i, _)| i)
     }
 
     /// A file or its bytes: an archive unpacked, anything else put in.
@@ -145,6 +135,13 @@ mod tests {
         let file = Blob::File("dl/movie".into());
         assert_eq!(unpack_into(&m, file, "m.mp4", dest), Ok(1));
         assert_eq!(m.read(&dest.join("m.mp4")).unwrap(), b"mp4");
+        assert!(m.read(Path::new("dl/movie")).is_err());
+        // an archive by its bytes, whatever its name; none named as one
+        let z = zip(&[("d.txt", "d")]);
+        assert_eq!(unpack_into(&m, Blob::Bytes(z), "author link", dest), Ok(1));
+        assert_eq!(m.read(&dest.join("d.txt")).unwrap(), b"d");
+        let page = Blob::Bytes(b"<html>".to_vec());
+        assert!(unpack_into(&m, page, "x.zip", dest).is_err());
     }
 
     const CHART: &str = "#TITLE Song\n#ARTIST someone\n#BPM 120\n#WAV01 01.wav\n#00111:01\n";
@@ -171,17 +168,22 @@ mod tests {
         ];
         std::fs::write(&pack, zip(&files)).unwrap();
         let dest = library.join("Song");
+        // the waiting chart finds its song
         assert_eq!(
-            import_to(&Disk, &pack, &library).unwrap(),
-            Imported::Unpacked(dest.clone(), 3)
+            import(
+                &Disk,
+                &pack,
+                &mut Library::new(&library),
+                &Request::default()
+            )
+            .unwrap(),
+            (
+                Imported::Unpacked(dest.clone(), 3),
+                vec![dest.join("Song/song_insane.bme")]
+            )
         );
         assert!(dest.join("Song/01.ogg").is_file() && dest.join("evil.txt").is_file());
         assert!(!pack.exists() && !root.join("evil.txt").exists());
-        // now the waiting chart finds its song
-        assert_eq!(
-            crate::install::place_waiting(&Disk, &downloads, &mut Library::new(&library)),
-            vec![dest.join("Song/song_insane.bme")]
-        );
     }
 
     /// A .tar.gz (and a .tgz) as a zip: into a folder of its name without
@@ -283,7 +285,7 @@ mod tests {
             "dl/Song.zip",
             &zip(&[("song.bms", CHART), ("01.ogg", "ogg")]),
         );
-        let got = import(
+        let (got, placed) = import(
             &mem,
             Path::new("dl/Song.zip"),
             &mut lib,
@@ -292,7 +294,6 @@ mod tests {
         .unwrap();
         assert_eq!(got, Imported::Unpacked("bms/Song".into(), 2));
         assert!(lib.owns(&crate::install::md5_hex(CHART.as_bytes())));
-        let placed = crate::install::place_waiting(&mem, Path::new("dl"), &mut lib);
         assert_eq!(placed, [PathBuf::from("bms/Song/song_x.bms")]);
         assert_eq!(
             lib.folders_of(&crate::install::md5_hex(diff.as_bytes())),
