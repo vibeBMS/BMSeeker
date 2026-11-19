@@ -35,19 +35,8 @@ pub trait ReadSeek: Read + Seek {}
 
 impl<T: Read + Seek> ReadSeek for T {}
 
-/// A store as files to read (`&dyn Store` as `&dyn Fs`).
-pub trait AsFs {
-    fn as_fs(&self) -> &dyn Fs;
-}
-
-impl<T: Fs> AsFs for T {
-    fn as_fs(&self) -> &dyn Fs {
-        self
-    }
-}
-
 /// Files written as well as read: where archives are unpacked.
-pub trait Store: Fs + AsFs {
+pub trait Store: Fs {
     /// A new file `p` (its folders made, a file there replaced), written
     /// through what this gives; once that is dropped, its modification
     /// time is `mtime` (seconds) if the store can keep it (a failure to is
@@ -197,7 +186,8 @@ impl Store for Disk {
     }
 
     fn open(&self, p: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
-        Ok(Box::new(std::fs::File::open(p)?))
+        // (the archives' readers read headers a few bytes at a time)
+        Ok(Box::new(io::BufReader::new(std::fs::File::open(p)?)))
     }
 
     fn create_dir_all(&self, p: &Path) {

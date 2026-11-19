@@ -3,7 +3,7 @@
 //! chart (差分) goes into the song's folder ([`placement`](crate::placement)).
 //! A link that leads to a page instead is [`Done::Page`], for a browser.
 
-use crate::fs::Fs;
+use crate::fs::Store;
 use crate::library::Library;
 use std::path::{Path, PathBuf};
 
@@ -169,7 +169,7 @@ pub fn request(
 
 /// Charts waiting in `downloads` (their song came later) into the folders
 /// of `lib` they now belong in (what comes in added to it).
-pub fn place_waiting(fs: &dyn Fs, downloads: &Path, lib: &mut Library) -> Vec<PathBuf> {
+pub(crate) fn place_waiting(fs: &dyn Store, downloads: &Path, lib: &mut Library) -> Vec<PathBuf> {
     use crate::placement::{bring, is_chart, locate, Located, Rules};
     let mut out = Vec::new();
     for e in fs.read_dir(downloads).unwrap_or_default() {

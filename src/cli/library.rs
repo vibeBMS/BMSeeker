@@ -93,7 +93,7 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
                 ..Default::default()
             };
             let lib = &mut scan(r, &library);
-            let got = crate::import::import(&*r.fs, &file, lib, &req)?;
+            let (got, placed) = crate::import::import(&*r.fs, &file, lib, &req)?;
             let (v, text) = match &got {
                 Imported::Unpacked(d, n) => (
                     json!({"state": "added", "path": d, "files": n}),
@@ -128,6 +128,11 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
                 ),
             };
             r.out.record(v, || text);
+            for p in placed {
+                r.out.record(json!({"state": "placed", "path": p}), || {
+                    format!("placed {}", p.display())
+                });
+            }
             Ok(())
         }
         Library::Place {
@@ -137,7 +142,7 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
             min,
         } => {
             if let Some(dir) = to {
-                return match placement::bring(r.fs.as_fs(), &chart, &dir) {
+                return match placement::bring(&*r.fs, &chart, &dir) {
                     Ok(Some(at)) => {
                         r.out.record(json!({"state": "placed", "path": at}), || {
                             at.display().to_string()
@@ -158,7 +163,7 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
             let downloads = r.config().downloads.clone();
             let siblings = !chart.parent().is_some_and(|p| p.ends_with(&downloads));
             let (located, candidates) = placement::locate(
-                r.fs.as_fs(),
+                &*r.fs,
                 &chart,
                 &crate::library::Library::new(&library),
                 siblings,
@@ -187,9 +192,8 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
             // the library read once for all of them
             let index = crate::library::Library::new(&library);
             for c in &charts {
-                let (located, best) =
-                    placement::locate(r.fs.as_fs(), c, &index, false, Rules::default())
-                        .unwrap_or((Located::NoSong, Vec::new()));
+                let (located, best) = placement::locate(&*r.fs, c, &index, false, Rules::default())
+                    .unwrap_or((Located::NoSong, Vec::new()));
                 let mut v = located_record(c, &located);
                 if let Some((b, l)) = best.first() {
                     v["best"] = json!({"folder": b.dir, "label": l, "coverage": b.coverage});

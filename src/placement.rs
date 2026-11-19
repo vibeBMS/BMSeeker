@@ -13,7 +13,7 @@
 //! nothing. Else the user picks among the best candidates (songs alike
 //! first).
 
-use crate::fs::{file_name, Fs};
+use crate::fs::{file_name, move_file, Fs, Store};
 use crate::library::Library;
 use crate::titles;
 use std::cell::RefCell;
@@ -759,9 +759,9 @@ pub(crate) fn clash(
 /// `clash`: a chart of the same name there is not replaced (it comes in
 /// as `name_.bms`; the same chart again just goes); another file of the
 /// same name stays unless `file` is newer, and `file` goes (the one there
-/// set aside until it is in: a failure leaves it). Returns where it is now
-/// (None: it was not needed).
-pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
+/// set aside until it is in: a failure leaves it). Moved, else (another
+/// disk) copied. Returns where it is now (None: it was not needed).
+pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     let name = file_name(file);
     let mut to = dir.join(&name);
     let chart = is_chart(file);
@@ -774,13 +774,13 @@ pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> std::io::Result<Option<Pat
     }
     let new = fs.stamp(file).unwrap_or_default();
     match clash(new, fs.stamp(&to), chart, fs.keeps_times()) {
-        Clash::Move => fs.rename(file, &to)?,
+        Clash::Move => move_file(fs, file, &to)?,
         Clash::Overwrite => {
             let old = dir.join(format!(".{name}.old"));
             // (one an earlier failure left goes)
             let _ = fs.remove(&old);
             fs.rename(&to, &old)?;
-            if let Err(e) = fs.rename(file, &to) {
+            if let Err(e) = move_file(fs, file, &to) {
                 return fs.rename(&old, &to).and(Err(e));
             }
             // (one that cannot be removed stays beside it, hidden)
@@ -800,7 +800,7 @@ pub fn bring(fs: &dyn Fs, file: &Path, dir: &Path) -> std::io::Result<Option<Pat
                 to = dir.join(format!("{stem}{}{ext}", "_".repeat(n)));
                 n += 1;
             }
-            fs.rename(file, &to)?;
+            move_file(fs, file, &to)?;
         }
     }
     Ok(Some(to))
@@ -975,6 +975,19 @@ mod tests {
         }
         fn remove(&self, p: &Path) -> std::io::Result<()> {
             crate::fs::Disk.remove(p)
+        }
+    }
+
+    impl Store for Counting {
+        fn create(
+            &self,
+            p: &Path,
+            t: Option<i64>,
+        ) -> std::io::Result<Box<dyn std::io::Write + '_>> {
+            crate::fs::Disk.create(p, t)
+        }
+        fn remove_dir(&self, p: &Path) {
+            crate::fs::Disk.remove_dir(p)
         }
     }
 
@@ -1316,6 +1329,18 @@ mod tests {
             }
             fn keeps_times(&self) -> bool {
                 false
+            }
+        }
+        impl Store for NoTimes {
+            fn create(
+                &self,
+                p: &Path,
+                t: Option<i64>,
+            ) -> std::io::Result<Box<dyn std::io::Write + '_>> {
+                self.0.create(p, t)
+            }
+            fn remove_dir(&self, p: &Path) {
+                self.0.remove_dir(p)
             }
         }
         let fs = NoTimes(Default::default());

@@ -438,7 +438,7 @@ impl Library {
     pub fn scan_cached(fs: &dyn Store, root: &Path, skip: &Path, cache: &Path) -> Library {
         let mut lib = Library::new(root);
         lib.skip = Some(skip.to_path_buf());
-        let read = fs.as_fs();
+        let read: &dyn Fs = fs;
         let mut known: HashMap<PathBuf, Cached> = read
             .read(cache)
             .ok()
