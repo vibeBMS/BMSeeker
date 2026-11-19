@@ -146,9 +146,15 @@ jobs:
     needs: build
     if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'failure') && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    # GitHub Pages by Actions (Settings > Pages > Source: GitHub Actions):
+    # each deploy replaces the whole site
     permissions:
-      contents: write
-    # one publish at a time
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # one deploy at a time
     concurrency:
       group: web-pages
       cancel-in-progress: false
@@ -157,11 +163,11 @@ jobs:
         with:
           name: bmseeker-web
       - run: unzip -q bmseeker-web.zip -d site
-      - uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          commit_message: "web build ${{ github.sha }}"
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v5
 
   release:
     name: nightly release
