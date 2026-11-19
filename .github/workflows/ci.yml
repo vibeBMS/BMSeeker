@@ -97,3 +97,34 @@ jobs:
         with:
           name: BMSeeker-web
           path: web/dist
+
+  # only main's newest cache of each job stays (this workflow's and the
+  # nightly's, build.yml): other refs' entries and main's older ones, left
+  # when Cargo.lock or the toolchain changed, are deleted
+  cache-prune:
+    needs: [test, wasm, web]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MAIN: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          # rust-cache: v0-rust-<key>-<job>-<os>-<arch>-<environment>-<lockfiles>;
+          # setup-go: setup-go-<os>-<arch>-<image>-go-<version>-<go.sum hash>
+          gh cache list --limit 1000 --sort created_at --order desc \
+            --json id,key,ref,sizeInBytes --jq '.[] | "\(.id)\t\(.key)\t\(.ref)\t\(.sizeInBytes)"' |
+            awk -F'\t' -v main="$MAIN" '{
+              job = $2
+              if (job ~ /^v0-rust-/) sub(/-[0-9a-f]+-[0-9a-f]+$/, "", job)
+              else if (job ~ /^setup-go-/) sub(/-[0-9a-f]+$/, "", job)
+              else next
+              if ($3 != main || seen[job]++) print $1 "\t" $2 "\t" $3 "\t" int($4 / 1048576) " MB"
+            }' |
+            while IFS=$'\t' read -r id key ref size; do
+              echo "delete $key ($ref, $size)"
+              gh cache delete "$id"
+            done
