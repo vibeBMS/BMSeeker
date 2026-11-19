@@ -99,7 +99,7 @@ impl EntryStep {
 /// Whether the library has the entry's song: one of its own charts the
 /// table names, or a chart of its title and artist.
 pub(crate) fn has_song(e: &Entry, lib: &Library) -> bool {
-    e.org_md5.iter().any(|m| lib.owns(m)) || !lib.song_folders_of(&e.want).is_empty()
+    e.org_md5.iter().any(|m| lib.owns(m)) || lib.has_song(&e.want)
 }
 
 /// The downloads `e` needs from the library `lib`, in order: none when it
@@ -804,7 +804,7 @@ mod tests {
             assert!(lib.owns(&e.md5), "{}", e.want.title);
         }
         // two songs' folders, the charts in them, none waiting
-        let folders = crate::placement::song_folders(&Disk, &library);
+        let folders = crate::placement::song_folders_except(&Disk, &library, None);
         let names: Vec<Vec<String>> = folders.values().cloned().collect();
         assert_eq!(
             names,

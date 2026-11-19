@@ -67,22 +67,22 @@ impl Charts {
         slot
     }
 
-    /// The folders of the charts of `song` ([`titles::same_song`]) whose
-    /// path `keep` keeps.
-    fn folders_of(&self, song: &titles::Song, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    /// The charts of `song` ([`titles::same_song`]).
+    fn of<'a>(&'a self, song: &'a titles::Song) -> impl Iterator<Item = &'a Path> {
         let at = self
             .by_artist
             .get(&song.artist)
             .map_or(&[][..], Vec::as_slice);
         at.iter()
-            .filter(|(title, p)| {
-                let other = titles::Song {
-                    title: title.clone(),
-                    artist: song.artist.clone(),
-                };
-                keep(p) && titles::same_song(song, &other)
-            })
-            .filter_map(|(_, p)| p.parent().map(Path::to_path_buf))
+            .filter(|(title, _)| titles::alike(&song.title, title))
+            .map(|(_, p)| p.as_path())
+    }
+
+    /// The folders of the charts of `song` whose path `keep` keeps.
+    fn folders_of(&self, song: &titles::Song, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        self.of(song)
+            .filter(|p| keep(p))
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
             .collect()
     }
 }
@@ -238,14 +238,6 @@ impl Library {
         }
     }
 
-    /// The library below `root`, every chart read now (their hashes known).
-    #[cfg(test)]
-    pub(crate) fn scan(fs: &dyn Fs, root: &Path) -> Library {
-        let mut lib = Library::new(root);
-        lib.read_all(fs);
-        lib
-    }
-
     /// The library below `root` whose charts a player knows (`charts`, from
     /// its own records): their hashes and titles are not read from the
     /// files; its folders are, when first needed.
@@ -286,15 +278,14 @@ impl Library {
             .map_or(&[], |v| v.as_slice())
     }
 
-    /// The folders holding a chart of the song `want` ([`titles::same_song`]),
-    /// among the charts given or read so far (all of them once
-    /// [`Library::scan`]ned).
-    pub(crate) fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
+    /// Whether it holds a chart of the song `want` (the same artist, the
+    /// titles alike, as the downloads compare them), among the charts given
+    /// or read so far.
+    pub fn has_song(&self, want: &crate::hosts::Want) -> bool {
         let song = titles::Song::of(&want.title, &want.artist);
-        let mut out = self.charts.borrow().folders_of(&song, |_| true);
-        out.sort();
-        out.dedup();
-        out
+        let known = self.charts.borrow();
+        let found = known.of(&song).next().is_some();
+        found
     }
 
     /// The folders in it holding a chart of the same song as one of
@@ -417,17 +408,6 @@ impl Library {
             .iter()
             .flat_map(|s| s.charts.iter().map(|c| s.dir.join(c)))
             .collect()
-    }
-
-    /// Every song's folder and chart, read now.
-    #[cfg(test)]
-    fn read_all(&mut self, fs: &dyn Fs) {
-        let paths = self.chart_paths(fs);
-        for (p, r) in paths.iter().zip(Read::all(fs, &paths)) {
-            if let Some(r) = r {
-                self.know(p.clone(), r);
-            }
-        }
     }
 
     /// The library below `root`, every chart read now, passing by the
@@ -575,6 +555,32 @@ impl Library {
 mod tests {
     use super::*;
     use crate::fs::Mem;
+
+    impl Library {
+        /// The library below `root`, every chart read now (their hashes
+        /// known).
+        pub(crate) fn scan(fs: &dyn Fs, root: &Path) -> Library {
+            let mut lib = Library::new(root);
+            let paths = lib.chart_paths(fs);
+            let read = Read::all(fs, &paths);
+            for (p, r) in paths.into_iter().zip(read) {
+                if let Some(r) = r {
+                    lib.know(p, r);
+                }
+            }
+            lib
+        }
+
+        /// The folders holding a chart of the song `want` ([`titles::same_song`]),
+        /// among the charts given or read so far.
+        pub(crate) fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
+            let song = titles::Song::of(&want.title, &want.artist);
+            let mut out = self.charts.borrow().folders_of(&song, |_| true);
+            out.sort();
+            out.dedup();
+            out
+        }
+    }
 
     fn library() -> Mem {
         let m = Mem::default();
@@ -780,7 +786,7 @@ mod tests {
             t.put(d.join("bg.png"), Vec::new());
         }
         let started = Instant::now();
-        crate::placement::song_folders(&t, Path::new("bms"));
+        crate::placement::song_folders_except(&t, Path::new("bms"), None);
         let walk = started.elapsed();
         let started = Instant::now();
         let lib = Library::new(Path::new("bms"));

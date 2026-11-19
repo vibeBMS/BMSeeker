@@ -26,16 +26,6 @@ pub(crate) use crate::chart::{class_of, Class};
 // library, until it asks `titles::same_song` as the downloads do)
 pub use crate::titles::{same_artist, same_name, same_title};
 
-/// A folder of the library: its files and the charts in it.
-#[cfg(test)]
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FolderInfo {
-    pub(crate) dir: PathBuf,
-    /// Files below the folder, by their path in it (`sound/kick.ogg`).
-    pub(crate) files: Vec<String>,
-    pub(crate) charts: Vec<ChartInfo>,
-}
-
 #[derive(Debug, PartialEq)]
 pub(crate) enum Placement {
     /// Where it is (its sounds are there, or no folder has them all).
@@ -277,43 +267,6 @@ impl Candidate {
     }
 }
 
-/// The folders among `folders` for `chart`, which came with the files
-/// `bundled` (paths beside it): those holding at least one of its sounds,
-/// the best first (the same song; then a song alike; then more of its
-/// sounds, more of them in the folder itself; then more of its images, movies, stage file / banner
-/// / back image; then fewer other sounds).
-#[cfg(test)]
-pub(crate) fn rank(
-    chart: &ChartInfo,
-    bundled: &[String],
-    folders: &[FolderInfo],
-) -> Vec<Candidate> {
-    let names = Names::default();
-    let keys: Vec<Keys> = folders.iter().map(|f| Keys::of(&names, &f.files)).collect();
-    let titles: Vec<Vec<(String, String)>> = folders
-        .iter()
-        .map(|f| {
-            f.charts
-                .iter()
-                .map(|c| (c.title.clone(), c.artist.clone()))
-                .collect()
-        })
-        .collect();
-    let folders: Vec<Folder> = (0..folders.len())
-        .map(|i| Folder {
-            dir: &folders[i].dir,
-            keys: &keys[i],
-            titles: &titles[i],
-        })
-        .collect();
-    let need = Needs::of(&names, chart);
-    let brought = Keys::of(&names, bundled);
-    ranked(chart, &need, &brought, &folders)
-        .into_iter()
-        .map(|(c, _)| c)
-        .collect()
-}
-
 /// A song's folder as a chart is ranked for it: its files' keys and its
 /// charts' titles and artists (none: not read).
 #[derive(Clone, Copy)]
@@ -323,8 +276,12 @@ pub(crate) struct Folder<'a> {
     pub(crate) titles: &'a [(String, String)],
 }
 
-/// [`rank`] for `chart` asking `need`, which came with the files of
-/// `brought`; each candidate with its folder's place in `folders`.
+/// The folders among `folders` holding any of the sounds of `chart`
+/// (asking `need`), which came with the files of `brought`, the best first
+/// (the same song; then a song alike; then more of its sounds, more of
+/// them in the folder itself; then more of its images, movies, stage
+/// file / banner / back image; then fewer other sounds), each with its
+/// folder's place in `folders`.
 fn ranked(
     chart: &ChartInfo,
     need: &Needs,
@@ -388,7 +345,7 @@ fn ranked(
     out
 }
 
-/// What [`rank`]'s candidates mean: the one folder that is the same song
+/// What [`ranked`]'s candidates mean: the one folder that is the same song
 /// and holds the chart's sounds (`min_coverage`); else the folders that
 /// hold most of them (`min_listed`: the user picks, at most 3); else none
 /// yet.
@@ -408,21 +365,6 @@ pub(crate) fn decide(candidates: &[Candidate], rules: Rules) -> Placement {
         (_, 0) => Placement::Stay,
         _ => Placement::Ask(dirs(&listed)),
     }
-}
-
-/// Where `chart`, now in `own` (with the files it came with), belongs among
-/// `folders` (by the default [`Rules`]).
-#[cfg(test)]
-pub(crate) fn place(chart: &ChartInfo, own: &FolderInfo, folders: &[FolderInfo]) -> Placement {
-    if chart.sounds.is_empty() || covers(&own.files, &chart.sounds) {
-        return Placement::Stay;
-    }
-    let others: Vec<FolderInfo> = folders
-        .iter()
-        .filter(|f| f.dir != own.dir)
-        .cloned()
-        .collect();
-    decide(&rank(chart, &own.files, &others), Rules::default())
 }
 
 /// Where a chart file in the library belongs, with labels for asking.
@@ -480,17 +422,8 @@ pub(crate) fn files_below(fs: &dyn Fs, dir: &Path) -> Vec<String> {
 
 /// The songs' folders below `dir` (those holding a chart), each with the
 /// files below it by their path in it (a folder below holding charts of
-/// its own is a song of its own; folders whose names start with `.` are
-/// passed by).
-#[cfg(test)]
-pub(crate) fn song_folders(
-    fs: &dyn Fs,
-    dir: &Path,
-) -> std::collections::BTreeMap<PathBuf, Vec<String>> {
-    song_folders_except(fs, dir, None)
-}
-
-/// [`song_folders`], `skip` (and what is below it) passed by too.
+/// its own is a song of its own; folders whose names start with `.`, and
+/// `skip` with what is below it, are passed by).
 pub(crate) fn song_folders_except(
     fs: &dyn Fs,
     dir: &Path,
@@ -755,6 +688,65 @@ pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+/// A folder of the library: its files and the charts in it.
+#[derive(Clone, Debug, Default)]
+struct FolderInfo {
+    dir: PathBuf,
+    /// Files below the folder, by their path in it (`sound/kick.ogg`).
+    files: Vec<String>,
+    charts: Vec<ChartInfo>,
+}
+
+/// The folders among `folders` for `chart`, which came with the files
+/// `bundled` (paths beside it): those holding at least one of its sounds,
+/// the best first (the same song; then a song alike; then more of its
+/// sounds, more of them in the folder itself; then more of its images, movies, stage file / banner
+/// / back image; then fewer other sounds).
+fn rank(
+    chart: &ChartInfo,
+    bundled: &[String],
+    folders: &[FolderInfo],
+) -> Vec<Candidate> {
+    let names = Names::default();
+    let keys: Vec<Keys> = folders.iter().map(|f| Keys::of(&names, &f.files)).collect();
+    let titles: Vec<Vec<(String, String)>> = folders
+        .iter()
+        .map(|f| {
+            f.charts
+                .iter()
+                .map(|c| (c.title.clone(), c.artist.clone()))
+                .collect()
+        })
+        .collect();
+    let folders: Vec<Folder> = (0..folders.len())
+        .map(|i| Folder {
+            dir: &folders[i].dir,
+            keys: &keys[i],
+            titles: &titles[i],
+        })
+        .collect();
+    let need = Needs::of(&names, chart);
+    let brought = Keys::of(&names, bundled);
+    ranked(chart, &need, &brought, &folders)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// Where `chart`, now in `own` (with the files it came with), belongs among
+/// `folders` (by the default [`Rules`]).
+fn place(chart: &ChartInfo, own: &FolderInfo, folders: &[FolderInfo]) -> Placement {
+    if chart.sounds.is_empty() || covers(&own.files, &chart.sounds) {
+        return Placement::Stay;
+    }
+    let others: Vec<FolderInfo> = folders
+        .iter()
+        .filter(|f| f.dir != own.dir)
+        .cloned()
+        .collect();
+    decide(&rank(chart, &own.files, &others), Rules::default())
+}
 
     fn chart(title: &str, artist: &str, sounds: &[&str]) -> ChartInfo {
         ChartInfo {
@@ -1183,7 +1175,7 @@ mod tests {
         put(&lib.join("Pack/Song/Other/y.ogg"), "x");
         put(&lib.join("Pack/readme.txt"), "x");
         put(&lib.join(".bmseeker/w.bms"), "#TITLE W\n");
-        let s = song_folders(&Disk, &lib);
+        let s = song_folders_except(&Disk, &lib, None);
         assert_eq!(s[&lib.join("Pack/Song")], ["a.bms", "sound/x.ogg"]);
         assert_eq!(s[&lib.join("Pack/Song/Other")], ["b.bms", "y.ogg"]);
         assert_eq!(s.len(), 2, "{s:?}");

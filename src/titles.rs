@@ -501,7 +501,13 @@ impl Song {
 /// Whether `a` and `b` are one song's charts ([`Relation::Strong`]): a
 /// title, the same artist, and the titles alike (Dice ≥ [`STRONG`]).
 pub(crate) fn same_song(a: &Song, b: &Song) -> bool {
-    !a.title.is_empty() && a.artist == b.artist && dice(&a.title, &b.title) >= STRONG
+    a.artist == b.artist && alike(&a.title, &b.title)
+}
+
+/// Whether the title `a` (as compared, [`title_key`]) and `b` are one
+/// song's, by the same artist: `a` not empty, their Dice ≥ [`STRONG`].
+pub(crate) fn alike(a: &str, b: &str) -> bool {
+    !a.is_empty() && dice(a, b) >= STRONG
 }
 
 /// The (title, artist) pairs of a song's charts, as compared: the most
