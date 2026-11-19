@@ -130,6 +130,13 @@ Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`
 `downloads` (the folder in a library where downloads wait), `min_coverage`, `reinstall`, `folder_naming`,
 `folder_name_format`, `sjis_only`.
 
+BMSeeker says who it is: every request it makes natively carries the `User-Agent`
+`BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)` (`config::USER_AGENT`), never a browser's. An app that
+embeds it puts its own product first (`config::user_agent_of("vibeBMS/0.1.0")`:
+`vibeBMS/0.1.0 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker)`); the `user_agent` setting changes it. In a web
+page no program may set a `User-Agent`: requests to hosts that send CORS headers carry the browser's own, and those
+through the CORS proxy the proxy's.
+
 A song new to the library gets a folder named after the song's title (a table's), or the archive. With
 `--name-folders` (setting `"folder_naming": true`; off by default) it is named after its charts as BeMusicSeeker names
 one: `folder_name_format` (default `[%ARTIST%] %TITLE%`) with what the charts' artists and titles share (their chart

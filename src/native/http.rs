@@ -99,12 +99,9 @@ pub(super) fn download(
         DefaultConnector::new().chain(Watch(progress.cloned())),
         ureq::unversioned::resolver::DefaultResolver::default(),
     );
-    let mut req = agent.get(&target.url);
-    // Dropbox answers a browser with its page instead of the file
-    let link = crate::hosts::Link::parse(&target.url, 0);
-    if !link.is_some_and(|l| l.on("dropbox.com") || l.on("dropboxusercontent.com")) {
-        req = req.header("User-Agent", user_agent);
-    }
+    // (Dropbox sends the file to BMSeeker's own user agent; a browser's
+    // gets its page)
+    let req = agent.get(&target.url).header("User-Agent", user_agent);
     let mut res = req.call().map_err(failed)?;
     if !res.status().is_success() {
         return Err(NetError::Status(res.status().as_u16()));
