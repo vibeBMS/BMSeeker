@@ -6,14 +6,17 @@
 //! community archive's songs by title and artist), and [`Sources`] asks
 //! them in the order
 //! [`Config::sources`] gives. A source answers with a [`Task`], so one that
-//! reads the network runs anywhere a task does.
+//! reads the network runs anywhere a task does; the sources of one
+//! [`Sources`] share their answers ([`Memo`]: BMS SEARCH is asked of a
+//! chart once, the community archive's folder of a letter listed once).
 //!
 //! [`Config::sources`]: crate::config::Config::sources
 
 use crate::config::Config;
 use crate::hosts::Want;
 use crate::links::Links;
-use crate::net::{Answer, BoxTask, Next, Ready, Task};
+use crate::net::{Answer, BoxTask, Memo, Next, Ready, Task};
+use std::sync::Arc;
 
 /// What is looked for: a chart (by its MD5, if known) of the song `want`;
 /// `diff`: the chart's own link (a 差分 posted apart from its song), else
@@ -76,12 +79,14 @@ impl Source for List {
 /// only: BMS SEARCH lists works, not separate charts).
 pub(crate) struct BmsSearch {
     api: String,
+    memo: Arc<Memo>,
 }
 
 impl BmsSearch {
-    pub(crate) fn new(config: &Config) -> BmsSearch {
+    pub(crate) fn new(config: &Config, memo: Arc<Memo>) -> BmsSearch {
         BmsSearch {
             api: config.bmssearch_api.clone(),
+            memo,
         }
     }
 }
@@ -95,7 +100,8 @@ impl Source for BmsSearch {
         if q.diff {
             return Ready::boxed(Vec::new());
         }
-        Box::new(crate::bmssearch::Lookup::new(&q.md5, &q.want, &self.api))
+        self.memo
+            .wrap(crate::bmssearch::Lookup::new(&q.md5, &q.want, &self.api))
     }
 }
 
@@ -106,13 +112,15 @@ impl Source for BmsSearch {
 pub(crate) struct ChartMirrors {
     api: String,
     folders: Vec<String>,
+    memo: Arc<Memo>,
 }
 
 impl ChartMirrors {
-    pub(crate) fn new(config: &Config) -> ChartMirrors {
+    pub(crate) fn new(config: &Config, memo: Arc<Memo>) -> ChartMirrors {
         ChartMirrors {
             api: config.bmssearch_api.trim_end_matches('/').to_string(),
             folders: config.chart_mirrors.clone(),
+            memo,
         }
     }
 }
@@ -132,7 +140,7 @@ impl Source for ChartMirrors {
             return Ready::boxed(Vec::new());
         };
         let folders = self.folders.clone();
-        crate::net::get_then(format!("{}/patterns/{md5}", self.api), move |answer| {
+        let find = crate::net::get_then(format!("{}/patterns/{md5}", self.api), move |answer| {
             // (nothing when it fails)
             let Ok(body) = answer else {
                 return Vec::new();
@@ -153,7 +161,8 @@ impl Source for ChartMirrors {
                     )
                 })
                 .collect()
-        })
+        });
+        self.memo.wrap(find)
     }
 }
 
@@ -165,24 +174,24 @@ impl Source for ChartMirrors {
 ///
 /// [`Config::ginger`]: crate::config::Config::ginger
 /// [`Config::konmai`]: crate::config::Config::konmai
-pub(crate) struct Package {
+pub(crate) struct ByMd5 {
     name: &'static str,
     /// The lookup's URL, the MD5 after it.
     api: String,
     url: fn(&serde_json::Value) -> Option<&str>,
 }
 
-impl Package {
-    pub(crate) fn ginger(config: &Config) -> Package {
-        Package {
+impl ByMd5 {
+    pub(crate) fn ginger(config: &Config) -> ByMd5 {
+        ByMd5 {
             name: "ginger",
             api: config.ginger.clone(),
             url: |v| v["downloadURL"].as_str(),
         }
     }
 
-    pub(crate) fn konmai(config: &Config) -> Package {
-        Package {
+    pub(crate) fn konmai(config: &Config) -> ByMd5 {
+        ByMd5 {
             name: "konmai",
             api: config.konmai.clone(),
             url: |v| {
@@ -202,7 +211,7 @@ fn file_link(url: &str) -> bool {
             || crate::unpack::is_archive(std::path::Path::new(path)))
 }
 
-impl Source for Package {
+impl Source for ByMd5 {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -241,13 +250,15 @@ impl Source for Package {
 pub(crate) struct BmsLibrary {
     folder: String,
     api: String,
+    memo: Arc<Memo>,
 }
 
 impl BmsLibrary {
-    pub(crate) fn new(config: &Config) -> BmsLibrary {
+    pub(crate) fn new(config: &Config, memo: Arc<Memo>) -> BmsLibrary {
         BmsLibrary {
             folder: crate::hosts::drive::drive_id(&config.bms_library).unwrap_or_default(),
             api: config.bmssearch_api.trim_end_matches('/').to_string(),
+            memo,
         }
     }
 }
@@ -326,7 +337,7 @@ impl Source for BmsLibrary {
         if self.folder.is_empty() || (title.is_empty() && md5.is_none()) {
             return Ready::boxed(Vec::new());
         }
-        Box::new(Library {
+        self.memo.wrap(ArchiveSearch {
             root: self.folder.clone(),
             pattern: md5.map(|m| format!("{}/patterns/{m}", self.api)),
             table_title: title,
@@ -339,7 +350,7 @@ impl Source for BmsLibrary {
 
 /// BMS SEARCH's title of the chart's song (when its MD5 is known), the
 /// archive's root, the letter's folder, then the song's archives.
-struct Library {
+struct ArchiveSearch {
     root: String,
     pattern: Option<String>,
     table_title: String,
@@ -356,7 +367,7 @@ enum Wait {
     Letter,
 }
 
-impl Library {
+impl ArchiveSearch {
     fn root(&mut self) -> Next<Vec<String>> {
         self.titles.retain(|t| !t.trim().is_empty());
         if self.titles.is_empty() {
@@ -369,7 +380,7 @@ impl Library {
     }
 }
 
-impl Task for Library {
+impl Task for ArchiveSearch {
     type Output = Vec<String>;
 
     fn start(&mut self) -> Next<Vec<String>> {
@@ -445,7 +456,7 @@ impl Task for Library {
 
 /// The sources, asked in order (a copy shares them).
 #[derive(Clone, Default)]
-pub struct Sources(Vec<std::sync::Arc<dyn Source>>);
+pub struct Sources(Vec<Arc<dyn Source>>);
 
 impl Sources {
     /// The sources [`Config::sources`] names, in its order: the link lists
@@ -453,20 +464,21 @@ impl Sources {
     /// "tsv"), BMS SEARCH from the settings.
     pub fn from_config(config: &Config, mut lists: Vec<(&'static str, Links)>) -> Sources {
         let mut out = Sources::default();
+        let memo = Arc::new(Memo::default());
         for name in &config.sources {
             if !config.uses(name) {
                 continue;
             }
             if name == "bmssearch" {
-                out.push(Box::new(BmsSearch::new(config)));
+                out.push(Box::new(BmsSearch::new(config, memo.clone())));
             } else if name == "mirrors" {
-                out.push(Box::new(ChartMirrors::new(config)));
+                out.push(Box::new(ChartMirrors::new(config, memo.clone())));
             } else if name == "ginger" {
-                out.push(Box::new(Package::ginger(config)));
+                out.push(Box::new(ByMd5::ginger(config)));
             } else if name == "konmai" {
-                out.push(Box::new(Package::konmai(config)));
+                out.push(Box::new(ByMd5::konmai(config)));
             } else if name == "bmslibrary" {
-                out.push(Box::new(BmsLibrary::new(config)));
+                out.push(Box::new(BmsLibrary::new(config, memo.clone())));
             } else if let Some(i) = lists.iter().position(|(n, _)| n == name) {
                 let (n, links) = lists.remove(i);
                 out.push(Box::new(List::new(n, links)));
@@ -616,7 +628,7 @@ mod tests {
     fn packages_by_md5() {
         let md5 = "176c2b2db4efd66cf186caae7923d477";
         let config = Config::default();
-        let (ginger, konmai) = (Package::ginger(&config), Package::konmai(&config));
+        let (ginger, konmai) = (ByMd5::ginger(&config), ByMd5::konmai(&config));
         let (g, k) = (
             format!("https://gingerrush.com/download/package/{md5}"),
             format!("https://bms.alvorna.com/api/hash?md5={md5}"),
@@ -684,7 +696,7 @@ mod tests {
             format!("{api}/patterns/{md5}"),
             Ok(br#"{"file":{"name":"airAA.bme"}}"#.to_vec()),
         )]);
-        let m = ChartMirrors::new(&config);
+        let m = ChartMirrors::new(&config, Arc::default());
         let q = Query {
             md5: md5.into(),
             want: Want::default(),
@@ -712,7 +724,7 @@ mod tests {
         assert_eq!(by_artist("Air (by SHIKI).rar"), Some(("Air", "SHIKI")));
         assert_eq!(by_artist("A (b) (by C (D)).rar"), Some(("A (b)", "C (D)")));
         let config = Config::default();
-        let lib = BmsLibrary::new(&config);
+        let lib = BmsLibrary::new(&config, Arc::default());
         let entry = |href: &str, name: &str| {
             format!(
                 r#"<div class="flip-entry"><a href="{href}"><div class="flip-entry-title">{name}</div></a></div>"#
@@ -762,7 +774,9 @@ mod tests {
         assert!(titled("AltMirrorBell", "AltMirrorBell Another"));
         assert!(!titled("Air", "Airship"));
         assert!(titled("Re： Shinin' Queen", "Re: Shinin' Queen"));
-        // by the chart's MD5: BMS SEARCH's title of its song
+        // by the chart's MD5: BMS SEARCH's title of its song (another run:
+        // the letter's listing is another)
+        let lib = BmsLibrary::new(&config, Arc::default());
         let md5 = "0d1a3240230a854d05877f0d523a1409";
         let api = &config.bmssearch_api;
         let b = entry(
@@ -801,5 +815,53 @@ mod tests {
         assert!(!Sources::from_config(&config, vec![])
             .names()
             .contains(&"bmslibrary"));
+    }
+
+    /// A run's sources share their answers: BMS SEARCH is asked of a chart
+    /// once for the three that ask it, the archive's folders once a letter.
+    #[test]
+    fn asked_once() {
+        let config = Config {
+            sources: ["bmssearch", "mirrors", "bmslibrary"]
+                .map(String::from)
+                .to_vec(),
+            third_party: true,
+            ..Config::default()
+        };
+        let sources = Sources::from_config(&config, Vec::new());
+        let api = &config.bmssearch_api;
+        let (a, b) = ("a".repeat(32), "b".repeat(32));
+        let pattern = |md5: &str, title: &str| {
+            (
+                format!("{api}/patterns/{md5}"),
+                Ok(
+                    format!(r#"{{"bms":{{"title":"{title}"}},"file":{{"name":"{title}.bme"}}}}"#)
+                        .into_bytes(),
+                ),
+            )
+        };
+        let root =
+            "https://drive.google.com/embeddedfolderview?id=1mTcWY9jYMsnEzbVfvGkjfepBpN4Tj786";
+        let letter = "https://drive.google.com/embeddedfolderview?id=FA";
+        let folder = r#"<div class="flip-entry"><a href="https://drive.google.com/drive/folders/FA"><div class="flip-entry-title">A</div></a></div>"#;
+        let http = crate::net::Asked::new(Canned(vec![
+            pattern(&a, "Air"),
+            pattern(&b, "Aurora"),
+            (root.into(), Ok(folder.into())),
+            (letter.into(), Ok(Vec::new())),
+        ]));
+        for md5 in [&a, &b] {
+            for diff in [false, true] {
+                let q = Query {
+                    md5: md5.clone(),
+                    diff,
+                    ..Default::default()
+                };
+                run(&mut sources.find_all(&q), &http);
+            }
+        }
+        assert_eq!(http.times(&format!("{api}/patterns/{a}")), 1);
+        assert_eq!(http.times(&format!("{api}/patterns/{b}")), 1);
+        assert_eq!((http.times(root), http.times(letter)), (1, 1));
     }
 }

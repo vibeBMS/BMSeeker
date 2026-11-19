@@ -152,7 +152,7 @@ pub struct Hosts(Vec<Box<dyn Host>>);
 impl Default for Hosts {
     fn default() -> Hosts {
         Hosts(vec![
-            Box::new(drive::Drive),
+            Box::new(drive::Drive::default()),
             Box::new(dropbox::Dropbox),
             Box::new(venues::Manbow),
             Box::new(venues::BmsSearchVenue),
@@ -166,12 +166,16 @@ impl Default for Hosts {
 }
 
 impl Hosts {
-    /// The [`Hosts::default`] ones, with the settings' dead uploaders'
-    /// mirrors first (third parties': with [`Config::third_party`]).
+    /// The [`Hosts::default`] ones, with the settings' dead uploaders
+    /// first (their mirrors, third parties' copies, with
+    /// [`Config::third_party`]).
     pub(crate) fn from_config(config: &Config) -> Hosts {
         let mut hosts = Hosts::default();
-        if config.third_party && !config.uploaders.is_empty() {
-            hosts.first(Box::new(uploader::Uploaders(config.uploaders.clone())));
+        if !config.uploaders.is_empty() {
+            hosts.first(Box::new(uploader::Uploaders {
+                uploaders: config.uploaders.clone(),
+                mirrored: config.third_party,
+            }));
         }
         hosts
     }

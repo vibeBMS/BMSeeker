@@ -130,7 +130,8 @@ What a download holds is sorted before anything goes into the library:
   and 20 (a page, an API) or 30 (a download) to begin its answer; a download then 60 without data. Google
   Drive's "Quota exceeded" (a file downloaded too often lately) is reported as such: it passes within a day.
 
-Dead uploaders' links (with `--third-party`) are downloaded from copies by number (`uploaders`). By default: gnqg
+Dead uploaders' links (a table's too, tried after its other links) are downloaded, with `--third-party`, from copies
+by number (`uploaders`); without it they fail at once, nothing asked. By default: gnqg
 (`gnqg.rosx.net/upload/upload.cgi?get=03691`) → `gnqg-upload/03691.zip` on bms.hexlataia.xyz, then on darksabun.club,
 then the community archive's gnqg folder; absolute (`absolute.pv.land.to/uploader/src/up0650.zip`, its other boards
 too) → darksabun.club's `mirror/absolute/uploader/up0650.zip`. In a copy's address `{n}` is the number, `{h}` its
