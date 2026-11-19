@@ -4,8 +4,9 @@
 //! - [`table`]: difficulty tables (bmstable: 発狂BMS, Satellite, Stella, ...);
 //! - [`hosts`]: from the link an author or a table gives to the archive
 //!   (Google Drive, Dropbox, MediaFire, MEGA, event venues, ...);
-//! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar, .lzh) into the library
-//!   (a [`fs::Store`]), with their files' times;
+//! - [`unpack`] / [`import`]: archives (.zip, .7z, .rar, .lzh, .tar,
+//!   .tar.gz) into the library (a [`fs::Store`]), with their files' times;
+//!   an import also places the separate charts that waited for it;
 //! - [`placement`]: which song's folder a chart of its own (差分) belongs in
 //!   (its title and artist compared, NFKC and alike in part);
 //! - [`library`]: the library's songs' folders, their files and the charts'
