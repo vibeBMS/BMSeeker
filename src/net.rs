@@ -16,8 +16,8 @@ pub enum Request {
 }
 
 impl Request {
-    #[cfg(test)]
-    pub(crate) fn url(&self) -> &str {
+    /// Where it goes.
+    pub fn url(&self) -> &str {
         match self {
             Request::Get(u) | Request::Post { url: u, .. } => u,
         }
@@ -39,15 +39,19 @@ pub enum NetError {
     Cancelled,
     /// A host says the file is no more (MEGA's -9 / -2): its words.
     Gone(String),
+    /// The service refused BMSeeker (a status of
+    /// [`refusing`](crate::refusal::refusing), a browser check) now or
+    /// earlier in the run: it is not asked again ([`crate::refusal`]).
+    Refused(crate::refusal::Refusal),
     /// Anything else (the connection, a host's own message), as said.
     Other(String),
 }
 
 impl NetError {
-    /// The server busy (429, 503) or its gateway failing (502, 504): it
-    /// may pass.
+    /// The server busy (503) or its gateway failing (502, 504): it may
+    /// pass. (A 429 is a refusal: [`NetError::Refused`].)
     pub(crate) fn passing(&self) -> bool {
-        matches!(self, NetError::Status(429 | 502 | 503 | 504))
+        matches!(self, NetError::Status(502..=504))
     }
 
     /// The file is no more: 404 / 410, or a host's word for it.
@@ -56,10 +60,11 @@ impl NetError {
     }
 
     /// What it is, for a program to read (its text is a person's):
-    /// `status`, `stalled`, `cancelled`, `gone`, `other`.
+    /// `status`, `stalled`, `cancelled`, `gone`, `refused`, `other`.
     pub fn code(&self) -> &'static str {
         match self {
             NetError::Status(_) => "status",
+            NetError::Refused(_) => "refused",
             NetError::Stalled(_) => "stalled",
             NetError::Cancelled => "cancelled",
             NetError::Gone(_) => "gone",
@@ -74,6 +79,7 @@ impl std::fmt::Display for NetError {
             NetError::Status(n) => write!(f, "HTTP {n}"),
             NetError::Stalled(s) => write!(f, "no data for {s} s"),
             NetError::Cancelled => f.write_str(crate::progress::CANCELLED),
+            NetError::Refused(r) => r.fmt(f),
             NetError::Gone(e) | NetError::Other(e) => f.write_str(e),
         }
     }
@@ -339,6 +345,8 @@ mod tests {
         assert_eq!(NetError::Cancelled.to_string(), "cancelled");
         assert_eq!(NetError::Stalled(60).to_string(), "no data for 60 s");
         assert!(NetError::Status(503).passing() && !NetError::Status(500).passing());
+        // a refusal is not tried again
+        assert!(!NetError::Status(429).passing());
         assert!(!NetError::Other("HTTP 503".into()).passing());
         assert!(NetError::Status(410).gone() && NetError::Gone("x".into()).gone());
         assert!(!NetError::Status(403).gone());

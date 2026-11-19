@@ -2,6 +2,13 @@
 //! browser's own (synchronous `XMLHttpRequest`, which a worker may make),
 //! through the vibeBMS CORS proxy but to hosts that send CORS headers
 //! themselves, as vibeBMS's web build does.
+//!
+//! A page cannot set a request's `User-Agent` (browsers forbid it), and
+//! this does not try: a host that sends CORS headers gets the browser's
+//! own, one through the proxy the proxy's. A host's refusal (its status, a
+//! browser check) is kept by the commands' run (`bmseeker::refusal`); the
+//! proxy's own refusals (this page's origin not allowed: no
+//! `X-Final-Url`) are no host's.
 
 /// The proxy the web builds reach download hosts and difficulty tables
 /// through (vibeBMS/proxy `worker.js`): it serves the vibebms.github.io
@@ -33,11 +40,12 @@ pub use xhr::Xhr;
 
 #[cfg(target_arch = "wasm32")]
 mod xhr {
-    use super::proxied;
+    use super::{proxied, sends_cors};
     use bmseeker::hosts::MegaCipher;
     use bmseeker::install::job::{Driver, Effect, Fed, Served, Unserved};
     use bmseeker::net::disposition_name;
     use bmseeker::net::{NetError, Request};
+    use bmseeker::refusal::{Refusal, Why};
     use web_sys::{XmlHttpRequest, XmlHttpRequestResponseType};
 
     /// The job's effects done in a worker, one at a time, blocking it:
@@ -97,19 +105,42 @@ mod xhr {
         Ok(Got { status, body, xhr })
     }
 
+    /// The error of an answer to `url` with no success.
+    fn failed(url: &str, proxied: bool, g: &Got) -> NetError {
+        let from_host = !proxied
+            || g.xhr
+                .get_response_header("X-Final-Url")
+                .ok()
+                .flatten()
+                .is_some();
+        if !from_host {
+            return NetError::Other(format!(
+                "the CORS proxy refused (HTTP {}): {}",
+                g.status,
+                String::from_utf8_lossy(&g.body[..g.body.len().min(200)])
+            ));
+        }
+        if bmseeker::refusal::challenge(None, &g.body) {
+            return NetError::Refused(Refusal::of(url, Why::Challenge));
+        }
+        NetError::Status(g.status)
+    }
+
     impl Driver for Xhr {
         fn perform(&self, effect: Effect) -> Fed {
             match effect {
                 Effect::Http(r) => {
+                    let url = r.url();
                     let got = match &r {
                         Request::Get(u) => send("GET", &proxied(&self.proxy, u), None, 60_000),
                         Request::Post { url, body } => {
                             send("POST", &proxied(&self.proxy, url), Some(body), 60_000)
                         }
                     };
+                    let through = !sends_cors(url);
                     Fed::Http(got.and_then(|g| match g.status {
                         200..=299 => Ok(g.body),
-                        n => Err(NetError::Status(n)),
+                        _ => Err(failed(url, through, &g)),
                     }))
                 }
                 Effect::Download { target, .. } => {
@@ -131,8 +162,13 @@ mod xhr {
                                 }
                                 Ok(Served::bytes(b, name, at))
                             } else {
+                                let through = !sends_cors(&target.url);
                                 Err(Unserved {
-                                    error: NetError::Status(g.status),
+                                    error: failed(
+                                        at.as_deref().unwrap_or(&target.url),
+                                        through,
+                                        &g,
+                                    ),
                                     at,
                                 })
                             }

@@ -207,8 +207,11 @@ pub struct Context {
     pub hosts: Arc<Hosts>,
     pub progress: Option<Arc<Progress>>,
     /// A download that fails is a page (a web page's proxy passes archives
-    /// only, refusing anything else).
+    /// only, refusing anything else). Not one a service refused.
     pub failures_are_pages: bool,
+    /// The services that refused BMSeeker in this run: not asked again
+    /// ([`crate::refusal`]). Shared by the context's clones.
+    pub refused: Arc<crate::refusal::Refusals>,
 }
 
 impl Context {
@@ -218,6 +221,7 @@ impl Context {
             config: Arc::new(config),
             progress: None,
             failures_are_pages: false,
+            refused: Arc::default(),
         }
     }
 
@@ -364,7 +368,13 @@ impl Resolver {
                 self.open()
             }
             Next::Done(Resolved::Follow(_) | Resolved::Page) => self.or_next(Fetch::Page),
-            Next::Done(Resolved::Failed(e)) => self.or_next(Fetch::Failed(e)),
+            Next::Done(Resolved::Failed(e)) => {
+                // (a refusal an API said in its answer: MEGA's)
+                if let NetError::Refused(r) = &e {
+                    self.cx.refused.keep(r.clone());
+                }
+                self.or_next(Fetch::Failed(e))
+            }
         }
     }
 }

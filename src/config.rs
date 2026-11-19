@@ -316,7 +316,10 @@ mod tests {
         );
         // no browser's name in it
         assert!(!own.contains("Mozilla") && !own.contains("Chrome"));
-        assert_eq!(user_agent_of("vibeBMS/0.1.0"), format!("vibeBMS/0.1.0 {own}"));
+        assert_eq!(
+            user_agent_of("vibeBMS/0.1.0"),
+            format!("vibeBMS/0.1.0 {own}")
+        );
         assert_eq!(user_agent_of(" "), own);
     }
 

@@ -341,7 +341,8 @@ impl Acquire {
         if u.error == NetError::Cancelled {
             return self.failed(Fetch::Failed(u.error), None);
         }
-        if self.cx.failures_are_pages {
+        // (a refusal is no page: the service is skipped)
+        if self.cx.failures_are_pages && !matches!(u.error, NetError::Refused(_)) {
             let moved = u.at.filter(|a| *a != t.url);
             return self.failed(Fetch::Page, moved);
         }

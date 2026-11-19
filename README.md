@@ -12,7 +12,7 @@ As a library: `bmseeker = { git = "https://github.com/vibeBMS/BMSeeker" }` (the 
 `clap`, comes in only with the `cli` feature).
 
 ```text
-bmseeker [--json] [--config FILE] [--third-party] [--name-folders] <noun> <verb> ...
+bmseeker [--json] [--config FILE] [--third-party] [--name-folders] [--skip-host HOST]... <noun> <verb> ...
 
 link resolve <link>... [-t title -a artist]          what a link leads to (a file's URL and name / a page that
                                                      needs a browser / an error), without downloading
@@ -45,8 +45,19 @@ event check [works FILE|-] [--known FILE] [--days N] [--minutes M] [--search]
 With `--json`, every command writes JSON Lines (one record a line, as it goes). The `event` commands always do, and
 read records from a file or `-` (stdin): JSON Lines, a JSON array, or an object by key. Notes for people go to
 stderr only. A record of a failure has its `"error"` for a person and a `"code"` for a program: `status`, `stalled`,
-`cancelled`, `gone`, `other` (the download), `not_the_chart`, `no_chart_link`, `no_link`, `downloaded` (the install),
-`unpack`.
+`cancelled`, `gone`, `refused`, `other` (the download), `not_the_chart`, `no_chart_link`, `no_link`, `downloaded` (the
+install), `unpack`.
+
+**Refusals.** A service that answers HTTP 401, 403, 429 or 451, or with a browser check (a Cloudflare challenge page,
+a Turnstile widget: `cf-mitigated: challenge`, "Just a moment...", `challenges.cloudflare.com`), or whose API says it
+limits requests (MEGA's `-4`), is not asked again for the rest of the run: no other query, no other URL on that host,
+no other headers, no waiting and trying again (a `Retry-After` is kept to by not coming back in this run). The run goes
+on with the other sources and hosts. A host counts without `www.`; Google Drive's, MEGA's, Dropbox's, MediaFire's,
+pixeldrain's and BMS SEARCH's hosts count as one each. Each refusal is written once, when it comes, as a record
+`{"refused": host, "code": "status|challenge|rate_limited|earlier", "status"?, "error"}` (in text: `refused: ...`); a
+download that its host refused fails with the code `refused`. `--skip-host HOST` (more than once for more) skips a
+host that refused in an earlier run (the window passes those of its session). The `event` commands leave `refused`
+records out of the records they read.
 
 ```text
 work   {"num","title","artist","team","kind","size_kb","page","links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
@@ -111,8 +122,8 @@ What a download holds is sorted before anything goes into the library:
   the URL without its scheme and `#` part; a folder's link with the song looked for in it). A file whose download
   failed is not tried again that run, whatever link leads to it.
 - **Links on the way.** A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker knows (Dropbox, Google
-  Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) on a download or a request
-  (a page, an API) is tried again twice, after 3 and 10 seconds. A server has 15 seconds to take the connection
+  Drive...) is opened from there. A server's passing failure (HTTP 502, 503, 504) on a download or a request
+  (a page, an API) is tried again twice, after 3 and 10 seconds (a refusal never is: above). A server has 15 seconds to take the connection
   and 20 (a page, an API) or 30 (a download) to begin its answer; a download then 60 without data. Google
   Drive's "Quota exceeded" (a file downloaded too often lately) is reported as such: it passes within a day.
 

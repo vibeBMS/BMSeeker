@@ -9,6 +9,7 @@ use crate::install::job::{run_job, Acquire, Driver, Effect, Fed, FileLink, Files
 use crate::install::job::{Served, TaskJob};
 use crate::net::{NetError, Task};
 use crate::progress::Progress;
+use crate::refusal::Refusals;
 use crate::unpack::Blob;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,10 +20,12 @@ use std::time::Duration;
 /// the progress' cancel or [`STALL_MS`](crate::hosts::STALL_MS) of
 /// silence; a MEGA file decrypted as it comes), waits slept (ended by the
 /// cancel). Once the progress is cancelled, requests are answered
-/// [`NetError::Cancelled`].
+/// [`NetError::Cancelled`]. It keeps to the run's refusals
+/// ([`Refusals::guard`]): a service that refused is not asked again.
 pub struct Native {
     user_agent: String,
     progress: Option<Arc<Progress>>,
+    refused: Arc<Refusals>,
 }
 
 impl Native {
@@ -31,6 +34,7 @@ impl Native {
         Native {
             user_agent: cx.config.user_agent.clone(),
             progress: cx.progress(),
+            refused: cx.refused.clone(),
         }
     }
 
@@ -52,6 +56,14 @@ impl Native {
 
 impl Driver for Native {
     fn perform(&self, effect: Effect) -> Fed {
+        let progress = self.progress.as_deref();
+        self.refused.guard(effect, progress, |e| self.raw(e))
+    }
+}
+
+impl Native {
+    /// `effect` done, refusals aside.
+    fn raw(&self, effect: Effect) -> Fed {
         match effect {
             Effect::Http(_) if self.cancelled() => Fed::Http(Err(NetError::Cancelled)),
             Effect::Http(r) => Fed::Http(http::send(&r, &self.user_agent)),
