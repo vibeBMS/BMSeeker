@@ -1,6 +1,6 @@
 name: Build
 
-# The files a release has, for the nightly (nightly.yml) and the releases
+# The files a release has, for the nightly (ci.yml) and the releases
 # (release.yml), each as an artifact named bmseeker-<what> holding the files
 # by their names in the release: the CLI and the window (with the CLI inside
 # it) per system, and the web site as a zip. Versions are tools/ci_version.sh's
@@ -118,6 +118,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          # (CI's own web job is also "web": its cache is another one)
+          key: release
           # only the default branch writes the cache (other branches and pull
           # requests read it), so their entries do not evict it
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
