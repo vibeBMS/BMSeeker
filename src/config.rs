@@ -69,7 +69,7 @@ pub struct Config {
     /// Whether a song new to the library names its folder after its charts
     /// (as the BeMusicSeeker fork does: [`Config::folder_name_format`]; a
     /// folder the archive wraps everything in left out). Else after the
-    /// song's title or the archive, as it has been.
+    /// song's title or the archive.
     pub folder_naming: bool,
     /// How such a folder is named: `%ARTIST%` and `%TITLE%`, what the
     /// charts' artists and titles share.

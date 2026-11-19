@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn errors() {
-        // the text a person reads stays what it was
+        // the text a person reads
         assert_eq!(NetError::Status(404).to_string(), "HTTP 404");
         assert_eq!(NetError::Cancelled.to_string(), "cancelled");
         assert_eq!(NetError::Stalled(60).to_string(), "no data for 60 s");

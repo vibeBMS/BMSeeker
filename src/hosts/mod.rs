@@ -12,7 +12,9 @@
 //! [`Resolver`] walks a link through the hosts as a [`Task`]: it asks for
 //! requests and is fed the answers ([`crate::net`]), so it runs natively,
 //! in a web page and in tests alike. Downloading the file itself is the
-//! driver's (`native::Native` natively).
+//! driver's (`native::Native` natively). The services BMSeeker knows by
+//! several host names (Drive's, MEGA's...) are one table
+//! (`service_of`), for refusals and download keys.
 
 mod browser;
 pub(crate) mod drive;
