@@ -50,10 +50,15 @@ driver retries alike and none needs to.
 
 ### Refusals
 
-A service that answers 401, 403, 429 or 451, or with a browser check
-(`cf-mitigated: challenge`; a page with "Just a moment...", `_cf_chl_opt`
-or `challenges.cloudflare.com`), or whose API says it limits us (MEGA's
--4), has refused BMSeeker. `refusal::Refusals` keeps it for the run, by
+A service that answers 429, 401, 403 or 451, or with a browser check
+whatever the status (`cf-mitigated: challenge`; a page with "Just a
+moment...", `_cf_chl_opt` or `challenges.cloudflare.com`; Google's
+"unusual traffic" CAPTCHA), or whose API says it limits us (MEGA's -4),
+has refused BMSeeker. A file host's (Google Drive's, MEGA's, Dropbox's,
+MediaFire's, pixeldrain's) 401, 403 or 451 is one file's or link's
+failure (`refusal::refuses`): Drive answers 403 for a file's quota or
+sharing. The drivers read a failed answer's start to tell
+(`native::http::answer_error`; Drive's quota said as such). `refusal::Refusals` keeps it for the run, by
 its host (`refusal::service`: `www.` and the port left out; the hosts of
 Google Drive, MEGA, Dropbox, MediaFire, pixeldrain and BMS SEARCH as one
 each). It lives in the run's `Context` (`refused`, shared by its clones),

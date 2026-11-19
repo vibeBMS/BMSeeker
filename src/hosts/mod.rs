@@ -444,10 +444,14 @@ pub const PRESS_DOWNLOAD_JS: &str = r#"(function () {
 pub(crate) const DRIVE_QUOTA: &str =
     "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
 
-/// Whether a page's first bytes are Google Drive's "Quota exceeded".
+/// Whether a page's first bytes are Google Drive's "Quota exceeded" (also
+/// answered 403: "Too many users have viewed or downloaded this file
+/// recently").
 pub(crate) fn drive_quota(head: &[u8]) -> bool {
     let head = String::from_utf8_lossy(&head[..head.len().min(4096)]);
-    head.contains("<title>Google Drive") && head.contains("Quota exceeded")
+    head.contains("<title>Google Drive")
+        && (head.contains("Quota exceeded")
+            || head.contains("Too many users have viewed or downloaded this file recently"))
 }
 
 /// The last part of a URL's path, decoded (a file's name).

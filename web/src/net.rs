@@ -120,7 +120,7 @@ mod xhr {
                 String::from_utf8_lossy(&g.body[..g.body.len().min(200)])
             ));
         }
-        if bmseeker::refusal::challenge(None, &g.body) {
+        if bmseeker::refusal::blocked(None, &g.body) {
             return NetError::Refused(Refusal::of(url, Why::Challenge));
         }
         NetError::Status(g.status)
@@ -164,8 +164,11 @@ mod xhr {
                             } else {
                                 let through = !sends_cors(&target.url);
                                 Err(Unserved {
+                                    // (Google's CAPTCHA is the service's asked)
                                     error: failed(
-                                        at.as_deref().unwrap_or(&target.url),
+                                        at.as_deref()
+                                            .filter(|a| !a.contains("google.com/sorry"))
+                                            .unwrap_or(&target.url),
                                         through,
                                         &g,
                                     ),

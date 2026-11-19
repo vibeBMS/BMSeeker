@@ -2,7 +2,7 @@
 //! requests through one HTTP agent, a link's file streamed to disk on the
 //! calling thread, waits slept), and the blocking calls built on it.
 
-mod http;
+pub(crate) mod http;
 
 use crate::hosts::{Context, Fetch, Want};
 use crate::install::job::{run_job, Acquire, Driver, Effect, Fed, FileLink, Files, Got, Missed};

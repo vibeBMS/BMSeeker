@@ -862,3 +862,85 @@ fn a_challenge_page_is_a_refusal() {
         "{got:?}"
     );
 }
+
+const DRIVE_QUOTA_PAGE: &[u8] = b"<!DOCTYPE html><html><head><title>Google Drive - Quota exceeded</title></head>\
+<body><p>Too many users have viewed or downloaded this file recently. Please try accessing the file again later.</p></body></html>";
+
+const GOOGLE_SORRY_PAGE: &[u8] =
+    b"<html><head><title>https://drive.usercontent.google.com/</title></head><body>\
+<div>Our systems have detected unusual traffic from your computer network.</div>\
+<form id=\"captcha-form\" action=\"index\" method=\"post\"></form></body></html>";
+
+/// Google Drive's file at `id` (where its link leads).
+fn drive_file(id: &str) -> String {
+    format!("https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t")
+}
+
+/// A Google Drive file's 403 (its quota, its sharing) is that file's: the
+/// next Drive file is still tried.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_drive_files_403_is_its_own() {
+    use crate::native::http::answer_error;
+    let d = Canned::default();
+    let quota = drive_file("Q1");
+    let error = answer_error(&quota, &quota, 403, None, DRIVE_QUOTA_PAGE);
+    assert_eq!(error, NetError::Other(crate::hosts::DRIVE_QUOTA.into()));
+    d.file(&quota, Err(error.into()));
+    // shared privately ("You need access")
+    d.file(&drive_file("P2"), status(403));
+    d.file(&drive_file("F3"), zip_served());
+    let cx = Context::default();
+    let net = guarded(&d, &cx);
+    let link = |id: &str| format!("https://drive.google.com/file/d/{id}/view");
+    let got = acquire(&link("Q1"), &cx, &net);
+    assert!(
+        matches!(&got, Err(Fetch::Failed(NetError::Other(e))) if e == crate::hosts::DRIVE_QUOTA),
+        "{got:?}"
+    );
+    assert!(matches!(
+        acquire(&link("P2"), &cx, &net),
+        Err(Fetch::Failed(NetError::Status(403)))
+    ));
+    assert!(acquire(&link("F3"), &cx, &net).is_ok());
+    assert_eq!(steps(&d).len(), 3, "{:?}", steps(&d));
+    assert!(cx.refused.all().is_empty());
+}
+
+/// Google's "unusual traffic" CAPTCHA (`/sorry/`) refuses all of Drive.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn googles_sorry_page_refuses_drive() {
+    use crate::native::http::answer_error;
+    let d = Canned::default();
+    let first = drive_file("A1");
+    let sorry = "https://www.google.com/sorry/index?continue=https://drive.usercontent.google.com/";
+    let error = answer_error(&first, sorry, 429, None, GOOGLE_SORRY_PAGE);
+    d.file(
+        &first,
+        Err(Unserved {
+            error,
+            at: Some(sorry.into()),
+        }),
+    );
+    d.file(&drive_file("B2"), zip_served());
+    let cx = Context::default();
+    let net = guarded(&d, &cx);
+    let link = |id: &str| format!("https://drive.google.com/file/d/{id}/view");
+    let got = acquire(&link("A1"), &cx, &net);
+    assert!(
+        matches!(&got, Err(Fetch::Failed(NetError::Refused(r)))
+            if r.host == "drive.google.com" && r.why == crate::refusal::Why::Challenge),
+        "{got:?}"
+    );
+    // a 403 with it too
+    let page = answer_error(&first, &first, 403, None, GOOGLE_SORRY_PAGE);
+    assert!(matches!(page, NetError::Refused(r) if r.host == "drive.google.com"));
+    // the next Drive file is not asked, nor a folder's listing
+    assert!(matches!(
+        acquire(&link("B2"), &cx, &net),
+        Err(Fetch::Failed(NetError::Refused(_)))
+    ));
+    assert!(acquire("https://drive.google.com/drive/folders/F", &cx, &net).is_err());
+    assert_eq!(steps(&d), [format!("download {first}")]);
+}

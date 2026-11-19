@@ -72,7 +72,10 @@ impl std::fmt::Display for Refusal {
         let h = &self.host;
         match self.why {
             Why::Status(n) => write!(f, "{h} refused BMSeeker (HTTP {n})"),
-            Why::Challenge => write!(f, "{h} answered with a browser check (Cloudflare)"),
+            Why::Challenge => write!(
+                f,
+                "{h} answered with a browser check (a challenge or CAPTCHA page)"
+            ),
             Why::RateLimited => write!(f, "{h} limits BMSeeker's requests"),
             Why::Earlier => write!(f, "{h} refused BMSeeker earlier"),
         }?;
@@ -83,6 +86,43 @@ impl std::fmt::Display for Refusal {
 /// Whether an HTTP status refuses (401, 403, 429, 451).
 pub fn refusing(status: u16) -> bool {
     matches!(status, 401 | 403 | 429 | 451)
+}
+
+/// The file hosts: their 401, 403 and 451 are a file's (Google Drive's
+/// quota, a file shared privately), not a refusal of BMSeeker, unless the
+/// answer says so ([`blocked`]); their 429 is one.
+const FILE_HOSTS: &[&str] = &[
+    "drive.google.com",
+    "mega.nz",
+    "dropbox.com",
+    "mediafire.com",
+    "pixeldrain.com",
+];
+
+/// Whether `status` from `url` refuses BMSeeker itself: 429 anywhere; 401,
+/// 403 and 451 but from a file host (there, one file's or link's
+/// failure).
+pub fn refuses(url: &str, status: u16) -> bool {
+    status == 429 || refusing(status) && !FILE_HOSTS.contains(&service(url).as_str())
+}
+
+/// Whether a page is Google's "unusual traffic" CAPTCHA (`/sorry/`):
+/// Google refusing automated requests.
+pub fn google_sorry(body: &[u8]) -> bool {
+    html_has(
+        body,
+        &[
+            b"our systems have detected unusual traffic",
+            b"sending automated queries",
+            b"/sorry/index",
+        ],
+    )
+}
+
+/// Whether an answer refuses the client whatever its status: a browser
+/// check ([`challenge`]) or Google's CAPTCHA page ([`google_sorry`]).
+pub fn blocked(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
+    challenge(cf_mitigated, body) || google_sorry(body)
 }
 
 /// The hosts of one service: a refusal by one is the others' too.
@@ -131,6 +171,19 @@ pub fn challenge(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
     if cf_mitigated.is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge")) {
         return true;
     }
+    html_has(
+        body,
+        &[
+            b"challenges.cloudflare.com",
+            b"<title>just a moment...</title>",
+            b"_cf_chl_opt",
+        ],
+    )
+}
+
+/// Whether `body` is a page (HTML) with one of `marks` (lower case) in its
+/// first 256 KiB, in any case.
+fn html_has(body: &[u8], marks: &[&[u8]]) -> bool {
     let page = body
         .strip_prefix(b"\xEF\xBB\xBF")
         .unwrap_or(body)
@@ -139,13 +192,9 @@ pub fn challenge(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
         return false;
     }
     let page = &page[..page.len().min(256 * 1024)];
-    [
-        &b"challenges.cloudflare.com"[..],
-        b"<title>just a moment...</title>",
-        b"_cf_chl_opt",
-    ]
-    .iter()
-    .any(|m| page.windows(m.len()).any(|w| w.eq_ignore_ascii_case(m)))
+    marks
+        .iter()
+        .any(|m| page.windows(m.len()).any(|w| w.eq_ignore_ascii_case(m)))
 }
 
 /// A run's (or a session's) services that refused. Shared through the
@@ -236,21 +285,26 @@ impl Refusals {
             return failed(r);
         }
         let fed = raw(effect);
-        let of_error = |e: &NetError| match e {
-            NetError::Status(n) if refusing(*n) => Some(Refusal::of(&url, Why::Status(*n))),
+        // what refused: where the redirects ended (a short link's host did
+        // not), but Google's CAPTCHA, which is the service's asked
+        let at = |a: &Option<String>| -> String {
+            match a {
+                Some(a) if !a.contains("google.com/sorry") => a.clone(),
+                _ => url.clone(),
+            }
+        };
+        let of_error = |e: &NetError, from: &str| match e {
+            NetError::Status(n) if refuses(from, *n) => Some(Refusal::of(from, Why::Status(*n))),
             NetError::Refused(r) => Some(r.clone()),
             _ => None,
         };
         let refusal = match &fed {
-            Fed::Http(Err(e)) => of_error(e),
-            Fed::Http(Ok(body)) => challenge(None, body).then(|| Refusal::of(&url, Why::Challenge)),
-            // (where the download's redirects ended refused)
-            Fed::Downloaded(Err(u)) => of_error(&u.error).map(|r| match (&u.error, &u.at) {
-                (NetError::Status(_), Some(at)) => Refusal::of(at, r.why),
-                _ => r,
-            }),
-            Fed::Downloaded(Ok(s)) => challenge(None, &s.head)
-                .then(|| Refusal::of(s.at.as_deref().unwrap_or(&url), Why::Challenge)),
+            Fed::Http(Err(e)) => of_error(e, &url),
+            Fed::Http(Ok(body)) => blocked(None, body).then(|| Refusal::of(&url, Why::Challenge)),
+            Fed::Downloaded(Err(u)) => of_error(&u.error, &at(&u.at)),
+            Fed::Downloaded(Ok(s)) => {
+                blocked(None, &s.head).then(|| Refusal::of(&at(&s.at), Why::Challenge))
+            }
             Fed::Woke => None,
         };
         match refusal {
@@ -334,6 +388,38 @@ mod tests {
         // an archive or JSON that names it is no page
         assert!(!challenge(None, b"PK\x03\x04 challenges.cloudflare.com"));
         assert!(!challenge(None, br#"{"t":"Just a moment..."}"#));
+        // Google's CAPTCHA
+        let sorry = br#"<html><head><title>https://drive.usercontent.google.com/download</title></head><body>
+            <div>Our systems have detected unusual traffic from your computer network.</div>
+            <form id="captcha-form" action="index" method="post"></form></body></html>"#;
+        assert!(google_sorry(sorry) && blocked(None, sorry) && !challenge(None, sorry));
+        assert!(!google_sorry(ordinary));
+    }
+
+    #[test]
+    fn file_hosts_403_is_a_files() {
+        let drive = "https://drive.usercontent.google.com/download?id=1";
+        assert!(!refuses(drive, 403) && !refuses(drive, 401) && !refuses(drive, 451));
+        assert!(refuses(drive, 429));
+        for u in [
+            "https://g.api.mega.co.nz/cs?id=0",
+            "https://dl.dropboxusercontent.com/s/a",
+            "https://download1.mediafire.com/x/a.rar",
+            "https://pixeldrain.net/api/filesystem/x",
+        ] {
+            assert!(!refuses(u, 403) && refuses(u, 429), "{u}");
+        }
+        for u in [
+            "https://api.bmssearch.net/v1/x",
+            "https://stellabms.xyz/score_upload_full.json",
+            "https://manbow.nothing.sh/event/event.cgi",
+            "https://gingerrush.com/download/package/x",
+            "https://bms.alvorna.com/api/hash?md5=x",
+            "https://darksabun.club/table/archive/insane1/",
+        ] {
+            assert!(refuses(u, 403) && refuses(u, 401) && refuses(u, 451), "{u}");
+        }
+        assert!(!refuses("https://api.bmssearch.net/v1/x", 404));
     }
 
     /// Answers each request with `answer`, noting the URLs asked.
