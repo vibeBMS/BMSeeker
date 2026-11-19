@@ -60,7 +60,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mirror::{Change, Mirror, Source};
+    use crate::mirror::{Change, Kept, Mirror, Source};
     use bmseeker::fs::Fs;
     use bmseeker::install::job::{Effect, Fed, Served};
     use bmseeker::net::{NetError, Request};
@@ -96,7 +96,8 @@ mod tests {
             Some("/bms/Old/o.bms") => Ok(b"#TITLE Old\n#ARTIST y\n".to_vec()),
             _ => Err(std::io::ErrorKind::NotFound.into()),
         });
-        let m = Mirror::new(source, vec!["/bms".into(), "/bmseeker".into()], false, || 9);
+        let writable = vec!["/bms".into(), "/bmseeker".into()];
+        let m = Mirror::new(source, Box::new(Kept::default()), writable, false, || 9);
         m.mount("/bms/Old/o.bms".into(), 20, 1);
         m.mount("/store/scores.json".into(), 2, 1);
         Arc::new(m)

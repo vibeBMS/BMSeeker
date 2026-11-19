@@ -18,7 +18,7 @@ mod net;
 pub mod zip;
 
 pub use bridge::run;
-pub use mirror::{Change, Mirror};
+pub use mirror::{Change, Held, Mirror};
 pub use net::{proxied, sends_cors, PROXY};
 
 use bmseeker::config::Config;
@@ -81,6 +81,30 @@ mod page {
         /// The target's file at `path`, read synchronously (worker.js).
         #[wasm_bindgen(catch, js_name = bmseekerRead)]
         fn read_target(path: &str) -> Result<js_sys::Uint8Array, JsValue>;
+        /// A copy of `bytes` kept by the worker: its key.
+        #[wasm_bindgen(js_name = bmseekerHold)]
+        fn hold(bytes: &[u8]) -> u32;
+        #[wasm_bindgen(catch, js_name = bmseekerHeld)]
+        fn held(key: u32) -> Result<js_sys::Uint8Array, JsValue>;
+        #[wasm_bindgen(js_name = bmseekerForget)]
+        fn forget(key: u32);
+    }
+
+    /// What commands write, held by the worker until it is written.
+    struct Worker;
+
+    impl mirror::Held for Worker {
+        fn keep(&self, bytes: &[u8]) -> u32 {
+            hold(bytes)
+        }
+        fn read(&self, key: u32) -> std::io::Result<Vec<u8>> {
+            held(key)
+                .map(|a| a.to_vec())
+                .map_err(|_| std::io::ErrorKind::NotFound.into())
+        }
+        fn forget(&self, key: u32) {
+            forget(key)
+        }
     }
 
     fn now() -> i64 {
@@ -115,7 +139,13 @@ mod page {
                     })
             });
             Ok(Session {
-                mirror: Arc::new(Mirror::new(source, t.writable.clone(), t.keeps_times, now)),
+                mirror: Arc::new(Mirror::new(
+                    source,
+                    Box::new(Worker),
+                    t.writable.clone(),
+                    t.keeps_times,
+                    now,
+                )),
                 config: t.config(),
                 library: t.library,
                 net: net::Xhr {
@@ -161,7 +191,8 @@ mod page {
         }
 
         /// What to do to the target, in order: `["remove", path, dir]`,
-        /// `["move", from, to]`, `["write", path, bytes, mtime]`.
+        /// `["move", from, to]`, `["write", path, key, mtime]` (the bytes
+        /// held under `key`).
         pub fn changes(&self) -> js_sys::Array {
             let s = |p: &Path| JsValue::from_str(&p.to_string_lossy());
             self.mirror
@@ -175,10 +206,10 @@ mod page {
                         Change::Move { from, to } => {
                             js_sys::Array::of3(&"move".into(), &s(&from), &s(&to)).into()
                         }
-                        Change::Write { path, bytes, mtime } => js_sys::Array::of4(
+                        Change::Write { path, key, mtime } => js_sys::Array::of4(
                             &"write".into(),
                             &s(&path),
-                            &js_sys::Uint8Array::from(&bytes[..]),
+                            &key.into(),
                             &(mtime as f64).into(),
                         )
                         .into(),

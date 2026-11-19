@@ -2,6 +2,7 @@
 //! times.
 
 use crate::mirror::Mirror;
+use bmseeker::fs::Fs;
 use std::io::{Cursor, Write};
 use std::path::Path;
 use zip::write::SimpleFileOptions;
@@ -46,13 +47,13 @@ fn date(t: i64) -> DateTime {
 }
 
 /// The mirror's files but those below `skip` (BMSeeker's own folder), as a
-/// zip; and the files that could not be read.
+/// zip (each read as it goes in); and the files that could not be read.
 pub fn zip(m: &Mirror, skip: &Path) -> std::io::Result<(Vec<u8>, Vec<String>)> {
     let mut z = ZipWriter::new(Cursor::new(Vec::new()));
     let mut unread = Vec::new();
-    for (p, bytes, mtime) in m.contents(skip) {
+    for (p, mtime) in m.dated(skip) {
         let name = p.to_string_lossy().trim_start_matches('/').to_string();
-        let Ok(bytes) = bytes else {
+        let Ok(bytes) = m.read(&p) else {
             unread.push(name);
             continue;
         };
@@ -80,7 +81,8 @@ mod tests {
     #[test]
     fn zips_the_files_with_their_times() {
         let source: crate::mirror::Source = Box::new(|_| Err(std::io::ErrorKind::NotFound.into()));
-        let m = Mirror::new(source, vec!["/".into()], true, || 0);
+        let held = Box::new(crate::mirror::Kept::default());
+        let m = Mirror::new(source, held, vec!["/".into()], true, || 0);
         // 2020-01-02 03:04:04 UTC (a zip keeps even seconds)
         for (p, body) in [("/曲/a.bms", "#TITLE a"), ("/.bmseeker/scan.json", "[]")] {
             let mut w = m.create(Path::new(p), Some(1_577_934_244)).unwrap();
