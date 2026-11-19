@@ -73,6 +73,23 @@ pub trait Store: Fs + AsFs {
     }
 }
 
+/// Move the file `from` to `to` (none there; its folder made): renamed,
+/// else copied with its time.
+pub(crate) fn move_file(store: &dyn Store, from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(d) = to.parent() {
+        store.create_dir_all(d);
+    }
+    match store.rename(from, to) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+            store.copy(from, to)?;
+            // (what cannot be removed stays where it was)
+            let _ = store.remove(from);
+            Ok(())
+        }
+        r => r,
+    }
+}
+
 /// `mtime` (seconds since 1970) as a time (None: before it).
 pub(crate) fn system_time(mtime: i64) -> Option<std::time::SystemTime> {
     let secs = u64::try_from(mtime).ok()?;
