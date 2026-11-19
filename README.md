@@ -177,10 +177,13 @@ bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, 
 - **Waiting**: separate charts that came before their songs, and the likeliest folder.
 - **Browser**: links that only give a page (OneDrive ...). Opening one shows it in a web view, which presses its
   Download button; what it downloads goes into the library.
-- **Settings**: the BMS folder, third-party mirrors (`--third-party`), the difficulty tables (forgotten when the window
-  closes), and the version.
+- **Settings**: the BMS folder, third-party sources (`--third-party`), the difficulty tables (forgotten when the window
+  closes), and the version. Turning third-party sources on asks first, once: what they are, and that keeping to those
+  sites' terms and to the copyright holders' rights is the user's responsibility; only after OK are they on. The OK is
+  remembered (`<config folder>/bmseeker/third-party-acknowledged`; in a web page, the browser's `localStorage`).
 
-The window runs the CLI with `--json` and reads its records. The CLI it carries is unpacked into the user's cache
+The window runs the CLI with `--json` and reads its records. A host that refused BMSeeker (a `refused` record) is
+noted in the log and skipped by every later run while the window is open (`--skip-host`). The CLI it carries is unpacked into the user's cache
 folder on first use (`$BMSEEKER_CLI` if set; a development build without it uses `bmseeker` on the PATH).
 
 Build: `gui/build.sh` (builds the CLI with `cargo build --release --features cli` into `gui/bin/`, then `go build`;

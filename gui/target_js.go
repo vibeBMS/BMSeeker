@@ -128,3 +128,48 @@ func (a *app) libraryView(c *ui.Context) {
 		ui.Text(c, where.err)
 	}
 }
+
+// The page's storage key for the user's OK to thirdPartyWarning.
+const thirdPartyKey = "bmseeker.thirdPartyAcknowledged"
+
+// storage is the page's localStorage, if it may be used (not in every
+// private window).
+func storage() (s js.Value) {
+	defer func() {
+		if recover() != nil {
+			s = js.Undefined()
+		}
+	}()
+	return js.Global().Get("localStorage")
+}
+
+// thirdPartyAcknowledged reports whether the user said OK to
+// thirdPartyWarning before (in this browser).
+func thirdPartyAcknowledged() (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	s := storage()
+	if s.IsUndefined() || s.IsNull() {
+		return false
+	}
+	v := s.Call("getItem", thirdPartyKey)
+	return v.Type() == js.TypeString && v.String() != ""
+}
+
+// acknowledgeThirdParty remembers that the user said OK.
+func acknowledgeThirdParty() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("the OK is not remembered: %v", r)
+		}
+	}()
+	s := storage()
+	if s.IsUndefined() || s.IsNull() {
+		return fmt.Errorf("the OK is not remembered: this browser keeps no storage here")
+	}
+	s.Call("setItem", thirdPartyKey, js.Global().Get("Date").New().Call("toISOString"))
+	return nil
+}
