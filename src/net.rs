@@ -1,7 +1,7 @@
 //! Requests as data. Whatever reads the network here is a [`Task`]: it says
 //! which request it needs next ([`Next::Ask`]) and is fed the answer, until
 //! it is done. A task does no I/O itself, so the same task runs natively
-//! (`native::Native::run`), in a web page (through a CORS proxy,
+//! (`native::Native`), in a web page (through a CORS proxy,
 //! asynchronously) and in tests (canned answers).
 
 /// A request a task needs answered.
@@ -39,8 +39,8 @@ pub enum NetError {
     Cancelled,
     /// A host says the file is no more (MEGA's -9 / -2): its words.
     Gone(String),
-    /// The service refused BMSeeker (a status of
-    /// [`refusing`](crate::refusal::refusing), a browser check) now or
+    /// The service refused BMSeeker (a status it
+    /// [`refuses`](crate::refusal::refuses) with, a browser check) now or
     /// earlier in the run: it is not asked again ([`crate::refusal`]).
     Refused(crate::refusal::Refusal),
     /// Anything else (the connection, a host's own message), as said.
@@ -195,6 +195,87 @@ where
     })
 }
 
+/// A run's answers to GETs asked already, for the tasks it
+/// [wraps](Memo::wrap) (BMS SEARCH's `/patterns/<md5>` for each source
+/// that asks it, a Drive folder's listing for each file in it): an answer
+/// it has is given again, not asked again. A success and a "not there"
+/// (404, 410) are kept, up to [`Memo::CAP`] bytes in all.
+#[derive(Default)]
+pub(crate) struct Memo(std::sync::Mutex<(usize, std::collections::HashMap<String, Answer>)>);
+
+impl Memo {
+    const CAP: usize = 4 << 20;
+
+    /// `task`, its GETs answered from (and kept in) the memo.
+    pub(crate) fn wrap<T: Task + 'static>(
+        self: &std::sync::Arc<Self>,
+        task: T,
+    ) -> BoxTask<T::Output> {
+        Box::new(Memoed {
+            task,
+            memo: self.clone(),
+            asked: None,
+        })
+    }
+
+    fn get(&self, url: &str) -> Option<Answer> {
+        self.0.lock().unwrap().1.get(url).cloned()
+    }
+
+    fn put(&self, url: String, answer: &Answer) {
+        let size = match answer {
+            Ok(b) => b.len(),
+            Err(NetError::Status(404 | 410)) => 0,
+            Err(_) => return,
+        };
+        let mut m = self.0.lock().unwrap();
+        if m.0 + size <= Self::CAP {
+            m.0 += size;
+            m.1.insert(url, answer.clone());
+        }
+    }
+}
+
+/// A task whose GETs a [`Memo`] answers when it can.
+struct Memoed<T> {
+    task: T,
+    memo: std::sync::Arc<Memo>,
+    /// The GET asked of the network, to keep its answer.
+    asked: Option<String>,
+}
+
+impl<T: Task> Memoed<T> {
+    /// `next`, the GETs the memo has answered.
+    fn answered(&mut self, mut next: Next<T::Output>) -> Next<T::Output> {
+        while let Next::Ask(Request::Get(url)) = &next {
+            match self.memo.get(url) {
+                Some(a) => next = self.task.feed(a),
+                None => {
+                    self.asked = Some(url.clone());
+                    return next;
+                }
+            }
+        }
+        next
+    }
+}
+
+impl<T: Task> Task for Memoed<T> {
+    type Output = T::Output;
+    fn start(&mut self) -> Next<T::Output> {
+        self.asked = None;
+        let next = self.task.start();
+        self.answered(next)
+    }
+    fn feed(&mut self, answer: Answer) -> Next<T::Output> {
+        if let Some(url) = self.asked.take() {
+            self.memo.put(url, &answer);
+        }
+        let next = self.task.feed(answer);
+        self.answered(next)
+    }
+}
+
 /// What answers requests (in tests).
 #[cfg(test)]
 pub(crate) trait Http {
@@ -225,6 +306,30 @@ impl Http for Canned {
             .find(|(u, _)| u == r.url())
             .map(|(_, a)| a.clone())
             .unwrap_or_else(|| Err(format!("no answer for {}", r.url()).into()))
+    }
+}
+
+/// `http`'s answers, the URLs asked noted (in tests).
+#[cfg(test)]
+pub(crate) struct Asked<H>(pub H, pub std::cell::RefCell<Vec<String>>);
+
+#[cfg(test)]
+impl<H: Http> Asked<H> {
+    pub(crate) fn new(http: H) -> Asked<H> {
+        Asked(http, Default::default())
+    }
+
+    /// How often `url` was asked.
+    pub(crate) fn times(&self, url: &str) -> usize {
+        self.1.borrow().iter().filter(|u| *u == url).count()
+    }
+}
+
+#[cfg(test)]
+impl<H: Http> Http for Asked<H> {
+    fn send(&self, r: &Request) -> Answer {
+        self.1.borrow_mut().push(r.url().to_string());
+        self.0.send(r)
     }
 }
 
@@ -287,6 +392,33 @@ pub(crate) fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A memo answers a GET it has (a success, a 404), not one that failed
+    /// otherwise, and only for the tasks it wraps.
+    #[test]
+    fn a_memo() {
+        let memo = std::sync::Arc::new(Memo::default());
+        let http = Asked::new(Canned(vec![
+            ("https://a.test/ok".into(), Ok(b"1".to_vec())),
+            ("https://a.test/gone".into(), Err(NetError::Status(404))),
+            ("https://a.test/busy".into(), Err(NetError::Status(500))),
+        ]));
+        for _ in 0..2 {
+            for u in [
+                "https://a.test/ok",
+                "https://a.test/gone",
+                "https://a.test/busy",
+            ] {
+                let got = run(&mut memo.wrap(get_then(u.to_string(), |a| a)), &http);
+                assert_eq!(got, http.0.send(&Request::Get(u.into())));
+            }
+        }
+        assert_eq!(http.times("https://a.test/ok"), 1);
+        assert_eq!(http.times("https://a.test/gone"), 1);
+        assert_eq!(http.times("https://a.test/busy"), 2);
+        let _ = run(&mut get_then("https://a.test/ok".into(), |a| a), &http);
+        assert_eq!(http.times("https://a.test/ok"), 2);
+    }
 
     #[test]
     fn file_names() {

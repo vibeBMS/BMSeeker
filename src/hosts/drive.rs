@@ -1,16 +1,21 @@
 //! Google Drive: a file downloads from its id (`confirm=t` skips the virus
 //! scan page of big files); a folder's listing (`embeddedfolderview`)
 //! names its archives, the best of which is taken. A folder link ending in
-//! `#sub/folder/file` names goes down to that file. A link's `resourcekey`
-//! (a file shared by link before 2021 needs it) goes with its requests.
+//! `#sub/folder/file` names goes down to that file (the folders' listings
+//! kept for the next file: an uploader's mirror holds hundreds). A link's
+//! `resourcekey` (a file shared by link before 2021 needs it) goes with its
+//! requests.
 
 use super::{between, get_then, pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, Next, Ready, Request, Task};
+use crate::net::{Answer, BoxTask, Memo, Next, Ready, Request, Task};
 use crate::unpack::is_archive;
 use std::path::Path;
+use std::sync::Arc;
 
-pub(crate) struct Drive;
+/// The host, with the listings of the folders it went down.
+#[derive(Default)]
+pub(crate) struct Drive(Arc<Memo>);
 
 impl Host for Drive {
     fn name(&self) -> &'static str {
@@ -36,7 +41,7 @@ impl Host for Drive {
                 .map(crate::net::percent_decode)
                 .collect();
             if !names.is_empty() {
-                return Box::new(Walk { folder: id, names });
+                return self.0.wrap(Walk { folder: id, names });
             }
         }
         get_then(listing_url(&id) + &key, |body| {
@@ -201,6 +206,28 @@ mod tests {
             ),
             Ok(Target::named(file_url("Z1"), Some("03691.zip".into())))
         );
+    }
+
+    /// Files of one folder: its listing (and its parent's) asked once.
+    #[test]
+    fn listings_kept() {
+        use crate::net::{run, Asked, Canned};
+        let root = r#"<div class="flip-entry"><a href="https://drive.google.com/drive/folders/F36"><div class="flip-entry-title">36xx</div></a></div>"#;
+        let sub = r#"<div class="flip-entry"><a href="https://drive.google.com/file/d/Z1/view"><div class="flip-entry-title">03691.zip</div></a></div>
+            <div class="flip-entry"><a href="https://drive.google.com/file/d/Z2/view"><div class="flip-entry-title">03692.zip</div></a></div>"#;
+        let listing = |id: &str| format!("https://drive.google.com/embeddedfolderview?id={id}");
+        let http = Asked::new(Canned(vec![
+            (listing("ROOT"), Ok(root.into())),
+            (listing("F36"), Ok(sub.into())),
+        ]));
+        let cx = crate::hosts::Context::default();
+        for (n, id) in [("03691", "Z1"), ("03692", "Z2")] {
+            let link = format!("https://drive.google.com/drive/folders/ROOT#36xx/{n}.zip");
+            let got = run(&mut crate::hosts::Resolver::new(&link, None, &cx), &http);
+            assert_eq!(got.unwrap().url, file_url(id));
+        }
+        assert_eq!(http.times(&listing("ROOT")), 1);
+        assert_eq!(http.times(&listing("F36")), 1);
     }
 
     #[test]

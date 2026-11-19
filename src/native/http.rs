@@ -1,14 +1,16 @@
 //! HTTP natively: one agent for requests (a host's connection kept for
-//! its next request), and a download streamed to its file on the calling
-//! thread, ended by its progress' cancel or by [`STALL_MS`] of silence.
+//! its next request), one for a driver's downloads ([`downloads`]), each
+//! streamed to its file on the calling thread, ended by its progress'
+//! cancel or by [`STALL_MS`] of silence.
 
 use crate::hosts::{Target, STALL_MS};
+use crate::install::job::Served;
 use crate::net::{disposition_name, Answer, NetError, Request};
 use crate::progress::Progress;
-use crate::refusal::{Refusal, Why};
-use crate::unpack::BUDGET;
+use crate::unpack::{Blob, BUDGET, HEAD};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ureq::unversioned::transport::{
     time, Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
@@ -46,7 +48,7 @@ fn config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
         .tls_config(tls.build())
 }
 
-/// The agent of every request (not of downloads: [`download`]).
+/// The agent of every request (not of downloads: [`downloads`]).
 static AGENT: std::sync::LazyLock<Agent> = std::sync::LazyLock::new(|| {
     config()
         .timeout_connect(Some(CONNECT))
@@ -71,37 +73,44 @@ pub(super) fn send(r: &Request, user_agent: &str) -> Answer {
         let at = ureq::ResponseExt::get_uri(&res).to_string();
         return Err(refused(r.url(), &at, &mut res));
     }
+    // (no answer is larger than a difficulty table's data)
     Ok(res
         .body_mut()
         .with_config()
+        .limit(crate::table::JSON_CAP as u64)
         .read_to_vec()
         .map_err(|e| e.to_string())?)
 }
 
-/// `target` into `out` (a MEGA file decrypted as it comes) with
-/// `user_agent`, reporting to `progress`: what the server said of it. Each
-/// download has an agent of its own, whose connections watch the progress.
-pub(super) fn download(
-    target: &Target,
-    out: &Path,
-    user_agent: &str,
-    progress: Option<&std::sync::Arc<Progress>>,
-) -> Result<Served, NetError> {
-    let p = progress.map(|p| &**p);
-    let failed = |e: ureq::Error| match e {
-        _ if p.is_some_and(Progress::cancelled) => NetError::Cancelled,
-        ureq::Error::Timeout(Timeout::PerRead) => NetError::Stalled(STALL.as_secs()),
-        ureq::Error::Timeout(Timeout::RecvResponse) => NetError::Stalled(FIRST_BYTES.as_secs()),
-        e => NetError::Other(e.to_string()),
-    };
-    let agent = Agent::with_parts(
+/// The agent of a driver's downloads (a host's connection kept for its
+/// next file), whose connections watch `progress`.
+pub(super) fn downloads(progress: Option<Arc<Progress>>) -> Agent {
+    Agent::with_parts(
         config()
             .timeout_connect(Some(CONNECT))
             .timeout_recv_response(Some(FIRST_BYTES))
             .build(),
-        DefaultConnector::new().chain(Watch(progress.cloned())),
+        DefaultConnector::new().chain(Watch(progress)),
         ureq::unversioned::resolver::DefaultResolver::default(),
-    );
+    )
+}
+
+/// `target` into `out` (a MEGA file decrypted as it comes) through `agent`
+/// ([`downloads`]) with `user_agent`, reporting to `progress`: what the
+/// server said of it, and its first bytes.
+pub(super) fn download(
+    agent: &Agent,
+    target: &Target,
+    out: &Path,
+    user_agent: &str,
+    progress: Option<&Progress>,
+) -> Result<Served, NetError> {
+    let failed = |e: ureq::Error| match e {
+        _ if progress.is_some_and(Progress::cancelled) => NetError::Cancelled,
+        ureq::Error::Timeout(Timeout::PerRead) => NetError::Stalled(STALL.as_secs()),
+        ureq::Error::Timeout(Timeout::RecvResponse) => NetError::Stalled(FIRST_BYTES.as_secs()),
+        e => NetError::Other(e.to_string()),
+    };
     // (Dropbox sends the file to BMSeeker's own user agent; a browser's
     // gets its page)
     let req = agent.get(&target.url).header("User-Agent", user_agent);
@@ -111,23 +120,21 @@ pub(super) fn download(
         return Err(refused(&target.url, &at, &mut res));
     }
     let header = |k: &str| res.headers().get(k).map(|v| header_text(v.as_bytes()));
-    let served = Served {
-        // (MEGA names its files itself; no redirects)
-        name: header("content-disposition")
-            .and_then(|d| disposition_name(&d))
-            .filter(|_| target.mega_key.is_none()),
-        at: target
-            .mega_key
-            .is_none()
-            .then(|| ureq::ResponseExt::get_uri(&res).to_string()),
-    };
+    // (MEGA names its files itself; no redirects)
+    let name = header("content-disposition")
+        .and_then(|d| disposition_name(&d))
+        .filter(|_| target.mega_key.is_none());
+    let at = target
+        .mega_key
+        .is_none()
+        .then(|| ureq::ResponseExt::get_uri(&res).to_string());
     // (no larger than an archive may unpack to)
     let too_large = || crate::unpack::Error::TooLarge(BUDGET).to_string();
     let length = header("content-length").and_then(|l| l.trim().parse().ok());
     if length.is_some_and(|l| l > BUDGET) {
         return Err(too_large().into());
     }
-    if let Some(p) = p {
+    if let Some(p) = progress {
         p.start_file(length);
     }
     let mut mega = target
@@ -138,6 +145,7 @@ pub(super) fn download(
     let mut w = std::io::BufWriter::new(file);
     let mut body = res.body_mut().as_reader();
     let mut buf = vec![0u8; 1 << 16];
+    let mut head = Vec::with_capacity(HEAD);
     let mut got = 0;
     loop {
         let n = match &mut mega {
@@ -153,13 +161,20 @@ pub(super) fn download(
         if got > BUDGET {
             return Err(too_large().into());
         }
+        let more = (HEAD - head.len()).min(n);
+        head.extend_from_slice(&buf[..more]);
         w.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        if let Some(p) = p {
+        if let Some(p) = progress {
             p.add(n as u64);
         }
     }
     w.flush().map_err(|e| e.to_string())?;
-    Ok(served)
+    Ok(Served {
+        blob: Blob::File(out.to_path_buf()),
+        name,
+        at,
+        head,
+    })
 }
 
 /// The error of an answer that is no success (or [`challenged`]) to
@@ -177,33 +192,7 @@ fn refused(url: &str, at: &str, res: &mut ureq::http::Response<ureq::Body>) -> N
         .as_reader()
         .take(64 * 1024)
         .read_to_end(&mut head);
-    answer_error(url, at, status, mitigated.as_deref(), &head)
-}
-
-/// The error of an answer of `status` to `url` (its redirects ending
-/// `at`), its `cf-mitigated` header and its first bytes `head`: a browser
-/// check (Cloudflare's, Google's CAPTCHA) is a refusal of the service
-/// (where it ended, but Google's `/sorry/` page: `url`'s); Google Drive's
-/// quota is said as such; else the status.
-pub(crate) fn answer_error(
-    url: &str,
-    at: &str,
-    status: u16,
-    mitigated: Option<&str>,
-    head: &[u8],
-) -> NetError {
-    if crate::refusal::blocked(mitigated, head) {
-        let from = if at.contains("google.com/sorry") {
-            url
-        } else {
-            at
-        };
-        return NetError::Refused(Refusal::of(from, Why::Challenge));
-    }
-    if crate::hosts::drive_quota(head) {
-        return NetError::Other(crate::hosts::DRIVE_QUOTA.into());
-    }
-    NetError::Status(status)
+    crate::refusal::answer_error(url, at, status, mitigated.as_deref(), &head)
 }
 
 /// Whether Cloudflare answered with a browser check (`cf-mitigated:
@@ -214,18 +203,10 @@ fn challenged(res: &ureq::http::Response<ureq::Body>) -> bool {
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"challenge"))
 }
 
-/// What a download's server said of it.
-pub(super) struct Served {
-    /// The file name it gave (`Content-Disposition`).
-    pub(super) name: Option<String>,
-    /// Where its redirects ended.
-    pub(super) at: Option<String>,
-}
-
 /// Connections that, while they wait for data, give up when the progress is
 /// cancelled or no data came for [`STALL`].
 #[derive(Debug)]
-struct Watch(Option<std::sync::Arc<Progress>>);
+struct Watch(Option<Arc<Progress>>);
 
 impl Connector<Box<dyn Transport>> for Watch {
     type Out = Box<dyn Transport>;
@@ -246,7 +227,7 @@ impl Connector<Box<dyn Transport>> for Watch {
 #[derive(Debug)]
 struct Watched {
     inner: Box<dyn Transport>,
-    progress: Option<std::sync::Arc<Progress>>,
+    progress: Option<Arc<Progress>>,
 }
 
 impl Transport for Watched {
@@ -310,7 +291,7 @@ fn header_text(v: &[u8]) -> String {
 }
 
 /// Fill `buf` (short only at the end).
-pub(super) fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut n = 0;
     while n < buf.len() {
         match r.read(&mut buf[n..])? {

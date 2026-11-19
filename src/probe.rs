@@ -125,9 +125,15 @@ pub(crate) fn classify(dir: &Path) -> (Kind, usize, String) {
     }
 }
 
-/// What `link` gives now (the song `want`'s, if it is a pack of many);
-/// files go through `tmp`, which is emptied after.
-pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Context) -> Checked {
+/// What `link` gives now (the song `want`'s, if it is a pack of many),
+/// asked through `net`; files go through `tmp`, which is emptied after.
+pub fn probe(
+    link: &str,
+    want: Option<Want>,
+    tmp: &Path,
+    cx: &crate::hosts::Context,
+    net: &dyn crate::install::job::Driver,
+) -> Checked {
     let _ = std::fs::remove_dir_all(tmp);
     if let Err(e) = std::fs::create_dir_all(tmp) {
         return Checked {
@@ -138,12 +144,12 @@ pub fn probe(link: &str, want: Option<Want>, tmp: &Path, cx: &crate::hosts::Cont
     let file = tmp.join("download");
     let r = if crate::install::chart_link(link) {
         let mut plain = crate::install::job::Acquire::plain(link, file.clone(), cx);
-        match crate::install::job::run_job(&mut plain, &crate::native::Native::new(cx)) {
+        match crate::install::job::run_job(&mut plain, net) {
             Ok(g) if g.head.trim_ascii_start().starts_with(b"<") => Err(Fetch::Page),
             r => r.map(|_| ()),
         }
     } else {
-        crate::native::fetch(link, want, &file, false, cx).map(|_| ())
+        crate::native::fetch(link, want, &file, false, cx, net).map(|_| ())
     };
     let out = match r {
         Err(Fetch::Page) => Checked::state(State::Page, String::new()),

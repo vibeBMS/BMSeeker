@@ -135,7 +135,7 @@ fn get(
             return None;
         }
         tried.push(l.to_string());
-        match native::fetch(l, Some(song.want()), &tmp, any, &r.cx) {
+        match native::fetch(l, Some(song.want()), &tmp, any, &r.cx, r.net) {
             Ok(name) => Some((l.to_string(), name)),
             Err(Fetch::Page) => {
                 errors.push(format!("{l}: a page, not a file"));

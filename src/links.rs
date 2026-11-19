@@ -9,7 +9,8 @@
 //! [`Links::fill`] fills a link only where the table has none, or one on a
 //! host known to be gone (`is_dead`); [`Links::song_links`] /
 //! [`Links::chart_links`] give every link known for a chart, the table's own
-//! first, to try one after another.
+//! first (one to a dead uploader last: the uploader's mirrors may have its
+//! file), to try one after another.
 
 use crate::chart::md5_key;
 use crate::table::{DifficultyTable, TableEntry};
@@ -27,6 +28,20 @@ pub(crate) fn is_dead(url: &str) -> bool {
 fn usable(url: &str) -> bool {
     let u = url.trim();
     (u.starts_with("https://") || u.starts_with("http://")) && !is_dead(u)
+}
+
+/// A link straight to a dead uploader (not a copy of it elsewhere, as on
+/// web.archive.org).
+fn to_dead_uploader(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    let Some(rest) = u.strip_prefix("http://").or(u.strip_prefix("https://")) else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#', ':']).next().unwrap_or("");
+    DEAD.iter().any(|d| {
+        host.strip_suffix(d)
+            .is_some_and(|r| r.is_empty() || r.ends_with('.'))
+    })
 }
 
 /// MD5 → the (song's link, chart's link) pairs known for it, in the order
@@ -122,7 +137,9 @@ impl Links {
             .map_or(&[], |v| v.as_slice())
     }
 
-    /// `own` (if usable), then the other links in `pick` of the chart's pairs.
+    /// `own` (if usable), then the other links in `pick` of the chart's
+    /// pairs, then `own` if it is to a dead uploader (the uploader's mirrors
+    /// may have its file: `hosts::uploader`).
     fn all(&self, own: &str, md5: &str, pick: fn(&(String, String)) -> &String) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let own = own.trim();
@@ -134,6 +151,9 @@ impl Links {
             if !u.is_empty() && !out.contains(u) {
                 out.push(u.clone());
             }
+        }
+        if to_dead_uploader(own) {
+            out.push(own.to_string());
         }
         out
     }
@@ -224,5 +244,32 @@ mod tests {
         assert!(is_dead(
             "https://web.archive.org/web/2019/http://absolute.pv.land.to/x"
         ));
+    }
+
+    /// A table's link to a dead uploader is tried last (its mirrors may
+    /// have the file); filling still takes another link for it.
+    #[test]
+    fn dead_uploaders_links_last() {
+        let md5 = "75dc1ff763e736ba307fbc39ec9a386b";
+        let tsv = format!("md5\turl_diff\turl\n{md5}\t\thttps://m.example/1.zip\n");
+        let links = Links::from_tsv(&tsv);
+        let gnqg = "http://gnqg.rosx.net/upload/upload.cgi?get=03691";
+        let e = TableEntry {
+            md5: md5.into(),
+            url: gnqg.into(),
+            ..Default::default()
+        };
+        assert_eq!(links.song_links(&e), ["https://m.example/1.zip", gnqg]);
+        assert_eq!(Links::default().song_links(&e), [gnqg]);
+        assert_eq!(links.of(&e).0, "https://m.example/1.zip");
+        assert_eq!(Links::default().of(&e).0, gnqg);
+        // a copy of it elsewhere is not the uploader's
+        let archived = TableEntry {
+            url: format!("https://web.archive.org/web/2019/{gnqg}"),
+            ..e
+        };
+        assert!(Links::default().song_links(&archived).is_empty());
+        assert!(to_dead_uploader("https://www.gnqg.rosx.net/a"));
+        assert!(!to_dead_uploader("https://notgnqg.rosx.net.example/a"));
     }
 }
