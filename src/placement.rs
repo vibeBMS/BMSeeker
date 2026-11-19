@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 
 pub use crate::chart::ChartInfo;
 pub(crate) use crate::chart::{class_of, Class};
+// (vibeBMS's song select asks these whether a table's song is in its
+// library, until it asks `titles::same_song` as the downloads do)
+pub use crate::titles::{same_artist, same_name, same_title};
 
 /// A folder of the library: its files and the charts in it.
 #[cfg(test)]
@@ -196,63 +199,6 @@ impl Needs {
     fn outside(&self) -> bool {
         self.audio.outside + self.images.outside + self.movies.outside + self.extras.outside > 0
     }
-}
-
-// Names (an archive's in a pack, a search's results) matched to a song's
-// title and artist by what they start with. Whether two charts are of one
-// song is `titles::same_song`.
-
-/// `name` without bracketed parts (`[ANOTHER]`, `(obj: ...)`, `【...】`),
-/// lower case, spaces collapsed.
-fn strip_brackets(name: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for c in name.chars() {
-        match c {
-            '[' | '(' | '【' | '（' | '［' | '<' | '〔' => depth += 1,
-            ']' | ')' | '】' | '）' | '］' | '>' | '〕' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => out.extend(c.to_lowercase()),
-            _ => {}
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Titles match when one starts with the other once tags are gone
-/// ("Arcadia -★1-" and "Arcadia"); the shorter needs three characters.
-pub fn same_title(a: &str, b: &str) -> bool {
-    let (a, b) = (strip_brackets(a), strip_brackets(b));
-    let (short, long) = if a.chars().count() <= b.chars().count() {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    short.chars().count() >= 3 && long.starts_with(&short)
-}
-
-/// The same title, but for its brackets (`Song [ANOTHER]` is `Song`).
-pub fn same_name(a: &str, b: &str) -> bool {
-    let a = strip_brackets(a);
-    !a.is_empty() && a == strip_brackets(b)
-}
-
-/// Artists match without the chart maker's part ("artist / obj: someone").
-pub fn same_artist(a: &str, b: &str) -> bool {
-    let clean = |s: &str| {
-        let s = s.to_lowercase();
-        let cut = ["/", "obj", "差分", "譜面"]
-            .iter()
-            .filter_map(|m| s.find(m))
-            .min()
-            .unwrap_or(s.len());
-        strip_brackets(&s[..cut])
-    };
-    let (a, b) = (clean(a), clean(b));
-    if a.is_empty() || b.is_empty() {
-        return a == b;
-    }
-    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    long.starts_with(&short)
 }
 
 /// The share of `sounds` that `files` (paths in a song's folder) hold: by

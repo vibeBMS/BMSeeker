@@ -356,8 +356,8 @@ fn pick_in_pack<'a>(files: &'a [MegaFile], want: Option<&Want>) -> Option<&'a Me
                 Some((a, t)) => (a, t.trim()),
                 None => ("", stem),
             };
-            let exact = crate::placement::same_name(named, &title);
-            if exact || crate::placement::same_title(named, &title) {
+            let exact = crate::titles::same_name(named, &title);
+            if exact || crate::titles::same_title(named, &title) {
                 found.push((exact, pack_artist(by, &artist), f));
             }
         }

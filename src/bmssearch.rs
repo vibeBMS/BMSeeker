@@ -152,7 +152,7 @@ impl Task for Lookup {
                 };
                 let same: Vec<&Value> = works
                     .iter()
-                    .filter(|w| crate::placement::same_title(&s(w, "title"), &title))
+                    .filter(|w| crate::titles::same_title(&s(w, "title"), &title))
                     .collect();
                 let by: Vec<&Value> = same
                     .iter()
