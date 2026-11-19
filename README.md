@@ -160,6 +160,41 @@ folder name (a chart of the same title and artist there) goes into that folder, 
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
 
+## Third-party sources and disclaimer
+
+Where BMSeeker downloads from, by default:
+
+- **The authors' and the services' own:** the links difficulty tables give (the tables' pages and data, and the
+  links in them to where authors put their songs: Google Drive, Dropbox, MediaFire, MEGA, pixeldrain, an author's own
+  site), the Stella uploader's list (stellabms.xyz), BMS SEARCH's public API (api.bmssearch.net), and event venues
+  (manbow, venue.bmssearch.net). For a manbow event's work, the BMS event mirror
+  ([vibeBMS/BMS](https://github.com/vibeBMS/BMS), kept by BMSeeker's authors) is asked first; the setting
+  `"mirror_catalog": ""` turns it off.
+- **Third parties' copies**, off unless `--third-party`, the setting `"third_party": true` or the window's
+  "Third-party sources" is on: other people's mirrors of dead sites and uploaders (darksabun.club,
+  bms.hexlataia.xyz), packages found by a chart's MD5 on Ginger (gingerrush.com) and Konmai (bms.alvorna.com), and the
+  community archive ("BMS Library" on Google Drive). These are not the authors' links; BMSeeker does not check where
+  their files came from, only that what they bring holds the chart wanted.
+
+How BMSeeker behaves towards these sites:
+
+- It identifies itself: natively every request carries its own `User-Agent`
+  (`BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)`), never a browser's. In a web page the browser's
+  `User-Agent` is sent (to hosts reached through the CORS proxy, the proxy's).
+- It honours refusals and rate limits: a service that answers 401, 403, 429 or 451, or with a browser check (a
+  Cloudflare challenge, Turnstile), is not asked again for the rest of the run, and the refusal is reported
+  (see Refusals, above). It does not retry with other queries, other addresses or other headers.
+- It does not bypass access controls: no solving or evading of challenges, CAPTCHAs, logins or download limits.
+  A link that needs a browser is shown to the user in one (the window's web view presses a share page's Download
+  button once, as a person would; the web page opens it in a tab).
+
+BMSeeker hosts no songs or charts, and is not affiliated with, endorsed by or operated by any of the services above.
+Users are responsible for complying with each site's terms of use and with the rights of the copyright holders of what
+they download.
+
+A site operator who wants BMSeeker not to use their site, or to use it differently, can say so in the
+[issue tracker](https://github.com/vibeBMS/BMSeeker/issues).
+
 ## Window (`gui/`)
 
 A native window made with [MyGo](https://github.com/egoist/mygo) (Go). A release has two binaries, `bmseeker` (the
