@@ -413,6 +413,16 @@ fn each_member(
         Format::SevenZ => {
             let mut a =
                 sevenz_rust2::ArchiveReader::new(r, "".into()).map_err(|e| e.to_string())?;
+            // LZMA2 on several threads buffers whole runs of input and
+            // output (a 64 MB 7z of 120 MB: 218 MB at its peak on 4 threads,
+            // 18 MB on one, 1.7 times as long): one where memory is short
+            if cfg!(any(
+                target_arch = "wasm32",
+                target_os = "android",
+                target_os = "ios"
+            )) {
+                a.set_thread_count(1);
+            }
             let mut err = None;
             a.for_each_entries(|entry, r| {
                 if entry.is_directory() {
