@@ -32,7 +32,7 @@ impl Native {
     /// With `cx`'s settings and progress.
     pub fn new(cx: &Context) -> Native {
         Native {
-            user_agent: cx.config.user_agent.clone(),
+            user_agent: crate::config::native_user_agent(&cx.config.user_agent),
             progress: cx.progress(),
             refused: cx.refused.clone(),
         }

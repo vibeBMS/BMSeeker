@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// The `User-Agent` sent with every request natively: BMSeeker's own
-    /// ([`USER_AGENT`]; an app that embeds BMSeeker puts its product
-    /// first: [`user_agent_of`]). BMSeeker does not pass itself off as a
+    /// Who sends every request natively, after the HTTP library's own name
+    /// ([`HTTP_CLIENT`], always first: [`native_user_agent`]): BMSeeker's
+    /// ([`USER_AGENT`]; an app that embeds BMSeeker adds its product after
+    /// it: [`user_agent_with`]). BMSeeker does not pass itself off as a
     /// browser. A web page cannot set it: there the browser sends its own
     /// (and the CORS proxy's requests carry the proxy's).
     pub user_agent: String,
@@ -78,7 +79,13 @@ pub struct Config {
     pub sjis_only: bool,
 }
 
-/// BMSeeker's own `User-Agent`: `BMSeeker/<version>
+/// The HTTP library BMSeeker's native requests go through, as it names
+/// itself (its own default `User-Agent`): the first product of every native
+/// request's `User-Agent`, which BMSeeker keeps and adds to. The version is
+/// the one built with (a test asks ureq what it sends; bump this with ureq).
+pub const HTTP_CLIENT: &str = "ureq/3.5.2";
+
+/// BMSeeker's own product: `BMSeeker/<version>
 /// (+https://github.com/vibeBMS/BMSeeker)`, the default
 /// [`Config::user_agent`].
 pub const USER_AGENT: &str = concat!(
@@ -87,13 +94,26 @@ pub const USER_AGENT: &str = concat!(
     " (+https://github.com/vibeBMS/BMSeeker)"
 );
 
-/// The `User-Agent` of an app that embeds BMSeeker: its `product`
-/// (`vibeBMS/0.1.0`) before BMSeeker's own, as
-/// `vibeBMS/0.1.0 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker)`.
-pub fn user_agent_of(product: &str) -> String {
+/// The [`Config::user_agent`] of an app that embeds BMSeeker: BMSeeker's
+/// own, then the app's `product` (`vibeBMS/0.1.0
+/// (+https://github.com/vibeBMS/vibe)`), as `BMSeeker/0.1.0
+/// (+https://github.com/vibeBMS/BMSeeker) vibeBMS/0.1.0
+/// (+https://github.com/vibeBMS/vibe)`.
+pub fn user_agent_with(product: &str) -> String {
     match product.trim() {
         "" => USER_AGENT.to_string(),
-        p => format!("{p} {USER_AGENT}"),
+        p => format!("{USER_AGENT} {p}"),
+    }
+}
+
+/// The `User-Agent` a native request carries for the setting
+/// `user_agent`: the HTTP library's own name ([`HTTP_CLIENT`]) kept first,
+/// then the setting's products (RFC 9110: the most significant first), as
+/// `ureq/3.5.2 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker)`.
+pub fn native_user_agent(user_agent: &str) -> String {
+    match user_agent.trim() {
+        "" => HTTP_CLIENT.to_string(),
+        u => format!("{HTTP_CLIENT} {u}"),
     }
 }
 
@@ -317,10 +337,14 @@ mod tests {
         // no browser's name in it
         assert!(!own.contains("Mozilla") && !own.contains("Chrome"));
         assert_eq!(
-            user_agent_of("vibeBMS/0.1.0"),
-            format!("vibeBMS/0.1.0 {own}")
+            user_agent_with("vibeBMS/0.1.0 (+https://github.com/vibeBMS/vibe)"),
+            format!("{own} vibeBMS/0.1.0 (+https://github.com/vibeBMS/vibe)")
         );
-        assert_eq!(user_agent_of(" "), own);
+        assert_eq!(user_agent_with(" "), own);
+        // the HTTP library's name stays first
+        assert!(HTTP_CLIENT.starts_with("ureq/3."));
+        assert_eq!(native_user_agent(&own), format!("{HTTP_CLIENT} {own}"));
+        assert_eq!(native_user_agent(""), HTTP_CLIENT);
     }
 
     #[test]

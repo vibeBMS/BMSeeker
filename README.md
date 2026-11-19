@@ -145,11 +145,13 @@ Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`
 `folder_name_format`, `sjis_only`.
 
 BMSeeker says who it is: every request it makes natively carries the `User-Agent`
-`BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)` (`config::USER_AGENT`), never a browser's. An app that
-embeds it puts its own product first (`config::user_agent_of("vibeBMS/0.1.0")`:
-`vibeBMS/0.1.0 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker)`); the `user_agent` setting changes it. In a web
-page no program may set a `User-Agent`: requests to hosts that send CORS headers carry the browser's own, and those
-through the CORS proxy the proxy's.
+`ureq/<version> BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)`, never a browser's: the HTTP library's own
+name as it sends it (`config::HTTP_CLIENT`, kept first whatever the setting says), then BMSeeker's
+(`config::USER_AGENT`, the `user_agent` setting's default). An app that embeds it adds its own product after
+BMSeeker's (`config::user_agent_with("vibeBMS/0.1.0 (+https://github.com/vibeBMS/vibe)")`:
+`ureq/3.5.2 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker) vibeBMS/0.1.0 (+https://github.com/vibeBMS/vibe)`
+on the wire). In a web page no program may set a `User-Agent`: requests to hosts that send CORS headers carry the
+browser's own, and those through the CORS proxy the proxy's.
 
 A song new to the library gets a folder named after the song's title (a table's), or the archive. With
 `--name-folders` (setting `"folder_naming": true`; off by default) it is named after its charts as BeMusicSeeker names
@@ -182,7 +184,8 @@ Where BMSeeker downloads from, by default:
 How BMSeeker behaves towards these sites:
 
 - It identifies itself: natively every request carries its own `User-Agent`
-  (`BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)`), never a browser's. In a web page the browser's
+  (`ureq/<version> BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)`: the HTTP library's name, then
+  BMSeeker's), never a browser's. In a web page the browser's
   `User-Agent` is sent (to hosts reached through the CORS proxy, the proxy's).
 - It honours refusals and rate limits: a service that answers 429, 401/403/451 (but a file host's for one file), or
   with a browser check (a Cloudflare challenge, Turnstile, Google's CAPTCHA), is not asked again for the rest of the run, and the refusal is reported

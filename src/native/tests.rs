@@ -152,3 +152,63 @@ fn fetch_url() {
         Err(e) => println!("ERR {e:?}"),
     }
 }
+
+/// The `User-Agent` of the one request `ask` makes to the server at the
+/// URL it is given.
+fn user_agent_heard(ask: impl FnOnce(String)) -> String {
+    use std::io::{BufRead, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/a.zip", l.local_addr().unwrap());
+    let heard = std::thread::spawn(move || {
+        let (c, _) = l.accept().unwrap();
+        let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+        let (mut line, mut ua) = (String::new(), String::new());
+        while r.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+            if line.to_ascii_lowercase().starts_with("user-agent:") {
+                ua = line["user-agent:".len()..].trim().to_string();
+            }
+            line.clear();
+        }
+        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nPK";
+        (&c).write_all(ok).unwrap();
+        ua
+    });
+    ask(url);
+    heard.join().unwrap()
+}
+
+/// Every native request names the HTTP library as it names itself (the
+/// version built with), then BMSeeker, then the app that embeds it.
+#[test]
+fn user_agents_sent() {
+    use crate::config::{user_agent_with, Config, HTTP_CLIENT, USER_AGENT};
+    // ureq's own, unchanged: what HTTP_CLIENT says
+    let ureq_own = user_agent_heard(|url| {
+        ureq::get(&url).call().unwrap();
+    });
+    assert_eq!(ureq_own, HTTP_CLIENT, "bump config::HTTP_CLIENT");
+
+    let n = Native::new(&Context::default());
+    let sent = user_agent_heard(|url| {
+        n.get(&url).unwrap();
+    });
+    assert_eq!(sent, format!("{HTTP_CLIENT} {USER_AGENT}"));
+
+    let app = "vibeBMS/0.1.0 (+https://github.com/vibeBMS/vibe)";
+    let n = Native::new(&Context::new(Config {
+        user_agent: user_agent_with(app),
+        ..Default::default()
+    }));
+    let dir = tmp("native-ua");
+    let sent = user_agent_heard(|url| {
+        let target = Target::url(url);
+        let slot = dir.join("slot");
+        let effect = Effect::Download {
+            target,
+            slot,
+            any: false,
+        };
+        assert!(matches!(n.perform(effect), Fed::Downloaded(Ok(_))));
+    });
+    assert_eq!(sent, format!("{HTTP_CLIENT} {USER_AGENT} {app}"));
+}
