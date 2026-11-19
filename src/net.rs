@@ -333,6 +333,24 @@ impl<H: Http> Http for Asked<H> {
     }
 }
 
+/// The host name in `url` (or `url`, a host name): without the scheme,
+/// user and port; as written.
+pub(crate) fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    host.split(':').next().unwrap_or(host)
+}
+
+/// Whether `host` is `domain` or a name under it, in any case.
+pub(crate) fn under(host: &str, domain: &str) -> bool {
+    let (h, d) = (host.as_bytes(), domain.as_bytes());
+    let Some(at) = h.len().checked_sub(d.len()) else {
+        return false;
+    };
+    h[at..].eq_ignore_ascii_case(d) && (at == 0 || h[at - 1] == b'.')
+}
+
 /// `s` percent-encoded for a URL's query.
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
@@ -467,12 +485,19 @@ mod tests {
         assert_eq!(run(&mut boxed, &http), [2, 0]);
         assert_eq!(run(&mut Ready::boxed(7), &http), 7);
         assert_eq!(url_encode("a b/c"), "a%20b%2Fc");
+        assert_eq!(
+            host("https://u@Www.Example.com:8080/a?b"),
+            "Www.Example.com"
+        );
+        assert_eq!(host("example.com"), "example.com");
+        assert!(under("dl.Dropbox.com", "dropbox.com") && under("dropbox.com", "dropbox.com"));
+        assert!(!under("notdropbox.com", "dropbox.com") && !under("com", "dropbox.com"));
         assert_eq!(percent_decode("%E6%9B%B2%2"), "曲%2");
     }
 
     #[test]
     fn errors() {
-        // the text a person reads stays what it was
+        // the text a person reads
         assert_eq!(NetError::Status(404).to_string(), "HTTP 404");
         assert_eq!(NetError::Cancelled.to_string(), "cancelled");
         assert_eq!(NetError::Stalled(60).to_string(), "no data for 60 s");

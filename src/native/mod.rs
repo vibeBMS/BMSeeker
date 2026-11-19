@@ -32,7 +32,7 @@ impl Native {
     pub fn new(cx: &Context) -> Native {
         Native {
             user_agent: crate::config::native_user_agent(&cx.config.user_agent),
-            progress: cx.progress(),
+            progress: cx.progress.clone(),
             downloads: OnceLock::new(),
         }
     }

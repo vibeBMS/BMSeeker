@@ -86,24 +86,15 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// The file hosts: their 401, 403 and 451 are a file's (Google Drive's
-/// quota, a file shared privately), not a refusal of BMSeeker, unless the
-/// answer says so ([`blocked`]); their 429 is one.
-const FILE_HOSTS: &[&str] = &[
-    "drive.google.com",
-    "mega.nz",
-    "dropbox.com",
-    "mediafire.com",
-    "pixeldrain.com",
-];
-
 /// Whether `status` from `url` refuses BMSeeker itself: 429 anywhere; 401,
-/// 403 and 451 but from a file host (there, one file's or link's
-/// failure).
+/// 403 and 451 but from a file host (there, one file's or link's failure,
+/// unless the answer says otherwise: [`blocked`]).
 pub(crate) fn refuses(url: &str, status: u16) -> bool {
     match status {
         429 => true,
-        401 | 403 | 451 => !FILE_HOSTS.contains(&service(url).as_str()),
+        401 | 403 | 451 => {
+            !crate::hosts::service_of(crate::net::host(url)).is_some_and(|s| s.file_host)
+        }
         _ => false,
     }
 }
@@ -169,41 +160,16 @@ fn refused_at<'a>(url: &'a str, at: Option<&'a str>) -> &'a str {
         .unwrap_or(url)
 }
 
-/// The hosts of one service: a refusal by one is the others' too.
-const SERVICES: &[(&str, &[&str])] = &[
-    (
-        "drive.google.com",
-        &[
-            "drive.google.com",
-            "drive.usercontent.google.com",
-            "docs.google.com",
-        ],
-    ),
-    ("mega.nz", &["mega.nz", "mega.co.nz", "mega.io"]),
-    (
-        "dropbox.com",
-        &["dropbox.com", "dropboxusercontent.com", "db.tt"],
-    ),
-    ("mediafire.com", &["mediafire.com"]),
-    ("pixeldrain.com", &["pixeldrain.com", "pixeldrain.net"]),
-    ("bmssearch.net", &["bmssearch.net"]),
-];
-
 /// The service a URL (or a host name) is on: its host, lower case,
-/// without `www.` and a port; one name for the hosts of a service
-/// BMSeeker knows (Google Drive's, MEGA's, Dropbox's, MediaFire's,
+/// without `www.`; one name for the hosts of a service BMSeeker knows
+/// (`hosts::service_of`: Google Drive's, MEGA's, Dropbox's, MediaFire's,
 /// pixeldrain's, BMS SEARCH's).
 pub(crate) fn service(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let host = crate::net::host(url).to_ascii_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host);
-    let under = |d: &str| host == d || host.ends_with(&format!(".{d}"));
-    SERVICES
-        .iter()
-        .find(|(_, hosts)| hosts.iter().any(|d| under(d)))
-        .map_or_else(|| host.to_string(), |(name, _)| name.to_string())
+    crate::hosts::service_of(host)
+        .map_or(host, |s| s.name)
+        .to_string()
 }
 
 /// Whether `body` is a page (HTML) with one of `marks` (lower case) in its
@@ -356,7 +322,7 @@ impl<'a> Guarded<'a> {
         Guarded {
             net,
             refusals: &cx.refused,
-            progress: cx.progress(),
+            progress: cx.progress.clone(),
             told: &untold,
         }
     }
@@ -411,6 +377,10 @@ mod tests {
             "drive.google.com"
         );
         assert_eq!(service("https://g.api.mega.co.nz/cs?id=0"), "mega.nz");
+        // where Drive's downloads end: Drive's, a file host
+        let dl = "https://doc-0s-docs.googleusercontent.com/docs/securesc/x";
+        assert_eq!(service(dl), "drive.google.com");
+        assert!(!refuses(dl, 403) && refuses(dl, 429));
         assert_eq!(
             service("https://dl.dropboxusercontent.com/s/a"),
             "dropbox.com"
@@ -513,7 +483,6 @@ mod tests {
         Effect::Download {
             target: Target::url(url),
             slot: "slot".into(),
-            any: false,
         }
     }
 

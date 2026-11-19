@@ -11,8 +11,9 @@ use crate::fs::{file_name, Fs, Store};
 use crate::placement::{is_chart, rel, song_folders_except, Class, Folder, Keys, Names};
 use crate::titles;
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A chart a player knows it has: where, its hashes (hex; either may be
 /// empty), its title and artist.
@@ -25,8 +26,10 @@ pub struct Owned {
     pub artist: String,
 }
 
-/// The library below a folder.
-#[derive(Default)]
+/// The library below a folder. A clone shares the charts' records with it
+/// until either changes them (a player's library cloned for each download
+/// costs no copy until something comes in).
+#[derive(Clone, Default)]
 pub struct Library {
     root: PathBuf,
     /// A folder below passed by (the downloads waiting).
@@ -36,58 +39,98 @@ pub struct Library {
     /// Charts read or given.
     charts: RefCell<Charts>,
     /// A chart's MD5 or SHA-256 (lower case hex): the folders holding it.
-    by_hash: HashMap<String, Vec<PathBuf>>,
+    by_hash: Arc<HashMap<String, Vec<PathBuf>>>,
+    pub(crate) waiting: Waiting,
 }
 
-/// Charts read or given, by path (None: it could not be read), and by
-/// their artist as compared: (title as compared, path).
-#[derive(Default)]
+/// What placing the charts that wait for their songs keeps from one time
+/// to the next (`install::place_waiting`): each chart as it was read (by
+/// path: its file's stamp then, what it says), and the songs' folders that
+/// took files since.
+#[derive(Clone, Default)]
+pub(crate) struct Waiting {
+    pub(crate) charts: HashMap<PathBuf, (Stamp, Option<ChartInfo>)>,
+    pub(crate) changed: HashSet<PathBuf>,
+}
+
+/// A file's (modification time, size) ([`Fs::stamp`]).
+type Stamp = Option<(i64, u64)>;
+
+/// Charts read or given, by path (None: it could not be read), by their
+/// artist as compared: (title as compared, path), and those of the songs'
+/// folders ranked so far, by folder.
+#[derive(Clone, Default)]
 struct Charts {
-    by_path: HashMap<PathBuf, Option<ChartInfo>>,
-    by_artist: HashMap<String, Vec<(String, PathBuf)>>,
+    by_path: Arc<HashMap<PathBuf, Option<ChartInfo>>>,
+    by_artist: Arc<HashMap<String, Vec<(String, PathBuf)>>>,
+    titles: HashMap<PathBuf, Arc<Titles>>,
+}
+
+/// The charts of a song's folder as a chart is ranked for it
+/// ([`Library::folder_titles`]): the first's title and artist, to name
+/// the folder, and their pairs as compared.
+#[derive(Default)]
+pub(crate) struct Titles {
+    pub(crate) first: Option<(String, String)>,
+    pub(crate) profile: titles::Profile,
+}
+
+impl Titles {
+    /// Of the charts' (title, artist).
+    pub(crate) fn of(pairs: Vec<(String, String)>) -> Titles {
+        Titles {
+            profile: titles::Profile::of(pairs.iter().map(|(t, a)| (&**t, &**a, ""))),
+            first: pairs.into_iter().next(),
+        }
+    }
 }
 
 impl Charts {
     fn insert(&mut self, p: PathBuf, info: Option<ChartInfo>) -> &Option<ChartInfo> {
+        if let Some(dir) = p.parent() {
+            self.titles.remove(dir);
+        }
         if let Some(Some(old)) = self.by_path.get(&p) {
             let old = titles::Song::of(&old.title, &old.artist);
-            if let Some(at) = self.by_artist.get_mut(&old.artist) {
+            if let Some(at) = Arc::make_mut(&mut self.by_artist).get_mut(&old.artist) {
                 at.retain(|(_, q)| *q != p);
             }
         }
         if let Some(i) = &info {
             let song = titles::Song::of(&i.title, &i.artist);
             if !song.title.is_empty() {
-                let at = self.by_artist.entry(song.artist).or_default();
+                let at = Arc::make_mut(&mut self.by_artist)
+                    .entry(song.artist)
+                    .or_default();
                 at.push((song.title, p.clone()));
             }
         }
-        let slot = self.by_path.entry(p).or_default();
+        let slot = Arc::make_mut(&mut self.by_path).entry(p).or_default();
         *slot = info;
         slot
     }
 
-    /// The folders of the charts of `song` ([`titles::same_song`]) whose
-    /// path `keep` keeps.
-    fn folders_of(&self, song: &titles::Song, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    /// The charts of `song` ([`titles::same_song`]).
+    fn of<'a>(&'a self, song: &'a titles::Song) -> impl Iterator<Item = &'a Path> {
         let at = self
             .by_artist
             .get(&song.artist)
             .map_or(&[][..], Vec::as_slice);
         at.iter()
-            .filter(|(title, p)| {
-                let other = titles::Song {
-                    title: title.clone(),
-                    artist: song.artist.clone(),
-                };
-                keep(p) && titles::same_song(song, &other)
-            })
-            .filter_map(|(_, p)| p.parent().map(Path::to_path_buf))
+            .filter(|(title, _)| titles::alike(&song.title, title))
+            .map(|(_, p)| p.as_path())
+    }
+
+    /// The folders of the charts of `song` whose path `keep` keeps.
+    fn folders_of(&self, song: &titles::Song, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        self.of(song)
+            .filter(|p| keep(p))
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
             .collect()
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Songs {
     /// The songs' folders, by path.
     list: Vec<Song>,
@@ -103,6 +146,7 @@ struct Songs {
     loose: Vec<PathBuf>,
 }
 
+#[derive(Clone)]
 struct Song {
     dir: PathBuf,
     /// Its files by their path in it, sorted.
@@ -234,16 +278,9 @@ impl Library {
             skip: None,
             songs: OnceCell::new(),
             charts: RefCell::default(),
-            by_hash: HashMap::new(),
+            by_hash: Arc::default(),
+            waiting: Waiting::default(),
         }
-    }
-
-    /// The library below `root`, every chart read now (their hashes known).
-    #[cfg(test)]
-    pub(crate) fn scan(fs: &dyn Fs, root: &Path) -> Library {
-        let mut lib = Library::new(root);
-        lib.read_all(fs);
-        lib
     }
 
     /// The library below `root` whose charts a player knows (`charts`, from
@@ -286,15 +323,14 @@ impl Library {
             .map_or(&[], |v| v.as_slice())
     }
 
-    /// The folders holding a chart of the song `want` ([`titles::same_song`]),
-    /// among the charts given or read so far (all of them once
-    /// [`Library::scan`]ned).
-    pub(crate) fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
+    /// Whether it holds a chart of the song `want` (the same artist, the
+    /// titles alike, as the downloads compare them), among the charts given
+    /// or read so far.
+    pub fn has_song(&self, want: &crate::hosts::Want) -> bool {
         let song = titles::Song::of(&want.title, &want.artist);
-        let mut out = self.charts.borrow().folders_of(&song, |_| true);
-        out.sort();
-        out.dedup();
-        out
+        let known = self.charts.borrow();
+        let found = known.of(&song).next().is_some();
+        found
     }
 
     /// The folders in it holding a chart of the same song as one of
@@ -336,8 +372,11 @@ impl Library {
             .take_while(|d| d.starts_with(&root))
             .find(|d| s.at.contains_key(*d))
             .map(|d| d.to_path_buf());
-        match song {
-            Some(d) if d == dir || !is_chart(file) => s.merge(&d, [rel(file, &d)]),
+        let changed = match song {
+            Some(d) if d == dir || !is_chart(file) => {
+                s.merge(&d, [rel(file, &d)]);
+                d
+            }
             _ if is_chart(file) => {
                 let (below, loose) = std::mem::take(&mut s.loose)
                     .into_iter()
@@ -345,9 +384,12 @@ impl Library {
                 s.loose = loose;
                 let files = below.iter().map(|f| rel(f, dir));
                 s.merge(dir, std::iter::once(file_name(file)).chain(files));
+                dir.to_path_buf()
             }
-            _ => s.loose.push(file.to_path_buf()),
-        }
+            _ => return s.loose.push(file.to_path_buf()),
+        };
+        self.charts.get_mut().titles.remove(&changed);
+        self.waiting.changed.insert(changed);
     }
 
     /// The folder `dir` is in the library now (a song unpacked there): its
@@ -365,6 +407,8 @@ impl Library {
         if let Some(s) = self.songs.get_mut() {
             for (song, files) in found {
                 s.merge(&song, files);
+                self.charts.get_mut().titles.remove(&song);
+                self.waiting.changed.insert(song);
             }
         }
     }
@@ -388,7 +432,7 @@ impl Library {
     }
 
     fn hold(&mut self, hash: String, dir: &Path) {
-        let at = self.by_hash.entry(hash).or_default();
+        let at = Arc::make_mut(&mut self.by_hash).entry(hash).or_default();
         if !at.iter().any(|d| d == dir) {
             at.push(dir.to_path_buf());
         }
@@ -417,17 +461,6 @@ impl Library {
             .iter()
             .flat_map(|s| s.charts.iter().map(|c| s.dir.join(c)))
             .collect()
-    }
-
-    /// Every song's folder and chart, read now.
-    #[cfg(test)]
-    fn read_all(&mut self, fs: &dyn Fs) {
-        let paths = self.chart_paths(fs);
-        for (p, r) in paths.iter().zip(Read::all(fs, &paths)) {
-            if let Some(r) = r {
-                self.know(p.clone(), r);
-            }
-        }
     }
 
     /// The library below `root`, every chart read now, passing by the
@@ -509,27 +542,43 @@ impl Library {
         })
     }
 
+    /// The keys of the files of the song's folder `dir` (None: not a
+    /// song's folder).
+    pub(crate) fn keys(&self, fs: &dyn Fs, dir: &Path) -> Option<&Keys> {
+        let s = self.songs(fs);
+        s.at.get(dir).map(|i| &s.list[*i].keys)
+    }
+
     /// The numbers of the library's files' keys.
     pub(crate) fn names(&self, fs: &dyn Fs) -> &Names {
         &self.songs(fs).names
     }
 
     /// The songs' folders other than `except` holding a sound file of one
-    /// of `sounds` (keys' numbers), by path (their charts not read).
-    pub(crate) fn near(&self, fs: &dyn Fs, sounds: &[u32], except: &Path) -> Vec<Folder<'_>> {
+    /// of `sounds` (keys' numbers, each once), by path (their charts not
+    /// read), each with how many of them it holds.
+    pub(crate) fn near(
+        &self,
+        fs: &dyn Fs,
+        sounds: &[u32],
+        except: &Path,
+    ) -> Vec<(Folder<'_>, usize)> {
         let s = self.songs(fs);
-        let mut hit = vec![false; s.list.len()];
+        let mut hits = vec![0; s.list.len()];
         for i in sounds.iter().filter_map(|k| s.by_sound.get(k)).flatten() {
-            hit[*i] = true;
+            hits[*i] += 1;
         }
         s.list
             .iter()
-            .zip(hit)
-            .filter(|(song, hit)| *hit && song.dir != except)
-            .map(|(song, _)| Folder {
-                dir: &song.dir,
-                keys: &song.keys,
-                titles: &[],
+            .zip(hits)
+            .filter(|(song, hits)| *hits > 0 && song.dir != except)
+            .map(|(song, hits)| {
+                let f = Folder {
+                    dir: &song.dir,
+                    keys: &song.keys,
+                    titles: None,
+                };
+                (f, hits)
             })
             .collect()
     }
@@ -560,14 +609,21 @@ impl Library {
     }
 
     /// The titles and artists of the charts right in the song's folder
-    /// `dir`.
-    pub(crate) fn folder_titles(&self, fs: &dyn Fs, dir: &Path) -> Vec<(String, String)> {
+    /// `dir` (kept until a chart there changes).
+    pub(crate) fn folder_titles(&self, fs: &dyn Fs, dir: &Path) -> Arc<Titles> {
+        if let Some(t) = self.charts.borrow().titles.get(dir) {
+            return t.clone();
+        }
         let s = self.songs(fs);
-        s.at.get(dir).map_or(Vec::new(), |&i| {
+        let pairs = s.at.get(dir).map_or(Vec::new(), |&i| {
             self.charts_in(fs, dir, &s.list[i].charts, |c| {
                 (c.title.clone(), c.artist.clone())
             })
-        })
+        });
+        let t = Arc::new(Titles::of(pairs));
+        let mut known = self.charts.borrow_mut();
+        known.titles.insert(dir.to_path_buf(), t.clone());
+        t
     }
 }
 
@@ -575,6 +631,32 @@ impl Library {
 mod tests {
     use super::*;
     use crate::fs::Mem;
+
+    impl Library {
+        /// The library below `root`, every chart read now (their hashes
+        /// known).
+        pub(crate) fn scan(fs: &dyn Fs, root: &Path) -> Library {
+            let mut lib = Library::new(root);
+            let paths = lib.chart_paths(fs);
+            let read = Read::all(fs, &paths);
+            for (p, r) in paths.into_iter().zip(read) {
+                if let Some(r) = r {
+                    lib.know(p, r);
+                }
+            }
+            lib
+        }
+
+        /// The folders holding a chart of the song `want` ([`titles::same_song`]),
+        /// among the charts given or read so far.
+        pub(crate) fn song_folders_of(&self, want: &crate::hosts::Want) -> Vec<PathBuf> {
+            let song = titles::Song::of(&want.title, &want.artist);
+            let mut out = self.charts.borrow().folders_of(&song, |_| true);
+            out.sort();
+            out.dedup();
+            out
+        }
+    }
 
     fn library() -> Mem {
         let m = Mem::default();
@@ -780,7 +862,7 @@ mod tests {
             t.put(d.join("bg.png"), Vec::new());
         }
         let started = Instant::now();
-        crate::placement::song_folders(&t, Path::new("bms"));
+        crate::placement::song_folders_except(&t, Path::new("bms"), None);
         let walk = started.elapsed();
         let started = Instant::now();
         let lib = Library::new(Path::new("bms"));
@@ -807,6 +889,33 @@ mod tests {
             "walked {walk:?}, read {read:?}, placed 50 in {placed:?}, digest {:016x}",
             digest.finish()
         );
+    }
+
+    /// A clone shares the records it was made with, and keeps what comes
+    /// into it to itself.
+    #[test]
+    fn a_clone_of_its_own() {
+        let song = Owned {
+            path: "bms/A/a.bms".into(),
+            md5: "0123456789abcdef0123456789abcdef".into(),
+            title: "Song [N]".into(),
+            artist: "x".into(),
+            ..Default::default()
+        };
+        let lib = Library::from_catalog(Path::new("bms"), [song]);
+        let mut copy = lib.clone();
+        let other = "fedcba9876543210fedcba9876543210";
+        copy.add(Path::new("bms/B/b.bms"), Some(other));
+        let m = Mem::default();
+        m.put(Path::new("bms/B/b.bms"), b"#TITLE Else\n#ARTIST y\n", 0);
+        copy.read_chart(&m, Path::new("bms/B/b.bms"));
+        let want = |t: &str, a: &str| crate::hosts::Want {
+            title: t.into(),
+            artist: a.into(),
+        };
+        assert!(copy.owns(other) && !lib.owns(other));
+        assert!(copy.has_song(&want("Else", "y")) && !lib.has_song(&want("Else", "y")));
+        assert!(copy.has_song(&want("Song [X]", "x")) && lib.has_song(&want("Song [X]", "x")));
     }
 
     /// A player's records stand for the charts it cannot read (a web

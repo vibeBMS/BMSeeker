@@ -266,7 +266,7 @@ impl BmsLibrary {
 /// Whether the archive's title `t` is the song `want` (a chart's title,
 /// maybe with its chart's name after the song's: "AltMirrorBell Another").
 fn titled(t: &str, want: &str) -> bool {
-    use crate::placement::same_name;
+    use crate::titles::same_name;
     let (t, want) = (&plain(t), &plain(want));
     if same_name(t, want) {
         return true;
@@ -434,7 +434,7 @@ impl Task for ArchiveSearch {
                 let entries = crate::hosts::drive::listing(&String::from_utf8_lossy(&body));
                 let mut want = self.titles.clone();
                 want.extend(self.titles.iter().map(|t| crate::bmssearch::base_title(t)));
-                use crate::placement::same_artist;
+                use crate::titles::same_artist;
                 Next::Done(
                     entries
                         .iter()

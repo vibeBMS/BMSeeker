@@ -1,12 +1,10 @@
 //! How far a song's download has got, for whoever shows it: a [`Progress`]
 //! shared between the download (on its thread, or the web's callbacks) and
 //! the screen. The functions that download take it in their
-//! [`Context`](crate::hosts::Context) ([`Context::with_progress`]), else
-//! the thread's ([`scope`]).
+//! [`Context`](crate::hosts::Context) ([`Context::with_progress`]).
 //!
 //! [`Context::with_progress`]: crate::hosts::Context::with_progress
 
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -147,33 +145,6 @@ impl Progress {
     }
 }
 
-thread_local! {
-    static CURRENT: RefCell<Option<Arc<Progress>>> = const { RefCell::new(None) };
-}
-
-/// Run `f` with `p` as this thread's progress (what downloads report to
-/// when their [`Context`](crate::hosts::Context) names none). Prefer
-/// [`Context::with_progress`](crate::hosts::Context::with_progress): work
-/// moved to another thread loses this one.
-pub fn scope<R>(p: Option<Arc<Progress>>, f: impl FnOnce() -> R) -> R {
-    let old = CURRENT.with(|c| c.replace(p));
-    let r = f();
-    CURRENT.with(|c| *c.borrow_mut() = old);
-    r
-}
-
-/// This thread's progress, if any.
-pub(crate) fn current() -> Option<Arc<Progress>> {
-    CURRENT.with(|c| c.borrow().clone())
-}
-
-/// Set this thread's progress' stage (if any).
-pub fn stage(s: Stage) {
-    if let Some(p) = current() {
-        p.set_stage(s);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,12 +153,8 @@ mod tests {
     fn labels() {
         let p = Progress::new();
         assert_eq!(p.stage(), Stage::Waiting);
-        scope(Some(p.clone()), || {
-            stage(Stage::Finding);
-            current().unwrap().start_file(Some(4 << 20));
-            current().unwrap().add(1 << 20);
-        });
-        assert!(current().is_none());
+        p.start_file(Some(4 << 20));
+        p.add(1 << 20);
         assert_eq!(p.label(), "1.0 / 4.0 MB");
         assert_eq!(p.fraction(), Some(0.25));
         // where from
@@ -208,17 +175,9 @@ mod tests {
     #[test]
     fn a_contexts_progress() {
         use crate::hosts::Context;
-        let (mine, thread) = (Progress::new(), Progress::new());
+        let mine = Progress::new();
         let cx = Context::default().with_progress(mine.clone());
-        assert!(Context::default().progress().is_none());
-        scope(Some(thread.clone()), || {
-            // its own first; the thread's for a context without one
-            assert!(Arc::ptr_eq(&cx.progress().unwrap(), &mine));
-            assert!(Arc::ptr_eq(
-                &Context::default().progress().unwrap(),
-                &thread
-            ));
-        });
+        assert!(Arc::ptr_eq(cx.progress.as_ref().unwrap(), &mine));
         cx.stage(Stage::Unpacking);
         assert_eq!(mine.stage(), Stage::Unpacking);
         assert!(!cx.cancelled());

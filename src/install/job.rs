@@ -19,10 +19,10 @@ use crate::hosts::{Context, Fetch, Link, Resolver, Target, Want};
 use crate::library::Library;
 use crate::net::{Answer, BoxTask, NetError, Next, Request, Task};
 use crate::sources::{Query, Sources};
-use crate::unpack::Blob;
-use std::collections::{HashSet, VecDeque};
+use crate::unpack::{Blob, HEAD};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Something a job needs done.
@@ -31,13 +31,8 @@ pub enum Effect {
     /// A request (a page, an API): fed back as [`Fed::Http`].
     Http(Request),
     /// The file `target` downloaded (a MEGA file decrypted; natively into
-    /// `slot`): fed back as [`Fed::Downloaded`]. `any`: a file that is not
-    /// an archive is wanted too (if it is not a page).
-    Download {
-        target: Target,
-        slot: PathBuf,
-        any: bool,
-    },
+    /// `slot`): fed back as [`Fed::Downloaded`].
+    Download { target: Target, slot: PathBuf },
     /// A wait (before a request is tried again): fed back as [`Fed::Woke`].
     Sleep(Duration),
 }
@@ -58,7 +53,7 @@ pub struct Served {
     pub name: Option<String>,
     /// Where the download's redirects ended.
     pub at: Option<String>,
-    /// Its first bytes (4 KiB at most): what it is.
+    /// Its first bytes ([`HEAD`] at most): what it is.
     pub head: Vec<u8>,
 }
 
@@ -66,7 +61,7 @@ impl Served {
     /// `bytes` downloaded (`head` taken from them).
     pub fn bytes(bytes: Vec<u8>, name: Option<String>, at: Option<String>) -> Served {
         Served {
-            head: bytes[..bytes.len().min(4096)].to_vec(),
+            head: bytes[..bytes.len().min(HEAD)].to_vec(),
             blob: Blob::Bytes(bytes),
             name,
             at,
@@ -183,17 +178,17 @@ impl<T: Task> Job for TaskJob<T> {
         self.asked(next)
     }
     fn feed(&mut self, fed: Fed) -> Step<T::Output> {
-        let answer = match fed {
-            Fed::Http(Err(e)) => match self.again.after(&e) {
+        let answer = match (fed, &self.asked) {
+            (Fed::Http(Err(e)), _) => match self.again.after(&e) {
                 Some(wait) => return Step::Do(wait),
                 None => Err(e),
             },
-            Fed::Http(a) => a,
-            Fed::Woke => match &self.asked {
-                Some(r) => return Step::Do(Effect::Http(r.clone())),
-                None => Err("not a request's answer".into()),
-            },
-            Fed::Downloaded(_) => Err("not a request's answer".into()),
+            (Fed::Http(a), _) => a,
+            (Fed::Woke, Some(r)) => return Step::Do(Effect::Http(r.clone())),
+            (fed, _) => {
+                debug_assert!(false, "{fed:?}: no request's answer");
+                Err("not a request's answer".into())
+            }
         };
         let next = self.task.feed(answer);
         self.asked(next)
@@ -212,6 +207,12 @@ pub struct Got {
 /// Times a download's redirects may lead it to another host.
 pub(crate) const MOVES: u8 = 2;
 
+/// The files whose download failed, and why: another link that leads to
+/// one (a venue's page naming the links its event's index named, a
+/// source's link to the work a table links) fails at once, not after the
+/// host's timeout again.
+pub(crate) type Dead = Arc<Mutex<HashMap<crate::hosts::DownloadKey, NetError>>>;
+
 /// One link to its file ([`Got`]); a link that is a page for a browser:
 /// [`Fetch::Page`].
 pub struct Acquire {
@@ -219,15 +220,17 @@ pub struct Acquire {
     want: Option<Want>,
     any: bool,
     slot: PathBuf,
-    r: Resolver,
+    /// The link resolved through the hosts (its requests asked again
+    /// after a wait).
+    r: TaskJob<Resolver>,
+    /// The file being downloaded, once resolved.
     target: Option<Target>,
-    /// The resolver's request being answered (asked again after a wait).
-    asked: Option<Request>,
     moves: u8,
+    /// The download's waits.
     again: Again,
     /// The link is the file's own ([`Acquire::plain`]).
     plain: bool,
-    dead: super::entry::Dead,
+    dead: Dead,
 }
 
 impl Acquire {
@@ -242,13 +245,12 @@ impl Acquire {
         cx: &Context,
     ) -> Acquire {
         Acquire {
-            r: Resolver::new(link, want.clone(), cx),
+            r: TaskJob::new(Resolver::new(link, want.clone(), cx)),
             cx: cx.clone(),
             want,
             any,
             slot,
             target: None,
-            asked: None,
             moves: 0,
             again: Again::default(),
             plain: false,
@@ -258,7 +260,7 @@ impl Acquire {
 
     /// A file in `dead` failing at once; one whose download fails put
     /// there.
-    pub(crate) fn dead(self, dead: super::entry::Dead) -> Acquire {
+    pub(crate) fn dead(self, dead: Dead) -> Acquire {
         Acquire { dead, ..self }
     }
 
@@ -271,41 +273,32 @@ impl Acquire {
         }
     }
 
-    fn resolved(&mut self, next: Next<Result<Target, Fetch>>) -> Step<Result<Got, Fetch>> {
-        self.again = Again::default();
-        self.cx.at(self.r.link());
-        match next {
-            Next::Ask(r) => {
-                self.asked = Some(r.clone());
-                Step::Do(Effect::Http(r))
-            }
-            Next::Done(Ok(t)) => {
-                self.asked = None;
+    fn resolved(&mut self, step: Step<Result<Target, Fetch>>) -> Step<Result<Got, Fetch>> {
+        self.cx.at(self.r.task.link());
+        match step {
+            Step::Do(e) => Step::Do(e),
+            Step::Done(Ok(t)) => {
                 let failed = self.dead.lock().unwrap().get(&dead_key(&t)).cloned();
                 if let Some(e) = failed {
                     return self.failed(Fetch::Failed(e), None);
                 }
-                self.target = Some(t);
-                self.download()
+                self.again = Again::default();
+                self.download(t)
             }
-            Next::Done(Err(e)) => self.failed(e, None),
+            Step::Done(Err(e)) => self.failed(e, None),
         }
     }
 
-    fn download(&self) -> Step<Result<Got, Fetch>> {
-        let target = self.target.clone().expect("a target");
-        Step::Do(Effect::Download {
-            target,
-            slot: self.slot.clone(),
-            any: self.any,
-        })
+    fn download(&mut self, target: Target) -> Step<Result<Got, Fetch>> {
+        let slot = self.slot.clone();
+        self.target = Some(target.clone());
+        Step::Do(Effect::Download { target, slot })
     }
 
-    /// The file came: what it is.
-    fn served(&mut self, s: Served) -> Step<Result<Got, Fetch>> {
-        let t = self.target.take().expect("a target");
+    /// The file `t` came: what it is.
+    fn served(&mut self, s: Served, t: Target) -> Step<Result<Got, Fetch>> {
         let empty = s.head.is_empty();
-        let page = empty || s.head.trim_ascii_start().starts_with(b"<");
+        let page = empty || is_page(&s.head);
         let kept = self.plain || crate::unpack::sniff(&s.head).is_some();
         if !kept && !(self.any && !page) {
             // (a file wanted as it is that came empty is no page either)
@@ -331,13 +324,13 @@ impl Acquire {
         }))
     }
 
-    /// The file did not come: again after a wait, else as a page or a
+    /// The file `t` did not come: again after a wait, else as a page or a
     /// failure.
-    fn unserved(&mut self, u: Unserved) -> Step<Result<Got, Fetch>> {
-        if let Some(wait) = self.again(&u.error) {
+    fn unserved(&mut self, u: Unserved, t: Target) -> Step<Result<Got, Fetch>> {
+        if let Some(wait) = self.again.after(&u.error).filter(|_| !self.cx.cancelled()) {
+            self.target = Some(t);
             return Step::Do(wait);
         }
-        let t = self.target.take().expect("a target");
         if u.error == NetError::Cancelled {
             return self.failed(Fetch::Failed(u.error), None);
         }
@@ -351,12 +344,6 @@ impl Acquire {
         self.failed(Fetch::Failed(u.error), None)
     }
 
-    /// The wait before what failed with `e` is tried again (not once
-    /// cancelled).
-    fn again(&mut self, e: &NetError) -> Option<Effect> {
-        self.again.after(e).filter(|_| !self.cx.cancelled())
-    }
-
     /// What failed (`moved`: a page reached through redirects ended
     /// there): opened from where it ended, if a host there knows its way;
     /// else the next link its page named; else the end.
@@ -365,20 +352,20 @@ impl Acquire {
         let hosts = &self.cx.hosts;
         let rehost = moved.filter(|u| {
             let host = Link::parse(u, 0).and_then(|l| hosts.find(&l).map(|h| h.name()));
-            host.is_some_and(|h| h != "direct" && h != self.r.host())
+            host.is_some_and(|h| h != "direct" && h != self.r.task.host())
         });
         match (e, rehost) {
             (Fetch::Page, Some(u)) if !cancelled && self.moves < MOVES => {
                 self.moves += 1;
-                self.r = Resolver::new(&u, self.want.clone(), &self.cx);
-                let next = self.r.start();
-                self.resolved(next)
+                self.r = TaskJob::new(Resolver::new(&u, self.want.clone(), &self.cx));
+                let step = self.r.start();
+                self.resolved(step)
             }
             // a mirror the page named, when this file did not come
-            (_, _) if !cancelled && self.r.try_next() => {
+            (_, _) if !cancelled && self.r.task.try_next() => {
                 self.cx.stage(crate::progress::Stage::Finding);
-                let next = self.r.start();
-                self.resolved(next)
+                let step = self.r.start();
+                self.resolved(step)
             }
             (e, _) => Step::Done(Err(e)),
         }
@@ -389,37 +376,35 @@ fn dead_key(t: &Target) -> crate::hosts::DownloadKey {
     crate::hosts::DownloadKey::of(&t.url, None)
 }
 
+/// Whether a file's first bytes are a page's.
+fn is_page(head: &[u8]) -> bool {
+    head.trim_ascii_start().starts_with(b"<")
+}
+
 impl Job for Acquire {
     type Output = Result<Got, Fetch>;
     fn start(&mut self) -> Step<Self::Output> {
         self.cx.stage(crate::progress::Stage::Finding);
         if self.plain {
-            let url = self.r.link().to_string();
-            return self.resolved(Next::Done(Ok(Target::url(url))));
+            let url = self.r.task.link().to_string();
+            return self.resolved(Step::Done(Ok(Target::url(url))));
         }
-        let next = self.r.start();
-        self.resolved(next)
+        let step = self.r.start();
+        self.resolved(step)
     }
     fn feed(&mut self, fed: Fed) -> Step<Self::Output> {
-        match fed {
-            Fed::Http(Err(e)) => match self.again(&e) {
-                Some(wait) => Step::Do(wait),
-                None => {
-                    let next = self.r.feed(Err(e));
-                    self.resolved(next)
-                }
-            },
-            Fed::Http(a) => {
-                let next = self.r.feed(a);
-                self.resolved(next)
+        let step = match (fed, self.target.take()) {
+            (Fed::Downloaded(Ok(s)), Some(t)) => return self.served(s, t),
+            (Fed::Downloaded(Err(u)), Some(t)) => return self.unserved(u, t),
+            (Fed::Woke, Some(t)) => return self.download(t),
+            // (cancelled: not asked again after a wait)
+            (Fed::Http(Err(e)), None) if self.cx.cancelled() => {
+                let next = self.r.task.feed(Err(e));
+                self.r.asked(next)
             }
-            Fed::Downloaded(Ok(s)) => self.served(s),
-            Fed::Downloaded(Err(u)) => self.unserved(u),
-            Fed::Woke => match &self.asked {
-                Some(r) => Step::Do(Effect::Http(r.clone())),
-                None => self.download(),
-            },
-        }
+            (fed, _) => self.r.feed(fed),
+        };
+        self.resolved(step)
     }
 }
 
@@ -508,7 +493,6 @@ impl Files {
 impl Job for Files {
     type Output = Result<Vec<Got>, Missed>;
     fn start(&mut self) -> Step<Self::Output> {
-        self.got.clear();
         self.next()
     }
     fn feed(&mut self, fed: Fed) -> Step<Self::Output> {
@@ -534,7 +518,8 @@ struct Trying {
     link: String,
     key: crate::hosts::DownloadKey,
     check: bool,
-    chart: bool,
+    /// A chart's own link: the chart's file name.
+    chart: Option<String>,
     job: PathBuf,
 }
 
@@ -610,6 +595,7 @@ impl Install {
         self.batch = batch;
         self
     }
+
     /// This install's library and batch, for the song `q` from `own` and
     /// then `sources`.
     pub(super) fn again(&mut self, q: Query, own: Vec<String>, sources: Sources) {
@@ -653,13 +639,14 @@ impl Install {
             let check = self.checked && crate::chart::md5_key(&self.q.md5).is_some();
             let job = self.downloads.join(format!(".job-{}", super::unique()));
             self.store.create_dir_all(&job);
-            let chart = super::chart_link(&link);
-            let acquire = if chart {
-                Acquire::plain(&link, job.join(super::chart_name(&link)), &self.cx)
-            } else {
-                // the song's own link may be a pack of many songs: its archive
-                let want = (!self.q.diff).then(|| self.q.want.clone());
-                Acquire::new(&link, want, false, job.join("download"), &self.cx)
+            let chart = super::chart_link(&link).then(|| super::chart_name(&link));
+            let acquire = match &chart {
+                Some(name) => Acquire::plain(&link, job.join(name), &self.cx),
+                None => {
+                    // the song's own link may be a pack of many songs: its archive
+                    let want = (!self.q.diff).then(|| self.q.want.clone());
+                    Acquire::new(&link, want, false, job.join("download"), &self.cx)
+                }
             };
             let mut acquire = acquire.dead(self.batch.dead.clone());
             let step = acquire.start();
@@ -713,20 +700,15 @@ impl Install {
         };
         let done = match got {
             // a page where a chart was expected
-            Ok(g) if t.chart && g.head.trim_ascii_start().starts_with(b"<") => {
-                vec![Done::Page(t.link.clone())]
-            }
+            Ok(g) if t.chart.is_some() && is_page(&g.head) => vec![Done::Page(t.link)],
             Ok(g) => {
                 self.cx.stage(crate::progress::Stage::Unpacking);
-                let file = match t.chart {
-                    true => super::chart_name(&t.link),
-                    false => "download".into(),
-                };
+                let file = t.chart.unwrap_or_else(|| "download".into());
                 let mut req = super::request(&self.q, t.check, Some(file), &self.cx.config);
                 req.also = self.batch.also(&self.q);
                 super::take(&*self.store, g.blob, &req, &self.downloads, &mut self.lib)
             }
-            Err(Fetch::Page) => vec![Done::Page(t.link.clone())],
+            Err(Fetch::Page) => vec![Done::Page(t.link)],
             Err(Fetch::Failed(e)) => vec![Done::Failed(e.into())],
         };
         self.store.remove_dir(&t.job);

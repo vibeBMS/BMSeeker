@@ -501,7 +501,13 @@ impl Song {
 /// Whether `a` and `b` are one song's charts ([`Relation::Strong`]): a
 /// title, the same artist, and the titles alike (Dice ≥ [`STRONG`]).
 pub(crate) fn same_song(a: &Song, b: &Song) -> bool {
-    !a.title.is_empty() && a.artist == b.artist && dice(&a.title, &b.title) >= STRONG
+    a.artist == b.artist && alike(&a.title, &b.title)
+}
+
+/// Whether the title `a` (as compared, [`title_key`]) and `b` are one
+/// song's, by the same artist: `a` not empty, their Dice ≥ [`STRONG`].
+pub(crate) fn alike(a: &str, b: &str) -> bool {
+    !a.is_empty() && dice(a, b) >= STRONG
 }
 
 /// The (title, artist) pairs of a song's charts, as compared: the most
@@ -576,6 +582,63 @@ impl Profile {
             Relation::Unrelated
         }
     }
+}
+
+// Names (an archive's in a pack, a search's results) matched to a song's
+// title and artist by what they start with. Whether two charts are of one
+// song is [`same_song`].
+
+/// `name` without bracketed parts (`[ANOTHER]`, `(obj: ...)`, `【...】`),
+/// lower case, spaces collapsed.
+fn strip_brackets(name: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in name.chars() {
+        match c {
+            '[' | '(' | '【' | '（' | '［' | '<' | '〔' => depth += 1,
+            ']' | ')' | '】' | '）' | '］' | '>' | '〕' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.extend(c.to_lowercase()),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Titles match when one starts with the other once tags are gone
+/// ("Arcadia -★1-" and "Arcadia"); the shorter needs three characters.
+pub fn same_title(a: &str, b: &str) -> bool {
+    let (a, b) = (strip_brackets(a), strip_brackets(b));
+    let (short, long) = if a.chars().count() <= b.chars().count() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    short.chars().count() >= 3 && long.starts_with(&short)
+}
+
+/// The same title, but for its brackets (`Song [ANOTHER]` is `Song`).
+pub fn same_name(a: &str, b: &str) -> bool {
+    let a = strip_brackets(a);
+    !a.is_empty() && a == strip_brackets(b)
+}
+
+/// Artists match without the chart maker's part ("artist / obj: someone").
+pub fn same_artist(a: &str, b: &str) -> bool {
+    let clean = |s: &str| {
+        let s = s.to_lowercase();
+        let cut = ["/", "obj", "差分", "譜面"]
+            .iter()
+            .filter_map(|m| s.find(m))
+            .min()
+            .unwrap_or(s.len());
+        strip_brackets(&s[..cut])
+    };
+    let (a, b) = (clean(a), clean(b));
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long.starts_with(&short)
 }
 
 #[cfg(test)]

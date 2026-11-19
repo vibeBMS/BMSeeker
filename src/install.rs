@@ -168,22 +168,51 @@ pub fn request(
 }
 
 /// Charts waiting in `downloads` (their song came later) into the folders
-/// of `lib` they now belong in (what comes in added to it).
+/// of `lib` they now belong in (what comes in added to it). A chart `lib`
+/// has looked at before, its file as it was, stays where it is unless a
+/// folder that holds one of its sounds took files since (only such a
+/// folder can change where it belongs).
 pub(crate) fn place_waiting(fs: &dyn Store, downloads: &Path, lib: &mut Library) -> Vec<PathBuf> {
-    use crate::placement::{bring, is_chart, locate, Located, Rules};
+    use crate::placement::{
+        bring, chart_info, is_chart, locate_by, sounds_in, ChartInfo, Located, Rules,
+    };
+    let before = std::mem::take(&mut lib.waiting.changed);
+    let mut seen = std::mem::take(&mut lib.waiting.charts);
     let mut out = Vec::new();
     for e in fs.read_dir(downloads).unwrap_or_default() {
         if e.is_dir || !is_chart(&e.path) {
             continue;
         }
-        let at = match locate(fs, &e.path, lib, false, Rules::default()) {
-            Some((Located::Move(dir), _)) => bring(fs, &e.path, &dir).ok().flatten(),
+        let stamp = fs.stamp(&e.path);
+        let (info, again) = match seen.remove(&e.path).filter(|(s, _)| *s == stamp) {
+            Some((_, info)) => (info, true),
+            None => (chart_info(fs, &e.path), false),
+        };
+        let stays = |i: &ChartInfo| {
+            again
+                && ![&before, &lib.waiting.changed]
+                    .iter()
+                    .any(|d| sounds_in(fs, i, lib, d))
+        };
+        let at = match &info {
+            Some(i) if !stays(i) => match locate_by(fs, i, &[], downloads, lib, Rules::default()).0
+            {
+                Located::Move(dir) => Some(bring(fs, &e.path, &dir).ok().flatten()),
+                _ => None,
+            },
             _ => None,
         };
-        if let Some(at) = at {
-            let md5 = fs.read(&at).ok().map(|b| md5_hex(&b));
-            lib.add(&at, md5.as_deref());
-            out.push(at);
+        match at {
+            Some(Some(at)) => {
+                let md5 = fs.read(&at).ok().map(|b| md5_hex(&b));
+                lib.add(&at, md5.as_deref());
+                out.push(at);
+            }
+            // (to be tried again)
+            Some(None) => {}
+            None => {
+                lib.waiting.charts.insert(e.path, (stamp, info));
+            }
         }
     }
     out
@@ -270,6 +299,114 @@ mod tests {
                 println!("{var}: {done:?}");
             }
         }
+    }
+
+    /// A library of 5,000 songs' folders with numbered sounds (`01.wav`
+    /// ...), 100 charts waiting for their songs (each two of one song),
+    /// and 50 songs coming in one after another, the waiting charts placed
+    /// after each: the time of the 50 placings (with a digest of what was
+    /// placed, to compare). `cargo test place_waiting_after_installs --
+    /// --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement"]
+    fn place_waiting_after_installs() {
+        use crate::fs::{Entry, Fs, Mem};
+        use std::hash::{Hash, Hasher};
+        use std::io::Result;
+        /// `Mem` listing a folder by the range of paths below it.
+        #[derive(Default)]
+        struct Tree(Mem);
+        impl Fs for Tree {
+            fn read(&self, p: &Path) -> Result<Vec<u8>> {
+                self.0.read(p)
+            }
+            fn read_dir(&self, p: &Path) -> Result<Vec<Entry>> {
+                let files = self.0 .0.lock().unwrap();
+                let mut out: Vec<Entry> = Vec::new();
+                for k in files.range(p.to_path_buf()..).map(|(k, _)| k) {
+                    let Ok(rest) = k.strip_prefix(p) else {
+                        break;
+                    };
+                    let mut c = rest.components();
+                    let Some(first) = c.next() else { continue };
+                    let path = p.join(first);
+                    if out.last().is_none_or(|e| e.path != path) {
+                        let is_dir = c.next().is_some();
+                        out.push(Entry { path, is_dir });
+                    }
+                }
+                Ok(out)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+                self.0.rename(from, to)
+            }
+            fn stamp(&self, p: &Path) -> Option<(i64, u64)> {
+                self.0.stamp(p)
+            }
+            fn remove(&self, p: &Path) -> Result<()> {
+                self.0.remove(p)
+            }
+        }
+        impl Store for Tree {
+            fn create(&self, p: &Path, t: Option<i64>) -> Result<Box<dyn std::io::Write + '_>> {
+                self.0.create(p, t)
+            }
+            fn remove_dir(&self, p: &Path) {
+                self.0.remove_dir(p)
+            }
+        }
+        let t = Tree::default();
+        let put = |p: String, body: String| t.0.put(Path::new(&p), body.as_bytes(), 0);
+        let wavs = |n: usize| -> String {
+            (1..=n)
+                .map(|j| format!("#WAV{j:02} {j:02}.wav\n"))
+                .collect()
+        };
+        let song = |dir: &str, title: &str, artist: &str, sounds: usize| {
+            put(
+                format!("{dir}/song.bms"),
+                format!("#TITLE {title}\n#ARTIST {artist}\n"),
+            );
+            for j in 1..=sounds {
+                put(format!("{dir}/{j:02}.wav"), String::new());
+            }
+        };
+        for i in 0..5000 {
+            song(
+                &format!("bms/Song {i}"),
+                &format!("Song {i}"),
+                &format!("Artist {}", i % 300),
+                20 + i % 40,
+            );
+        }
+        for k in 0..100 {
+            let chart = format!(
+                "#TITLE New {} [X{}]\n#ARTIST A{}\n{}",
+                k / 2,
+                k % 2,
+                k / 2,
+                wavs(30)
+            );
+            put(format!("dl/w{k}.bms"), chart);
+        }
+        let mut lib = Library::new(Path::new("bms"));
+        let started = std::time::Instant::now();
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        let mut placed = 0;
+        for i in 0..50 {
+            let dir = format!("bms/New {i}");
+            song(&dir, &format!("New {i} [N]"), &format!("A{i}"), 30);
+            lib.add_folder(&t, Path::new(&dir));
+            let at = place_waiting(&t, Path::new("dl"), &mut lib);
+            placed += at.len();
+            at.hash(&mut digest);
+        }
+        println!(
+            "50 installs, 100 waiting, 5,000 folders: {:?}, {placed} placed, digest {:016x}",
+            started.elapsed(),
+            digest.finish()
+        );
+        assert_eq!(placed, 100);
     }
 
     #[test]
