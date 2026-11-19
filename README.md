@@ -4,6 +4,8 @@ A BMS library tool: it reads difficulty tables, downloads the songs your library
 and the tables give, unpacks them, and puts separate charts (差分) into their songs' folders.
 It is the library [vibeBMS](https://github.com/vibeBMS/vibe) uses, and comes as a command-line tool, a window and a
 web page that work without the game.
+It is inspired by [BeMusicSeeker](https://github.com/Neeted/bemusicseeker-unofficial-fork) (by rib_2_bit), whose
+library rules it follows ([Credits](#credits)).
 
 ## Get it
 
