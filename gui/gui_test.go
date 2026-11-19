@@ -25,6 +25,10 @@ case "$*" in
     echo "2 of 9 charts missing" >&2 ;;
   *"Song A"*) echo '{"title":"Song A","state":"added","path":"/lib/Song A","files":3}' ;;
   *"Song B"*) echo '{"title":"Song B","state":"page","link":"https://1drv.ms/b"}' ;;
+  *"Song C"*)
+    echo "bmseeker: third-party sources are on (...)" >&2
+    echo '{"refused":"api.bmssearch.net","code":"status","status":403,"error":"api.bmssearch.net refused BMSeeker (HTTP 403): skipped for the rest of this run"}'
+    echo '{"title":"Song C","state":"failed","code":"no_link","error":"no link"}' ;;
 esac
 `
 
@@ -90,6 +94,97 @@ func TestTablesToBrowser(t *testing.T) {
 			t.Fatal(tab, err)
 		}
 		tt.Frame()
+	}
+}
+
+// fakeApp is a window on the fake CLI, in a home of its own.
+func fakeApp(t *testing.T) (*app, string) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	// (beside the config folder's bmseeker/, not in its place)
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(fakeCLI), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BMSEEKER_CLI", filepath.Join(bin, "bmseeker"))
+	cliOnce = sync.Once{}
+	return newApp(dir), bin
+}
+
+func TestThirdPartyAsksFirst(t *testing.T) {
+	a, _ := fakeApp(t)
+	tt := ui.NewTester(a.view, 980, 720)
+	if err := tt.Click("Settings"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	box := "Third-party sources (mirrors, Ginger, Konmai, the community archive)"
+	// asked first: Cancel leaves it off
+	if err := tt.Click(box); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.settings.ThirdParty || !tt.HasText(thirdPartyTitle) || !tt.HasText("your responsibility") {
+		t.Fatalf("on %v, texts %q", a.settings.ThirdParty, tt.Texts())
+	}
+	if err := tt.Click("Cancel"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.settings.ThirdParty || thirdPartyAcknowledged() {
+		t.Fatal("turned on without an OK")
+	}
+	// OK turns it on, and is remembered
+	if err := tt.Click(box); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Turn on"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if !a.settings.ThirdParty || !thirdPartyAcknowledged() {
+		t.Fatalf("on %v, remembered %v, log %q", a.settings.ThirdParty, thirdPartyAcknowledged(), a.log)
+	}
+	// off, and on again: not asked again
+	for _, want := range []bool{false, true} {
+		if err := tt.Click(box); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+		if a.settings.ThirdParty != want || tt.HasText(thirdPartyTitle) {
+			t.Fatalf("want %v: on %v, texts %q", want, a.settings.ThirdParty, tt.Texts())
+		}
+	}
+}
+
+func TestRefusedHostsSkipped(t *testing.T) {
+	a, dir := fakeApp(t)
+	a.settings.ThirdParty = true
+	got := 0
+	err := a.cli([]string{"library", "install", "--title", "Song C"}, func(Record) { got++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the refusal is logged, not handed on; the CLI's third-party note left out
+	joined := strings.Join(a.log, "\n")
+	if got != 1 || !strings.Contains(joined, "api.bmssearch.net refused BMSeeker (HTTP 403)") ||
+		strings.Contains(joined, "third-party sources are on") {
+		t.Fatalf("records %d, log %q", got, joined)
+	}
+	// later runs skip it
+	if err := a.cli([]string{"library", "pending", "-L", "/lib"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := os.ReadFile(filepath.Join(dir, "args"))
+	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+	if strings.Contains(lines[0], "--skip-host") ||
+		!strings.Contains(lines[1], "--json --third-party --skip-host api.bmssearch.net library pending") {
+		t.Fatalf("args %q", args)
 	}
 }
 

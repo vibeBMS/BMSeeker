@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,13 @@ type app struct {
 	pages []page
 	prows ui.ListState
 	prow  int
+
+	// Asking before third-party sources are turned on
+	askThirdParty bool
+
+	// Hosts that refused BMSeeker in this session: the CLI skips them
+	// (--skip-host) in every later run.
+	refused []string
 
 	// What is running, and what was said
 	busy    map[string]bool
@@ -102,12 +110,39 @@ func (a *app) job(name string, f func() error) {
 	}()
 }
 
-// cli runs a command, noting what it says in the log.
+// cli runs a command, noting what it says in the log. A host that refuses
+// BMSeeker (a `refused` record) is noted and skipped for the rest of the
+// session; its record does not go to onRecord.
 func (a *app) cli(args []string, onRecord func(Record)) error {
+	var pre []string
 	if a.settings.ThirdParty {
-		args = append([]string{"--third-party"}, args...)
+		pre = append(pre, "--third-party")
 	}
-	return runCLI(args, onRecord, func(note string) { a.say("%s", note) })
+	a.mu.Lock()
+	for _, h := range a.refused {
+		pre = append(pre, "--skip-host", h)
+	}
+	a.mu.Unlock()
+	args = append(pre, args...)
+	return runCLI(args, func(r Record) {
+		if host := r.S("refused"); host != "" {
+			a.mu.Lock()
+			if !slices.Contains(a.refused, host) {
+				a.refused = append(a.refused, host)
+			}
+			a.mu.Unlock()
+			a.say("%s", r.S("error"))
+			return
+		}
+		if onRecord != nil {
+			onRecord(r)
+		}
+	}, func(note string) {
+		// (asked already, when it was turned on)
+		if !strings.HasPrefix(note, thirdPartyNotice) {
+			a.say("%s", note)
+		}
+	})
 }
 
 func (a *app) view(c *ui.Context) {
@@ -343,8 +378,21 @@ func (a *app) waitingView(c *ui.Context) {
 func (a *app) settingsView(c *ui.Context) {
 	a.libraryView(c)
 	ui.Text(c, "Downloads").Bold()
-	ui.Checkbox(c, &a.settings.ThirdParty, "Third-party mirrors (darksabun.club, bms.hexlataia.xyz, the bms.kyouko.moe archive)")
-	ui.Text(c, "Other people's copies of dead sites and uploaders. What is found by name goes in only if it holds the chart (MD5).")
+	on := a.settings.ThirdParty
+	if ui.Checkbox(c, &on, "Third-party sources (mirrors, Ginger, Konmai, the community archive)").Changed() {
+		if on && !thirdPartyAcknowledged() {
+			a.askThirdParty = true
+		} else {
+			a.settings.ThirdParty = on
+		}
+	}
+	if ui.AlertDialog(c, &a.askThirdParty, thirdPartyTitle, thirdPartyWarning, "Cancel", "Turn on") == 1 {
+		if err := acknowledgeThirdParty(); err != nil {
+			a.say("%v", err)
+		}
+		a.settings.ThirdParty = true
+	}
+	ui.Text(c, "Other people's copies of dead sites, uploaders and packages. What is found by name goes in only if it holds the chart (MD5).")
 	ui.Text(c, "Difficulty tables").Bold()
 	for i, t := range a.settings.Tables {
 		ui.Row(c).Gap(8).Children(func() {

@@ -3,6 +3,10 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"time"
+
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
@@ -33,3 +37,35 @@ func (a *app) libraryView(c *ui.Context) {
 
 // connect: the library is the folder chosen.
 func (a *app) connect() {}
+
+// thirdPartyFile records that the user said OK to thirdPartyWarning.
+func thirdPartyFile() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "bmseeker", "third-party-acknowledged"), nil
+}
+
+// thirdPartyAcknowledged reports whether the user said OK to
+// thirdPartyWarning before (on this computer).
+func thirdPartyAcknowledged() bool {
+	f, err := thirdPartyFile()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(f)
+	return err == nil
+}
+
+// acknowledgeThirdParty remembers that the user said OK.
+func acknowledgeThirdParty() error {
+	f, err := thirdPartyFile()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(f, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
+}

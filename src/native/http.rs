@@ -5,6 +5,7 @@
 use crate::hosts::{Target, STALL_MS};
 use crate::net::{disposition_name, Answer, NetError, Request};
 use crate::progress::Progress;
+use crate::refusal::{Refusal, Why};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -65,8 +66,9 @@ pub(super) fn send(r: &Request, user_agent: &str) -> Answer {
             .send(&body[..]),
     }
     .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(NetError::Status(res.status().as_u16()));
+    if !res.status().is_success() || challenged(&res) {
+        let at = ureq::ResponseExt::get_uri(&res).to_string();
+        return Err(refused(r.url(), &at, &mut res));
     }
     Ok(res
         .body_mut()
@@ -99,15 +101,13 @@ pub(super) fn download(
         DefaultConnector::new().chain(Watch(progress.cloned())),
         ureq::unversioned::resolver::DefaultResolver::default(),
     );
-    let mut req = agent.get(&target.url);
-    // Dropbox answers a browser with its page instead of the file
-    let link = crate::hosts::Link::parse(&target.url, 0);
-    if !link.is_some_and(|l| l.on("dropbox.com") || l.on("dropboxusercontent.com")) {
-        req = req.header("User-Agent", user_agent);
-    }
+    // (Dropbox sends the file to BMSeeker's own user agent; a browser's
+    // gets its page)
+    let req = agent.get(&target.url).header("User-Agent", user_agent);
     let mut res = req.call().map_err(failed)?;
-    if !res.status().is_success() {
-        return Err(NetError::Status(res.status().as_u16()));
+    if !res.status().is_success() || challenged(&res) {
+        let at = ureq::ResponseExt::get_uri(&res).to_string();
+        return Err(refused(&target.url, &at, &mut res));
     }
     let header = |k: &str| res.headers().get(k).map(|v| header_text(v.as_bytes()));
     let served = Served {
@@ -148,6 +148,58 @@ pub(super) fn download(
     }
     w.flush().map_err(|e| e.to_string())?;
     Ok(served)
+}
+
+/// The error of an answer that is no success (or [`challenged`]) to
+/// `url` (where its redirects ended `at`).
+fn refused(url: &str, at: &str, res: &mut ureq::http::Response<ureq::Body>) -> NetError {
+    let mitigated = res
+        .headers()
+        .get("cf-mitigated")
+        .map(|v| header_text(v.as_bytes()));
+    let status = res.status().as_u16();
+    // (a page's start is enough to tell)
+    let mut head = Vec::new();
+    let _ = res
+        .body_mut()
+        .as_reader()
+        .take(64 * 1024)
+        .read_to_end(&mut head);
+    answer_error(url, at, status, mitigated.as_deref(), &head)
+}
+
+/// The error of an answer of `status` to `url` (its redirects ending
+/// `at`), its `cf-mitigated` header and its first bytes `head`: a browser
+/// check (Cloudflare's, Google's CAPTCHA) is a refusal of the service
+/// (where it ended, but Google's `/sorry/` page: `url`'s); Google Drive's
+/// quota is said as such; else the status.
+pub(crate) fn answer_error(
+    url: &str,
+    at: &str,
+    status: u16,
+    mitigated: Option<&str>,
+    head: &[u8],
+) -> NetError {
+    if crate::refusal::blocked(mitigated, head) {
+        let from = if at.contains("google.com/sorry") {
+            url
+        } else {
+            at
+        };
+        return NetError::Refused(Refusal::of(from, Why::Challenge));
+    }
+    if crate::hosts::drive_quota(head) {
+        return NetError::Other(crate::hosts::DRIVE_QUOTA.into());
+    }
+    NetError::Status(status)
+}
+
+/// Whether Cloudflare answered with a browser check (`cf-mitigated:
+/// challenge`), whatever the status.
+fn challenged(res: &ureq::http::Response<ureq::Body>) -> bool {
+    res.headers()
+        .get("cf-mitigated")
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"challenge"))
 }
 
 /// What a download's server said of it.

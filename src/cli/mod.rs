@@ -20,6 +20,7 @@ use crate::fs::Store;
 use crate::hosts::{Context, Want};
 use crate::install::job::{run_job, Driver, TaskJob};
 use crate::net::Task;
+use crate::refusal::Guarded;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +46,10 @@ pub struct Cli {
     /// out.
     #[arg(long, global = true)]
     name_folders: bool,
+    /// A host that refused BMSeeker in an earlier run of this session (the
+    /// window's): not asked in this one either. More than once for more.
+    #[arg(long = "skip-host", global = true, value_name = "HOST")]
+    skip_hosts: Vec<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -79,8 +84,27 @@ impl Cli {
         }
     }
 
-    /// Run the command.
+    /// Run the command: its requests kept to the run's refusals (a
+    /// service that refused is not asked again; each refusal written as a
+    /// `refused` record when it comes).
     pub fn run(self, r: &Run) -> Result<(), String> {
+        for h in &self.skip_hosts {
+            r.cx.refused.earlier(h);
+        }
+        if r.cx.config.third_party {
+            r.out.note(THIRD_PARTY_NOTICE);
+        }
+        let out = r.out.clone();
+        let guarded = Guarded {
+            net: r.net,
+            refusals: r.cx.refused.clone(),
+            progress: r.cx.progress(),
+            told: Box::new(move |refusal| refused(&out, refusal)),
+        };
+        let r = &Run {
+            net: &guarded,
+            ..r.clone()
+        };
         match self.command {
             Command::Link(c) => link::link(r, c),
             Command::Song(c) => link::song(r, c),
@@ -90,6 +114,26 @@ impl Cli {
             Command::Event(c) => event::event(r, c),
         }
     }
+}
+
+/// What the tool says once a run when third parties' copies are used
+/// (`--third-party`, the setting).
+pub const THIRD_PARTY_NOTICE: &str = "bmseeker: third-party sources are on (other people's \
+copies: mirrors, Ginger, Konmai, the community archive); keeping to their sites' terms and to \
+the copyright holders' rights is up to you";
+
+/// A service that refused: a `refused` record (`{"refused": host,
+/// "code", "status"?, "error"}`), and a note.
+fn refused(out: &Out, r: &crate::refusal::Refusal) {
+    let mut v = serde_json::json!({
+        "refused": r.host,
+        "code": r.code(),
+        "error": r.to_string(),
+    });
+    if let Some(s) = r.status() {
+        v["status"] = s.into();
+    }
+    out.record(v, || format!("refused: {r}"));
 }
 
 /// A song looked for: by its chart's MD5, its title and artist.

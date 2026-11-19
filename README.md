@@ -12,7 +12,7 @@ As a library: `bmseeker = { git = "https://github.com/vibeBMS/BMSeeker" }` (the 
 `clap`, comes in only with the `cli` feature).
 
 ```text
-bmseeker [--json] [--config FILE] [--third-party] [--name-folders] <noun> <verb> ...
+bmseeker [--json] [--config FILE] [--third-party] [--name-folders] [--skip-host HOST]... <noun> <verb> ...
 
 link resolve <link>... [-t title -a artist]          what a link leads to (a file's URL and name / a page that
                                                      needs a browser / an error), without downloading
@@ -45,8 +45,22 @@ event check [works FILE|-] [--known FILE] [--days N] [--minutes M] [--search]
 With `--json`, every command writes JSON Lines (one record a line, as it goes). The `event` commands always do, and
 read records from a file or `-` (stdin): JSON Lines, a JSON array, or an object by key. Notes for people go to
 stderr only. A record of a failure has its `"error"` for a person and a `"code"` for a program: `status`, `stalled`,
-`cancelled`, `gone`, `other` (the download), `not_the_chart`, `no_chart_link`, `no_link`, `downloaded` (the install),
-`unpack`.
+`cancelled`, `gone`, `refused`, `other` (the download), `not_the_chart`, `no_chart_link`, `no_link`, `downloaded` (the
+install), `unpack`.
+
+**Refusals.** A service that answers HTTP 429, or 401, 403 or 451 (from an API or a page BMSeeker reads: BMS SEARCH,
+Stella, manbow and the venues, Ginger, Konmai, tables, mirrors), or a browser check whatever the status (a Cloudflare
+challenge page, a Turnstile widget: `cf-mitigated: challenge`, "Just a moment...", `challenges.cloudflare.com`;
+Google's "unusual traffic" CAPTCHA, `/sorry/`), or whose API says it limits requests (MEGA's `-4`), is not asked again for the rest of the run: no other query, no other URL on that host,
+no other headers, no waiting and trying again (a `Retry-After` is kept to by not coming back in this run). The run goes
+on with the other sources and hosts. A file host's (Google Drive's, MEGA's, Dropbox's, MediaFire's, pixeldrain's) 401,
+403 or 451 is that file's or link's failure only (Google Drive's quota, a file shared privately), as its 404 is. A host
+counts without `www.`; Google Drive's, MEGA's, Dropbox's, MediaFire's,
+pixeldrain's and BMS SEARCH's hosts count as one each. Each refusal is written once, when it comes, as a record
+`{"refused": host, "code": "status|challenge|rate_limited|earlier", "status"?, "error"}` (in text: `refused: ...`); a
+download that its host refused fails with the code `refused`. `--skip-host HOST` (more than once for more) skips a
+host that refused in an earlier run (the window passes those of its session). The `event` commands leave `refused`
+records out of the records they read.
 
 ```text
 work   {"num","title","artist","team","kind","size_kb","page","links":[{"label","url"}],"main":[url],"extra":[[url]],"review"?, ...}
@@ -111,8 +125,8 @@ What a download holds is sorted before anything goes into the library:
   the URL without its scheme and `#` part; a folder's link with the song looked for in it). A file whose download
   failed is not tried again that run, whatever link leads to it.
 - **Links on the way.** A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker knows (Dropbox, Google
-  Drive...) is opened from there. A server's passing failure (HTTP 429, 502, 503, 504) on a download or a request
-  (a page, an API) is tried again twice, after 3 and 10 seconds. A server has 15 seconds to take the connection
+  Drive...) is opened from there. A server's passing failure (HTTP 502, 503, 504) on a download or a request
+  (a page, an API) is tried again twice, after 3 and 10 seconds (a refusal never is: above). A server has 15 seconds to take the connection
   and 20 (a page, an API) or 30 (a download) to begin its answer; a download then 60 without data. Google
   Drive's "Quota exceeded" (a file downloaded too often lately) is reported as such: it passes within a day.
 
@@ -130,6 +144,13 @@ Settings (`--config`, `$BMSEEKER_CONFIG`, `<config folder>/bmseeker/config.json`
 `downloads` (the folder in a library where downloads wait), `min_coverage`, `reinstall`, `folder_naming`,
 `folder_name_format`, `sjis_only`.
 
+BMSeeker says who it is: every request it makes natively carries the `User-Agent`
+`BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)` (`config::USER_AGENT`), never a browser's. An app that
+embeds it puts its own product first (`config::user_agent_of("vibeBMS/0.1.0")`:
+`vibeBMS/0.1.0 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker)`); the `user_agent` setting changes it. In a web
+page no program may set a `User-Agent`: requests to hosts that send CORS headers carry the browser's own, and those
+through the CORS proxy the proxy's.
+
 A song new to the library gets a folder named after the song's title (a table's), or the archive. With
 `--name-folders` (setting `"folder_naming": true`; off by default) it is named after its charts as BeMusicSeeker names
 one: `folder_name_format` (default `[%ARTIST%] %TITLE%`) with what the charts' artists and titles share (their chart
@@ -141,6 +162,41 @@ left out (`[alpha] Song/song.bms`, not `[alpha] Song/Song_v1/song.bms`), and a s
 folder name (a chart of the same title and artist there) goes into that folder, not a second one.
 
 `cargo run --features cli -- table missing https://stellabms.xyz/sl/table.html -L ~/bms -l 0`
+
+## Third-party sources and disclaimer
+
+Where BMSeeker downloads from, by default:
+
+- **The authors' and the services' own:** the links difficulty tables give (the tables' pages and data, and the
+  links in them to where authors put their songs: Google Drive, Dropbox, MediaFire, MEGA, pixeldrain, an author's own
+  site), the Stella uploader's list (stellabms.xyz), BMS SEARCH's public API (api.bmssearch.net), and event venues
+  (manbow, venue.bmssearch.net). For a manbow event's work, the BMS event mirror
+  ([vibeBMS/BMS](https://github.com/vibeBMS/BMS), kept by BMSeeker's authors) is asked first; the setting
+  `"mirror_catalog": ""` turns it off.
+- **Third parties' copies**, off unless `--third-party`, the setting `"third_party": true` or the window's
+  "Third-party sources" is on: other people's mirrors of dead sites and uploaders (darksabun.club,
+  bms.hexlataia.xyz), packages found by a chart's MD5 on Ginger (gingerrush.com) and Konmai (bms.alvorna.com), and the
+  community archive ("BMS Library" on Google Drive). These are not the authors' links; BMSeeker does not check where
+  their files came from, only that what they bring holds the chart wanted.
+
+How BMSeeker behaves towards these sites:
+
+- It identifies itself: natively every request carries its own `User-Agent`
+  (`BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)`), never a browser's. In a web page the browser's
+  `User-Agent` is sent (to hosts reached through the CORS proxy, the proxy's).
+- It honours refusals and rate limits: a service that answers 429, 401/403/451 (but a file host's for one file), or
+  with a browser check (a Cloudflare challenge, Turnstile, Google's CAPTCHA), is not asked again for the rest of the run, and the refusal is reported
+  (see Refusals, above). It does not retry with other queries, other addresses or other headers.
+- It does not bypass access controls: no solving or evading of challenges, CAPTCHAs, logins or download limits.
+  A link that needs a browser is shown to the user in one (the window's web view presses a share page's Download
+  button once, as a person would; the web page opens it in a tab).
+
+BMSeeker hosts no songs or charts, and is not affiliated with, endorsed by or operated by any of the services above.
+Users are responsible for complying with each site's terms of use and with the rights of the copyright holders of what
+they download.
+
+A site operator who wants BMSeeker not to use their site, or to use it differently, can say so in the
+[issue tracker](https://github.com/vibeBMS/BMSeeker/issues).
 
 ## Window (`gui/`)
 
@@ -159,10 +215,13 @@ bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, 
 - **Waiting**: separate charts that came before their songs, and the likeliest folder.
 - **Browser**: links that only give a page (OneDrive ...). Opening one shows it in a web view, which presses its
   Download button; what it downloads goes into the library.
-- **Settings**: the BMS folder, third-party mirrors (`--third-party`), the difficulty tables (forgotten when the window
-  closes), and the version.
+- **Settings**: the BMS folder, third-party sources (`--third-party`), the difficulty tables (forgotten when the window
+  closes), and the version. Turning third-party sources on asks first, once: what they are, and that keeping to those
+  sites' terms and to the copyright holders' rights is the user's responsibility; only after OK are they on. The OK is
+  remembered (`<config folder>/bmseeker/third-party-acknowledged`; in a web page, the browser's `localStorage`).
 
-The window runs the CLI with `--json` and reads its records. The CLI it carries is unpacked into the user's cache
+The window runs the CLI with `--json` and reads its records. A host that refused BMSeeker (a `refused` record) is
+noted in the log and skipped by every later run while the window is open (`--skip-host`). The CLI it carries is unpacked into the user's cache
 folder on first use (`$BMSEEKER_CLI` if set; a development build without it uses `bmseeker` on the PATH).
 
 Build: `gui/build.sh` (builds the CLI with `cargo build --release --features cli` into `gui/bin/`, then `go build`;

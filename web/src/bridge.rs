@@ -227,4 +227,80 @@ mod tests {
         let version = concat!("bmseeker ", env!("CARGO_PKG_VERSION"));
         assert_eq!((code, notes[0].as_str()), (0, version));
     }
+
+    /// Answers 403 on refusing.example, else 404; notes what was asked.
+    struct Refusing(RefCell<Vec<String>>);
+
+    impl Driver for Refusing {
+        fn perform(&self, effect: Effect) -> Fed {
+            let url = match &effect {
+                Effect::Http(r) => r.url().to_string(),
+                Effect::Download { target, .. } => target.url.clone(),
+                Effect::Sleep(_) => return Fed::Woke,
+            };
+            self.0.borrow_mut().push(url.clone());
+            let n = if url.contains("refusing.example") {
+                403
+            } else {
+                404
+            };
+            match effect {
+                Effect::Http(_) => Fed::Http(Err(NetError::Status(n))),
+                _ => Fed::Downloaded(Err(NetError::Status(n).into())),
+            }
+        }
+    }
+
+    #[test]
+    fn refusals_are_kept_and_told() {
+        let net = Refusing(RefCell::default());
+        let (_, records, notes) = lines(
+            &[
+                "--json",
+                "--third-party",
+                "--skip-host",
+                "earlier.example",
+                "library",
+                "install",
+                "-L",
+                "/bms",
+                "--title",
+                "X",
+                "--own-links",
+                "https://refusing.example/a.zip",
+                "https://refusing.example/b.zip",
+                "https://earlier.example/c.zip",
+                "https://h.example/d.zip",
+            ],
+            library(),
+            &net,
+        );
+        // each host asked once at most: the refusing one once, the one
+        // that refused earlier not at all
+        assert_eq!(
+            *net.0.borrow(),
+            ["https://refusing.example/a.zip", "https://h.example/d.zip"]
+        );
+        // told once, as a record (a refusal is no page)
+        let refused: Vec<_> = records
+            .iter()
+            .filter(|r| r.get("refused").is_some())
+            .collect();
+        assert_eq!(refused.len(), 1, "{records:?}");
+        assert_eq!(refused[0]["refused"], "refusing.example");
+        assert_eq!(refused[0]["status"], 403);
+        assert_eq!(refused[0]["code"], "status");
+        assert!(refused[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("skipped for the rest of this run"));
+        assert!(!records
+            .iter()
+            .any(|r| r["state"] == "page" && r["link"].as_str().unwrap().contains("refusing")));
+        // the third-party notice, once
+        let notice = notes
+            .iter()
+            .filter(|n| n.as_str() == bmseeker::cli::THIRD_PARTY_NOTICE);
+        assert_eq!(notice.count(), 1, "{notes:?}");
+    }
 }

@@ -42,6 +42,9 @@ pub struct Progress {
     /// Where it is looking or downloading from ("pixeldrain.net", a
     /// source's name), for the person waiting.
     at: Mutex<String>,
+    /// Services that refused BMSeeker and are skipped
+    /// ([`crate::refusal`]).
+    refused: Mutex<Vec<String>>,
 }
 
 /// What a cancelled download fails with.
@@ -100,15 +103,34 @@ impl Progress {
         }
     }
 
+    /// `host` refused BMSeeker (or refused it earlier): it is skipped.
+    pub fn refused(&self, host: &str) {
+        let mut all = self.refused.lock().unwrap();
+        if !all.iter().any(|h| h == host) {
+            all.push(host.to_string());
+        }
+    }
+
+    /// The services that refused and were skipped, for the person waiting.
+    pub fn refusals(&self) -> Vec<String> {
+        self.refused.lock().unwrap().clone()
+    }
+
     /// A short line for a person: "12.3 / 40.0 MB · pixeldrain.net",
-    /// "Finding the file… (ginger)", "Unpacking…".
+    /// "Finding the file… (ginger)", "Unpacking…"; while finding, the
+    /// services that refused: "· api.bmssearch.net refused, skipped".
     pub fn label(&self) -> String {
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
         let at = self.at.lock().unwrap();
+        let refused = self.refused.lock().unwrap();
+        let skipped = match refused.is_empty() {
+            true => String::new(),
+            false => format!(" · {} refused, skipped", refused.join(", ")),
+        };
         match self.stage() {
             Stage::Waiting => "Waiting…".into(),
-            Stage::Finding if at.is_empty() => "Finding the file…".into(),
-            Stage::Finding => format!("Finding the file… ({at})"),
+            Stage::Finding if at.is_empty() => format!("Finding the file…{skipped}"),
+            Stage::Finding => format!("Finding the file… ({at}){skipped}"),
             Stage::Downloading => {
                 let size = match self.bytes() {
                     (got, Some(t)) => format!("{:.1} / {:.1} MB", mb(got), mb(t)),
@@ -174,6 +196,13 @@ mod tests {
         p.set_stage(Stage::Finding);
         p.set_at("ginger");
         assert_eq!(p.label(), "Finding the file… (ginger)");
+        p.refused("bmssearch.net");
+        p.refused("bmssearch.net");
+        assert_eq!(p.refusals(), ["bmssearch.net"]);
+        assert_eq!(
+            p.label(),
+            "Finding the file… (ginger) · bmssearch.net refused, skipped"
+        );
     }
 
     #[test]

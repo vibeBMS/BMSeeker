@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Sent with requests (hosts answer browsers better).
+    /// The `User-Agent` sent with every request natively: BMSeeker's own
+    /// ([`USER_AGENT`]; an app that embeds BMSeeker puts its product
+    /// first: [`user_agent_of`]). BMSeeker does not pass itself off as a
+    /// browser. A web page cannot set it: there the browser sends its own
+    /// (and the CORS proxy's requests carry the proxy's).
     pub user_agent: String,
     /// The BMS event mirror's list of events (vibeBMS/BMS `events.json`):
     /// a manbow work it holds is downloaded from there. Empty: none.
@@ -72,6 +76,25 @@ pub struct Config {
     /// Such a folder's name has only characters Shift_JIS has (LR2 on
     /// Windows).
     pub sjis_only: bool,
+}
+
+/// BMSeeker's own `User-Agent`: `BMSeeker/<version>
+/// (+https://github.com/vibeBMS/BMSeeker)`, the default
+/// [`Config::user_agent`].
+pub const USER_AGENT: &str = concat!(
+    "BMSeeker/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/vibeBMS/BMSeeker)"
+);
+
+/// The `User-Agent` of an app that embeds BMSeeker: its `product`
+/// (`vibeBMS/0.1.0`) before BMSeeker's own, as
+/// `vibeBMS/0.1.0 BMSeeker/0.1.0 (+https://github.com/vibeBMS/BMSeeker)`.
+pub fn user_agent_of(product: &str) -> String {
+    match product.trim() {
+        "" => USER_AGENT.to_string(),
+        p => format!("{p} {USER_AGENT}"),
+    }
 }
 
 /// The [`Config::sources`] that are third parties' copies.
@@ -157,7 +180,7 @@ impl Uploader {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36".into(),
+            user_agent: USER_AGENT.into(),
             mirror_catalog: "https://raw.githubusercontent.com/vibeBMS/BMS/main/events.json".into(),
             manbow: "https://manbow.nothing.sh/event/event.cgi".into(),
             bmssearch_api: "https://api.bmssearch.net/v1".into(),
@@ -279,6 +302,25 @@ mod tests {
             .all(|s| c.uses(s)));
         assert_eq!(c.manbow, Config::default().manbow);
         assert!(serde_json::from_str::<Config>("{").is_err());
+    }
+
+    #[test]
+    fn user_agents() {
+        let own = Config::default().user_agent;
+        assert_eq!(
+            own,
+            format!(
+                "BMSeeker/{} (+https://github.com/vibeBMS/BMSeeker)",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        // no browser's name in it
+        assert!(!own.contains("Mozilla") && !own.contains("Chrome"));
+        assert_eq!(
+            user_agent_of("vibeBMS/0.1.0"),
+            format!("vibeBMS/0.1.0 {own}")
+        );
+        assert_eq!(user_agent_of(" "), own);
     }
 
     #[test]

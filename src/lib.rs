@@ -59,6 +59,7 @@ pub mod placement;
 #[cfg(all(feature = "tools", not(target_arch = "wasm32")))]
 pub mod probe;
 pub mod progress;
+pub mod refusal;
 pub mod sources;
 pub mod table;
 #[cfg(any(test, feature = "testkit"))]

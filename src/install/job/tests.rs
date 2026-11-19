@@ -83,7 +83,7 @@ fn status(n: u16) -> Result<Served, Unserved> {
     Err(NetError::Status(n).into())
 }
 
-fn acquire(link: &str, cx: &Context, d: &Canned) -> Result<Got, Fetch> {
+fn acquire(link: &str, cx: &Context, d: &dyn Driver) -> Result<Got, Fetch> {
     run_job(&mut Acquire::new(link, None, false, "slot".into(), cx), d)
 }
 
@@ -159,8 +159,8 @@ fn a_page_is_a_page() {
 fn passing_failures_tried_again() {
     let link = "http://e.test/a.zip";
     let d = Canned::default();
-    d.file(link, status(429));
     d.file(link, status(503));
+    d.file(link, status(504));
     d.file(link, zip_served());
     assert!(acquire(link, &Context::default(), &d).is_ok());
     let fetched = format!("download {link}");
@@ -177,7 +177,14 @@ fn passing_failures_tried_again() {
         matches!(got, Err(Fetch::Failed(NetError::Status(502)))),
         "{got:?}"
     );
-    // a file that is not there: not again
+    // a file that is not there, a refusal: not again
+    let d = Canned::default();
+    d.file(link, status(429));
+    assert!(matches!(
+        acquire(link, &Context::default(), &d),
+        Err(Fetch::Failed(NetError::Status(429)))
+    ));
+    assert_eq!(steps(&d), std::slice::from_ref(&fetched));
     let d = Canned::default();
     d.file(link, status(404));
     assert!(matches!(
@@ -519,7 +526,7 @@ fn install(
     sources: crate::sources::Sources,
     batch: crate::install::Batch,
     cx: &Context,
-    d: &Canned,
+    d: &dyn Driver,
 ) -> Installed {
     let store: Arc<dyn crate::fs::Store + Send + Sync> = m.clone();
     let lib = crate::library::Library::scan(&**m, Path::new("bms"));
@@ -743,4 +750,197 @@ fn dead_files_tried_once() {
         "{:?}",
         out.done
     );
+}
+
+/// `d` kept to `cx`'s refusals, as a run's driver is.
+fn guarded<'a>(d: &'a Canned, cx: &Context) -> crate::refusal::Guarded<'a> {
+    crate::refusal::Guarded {
+        net: d,
+        refusals: cx.refused.clone(),
+        progress: cx.progress(),
+        told: Box::new(|_| {}),
+    }
+}
+
+/// An API source that answers 403 is not asked again in the run: not for
+/// another song either; the next source is.
+#[test]
+fn a_refusing_source_is_not_asked_again() {
+    use crate::install::{Batch, Done};
+    let config = crate::config::Config {
+        sources: vec!["bmssearch".into()],
+        ..Default::default()
+    };
+    let api = config.bmssearch_api.clone();
+    let (a, b) = ("a".repeat(32), "b".repeat(32));
+    let d = Canned {
+        http: vec![(format!("{api}/patterns/{a}"), Err(NetError::Status(403)))],
+        ..Default::default()
+    };
+    let cx = Context::new(config.clone());
+    let net = guarded(&d, &cx);
+    for md5 in [&a, &b] {
+        let mut sources = crate::sources::Sources::from_config(&config, Vec::new());
+        sources.push(Box::new(Known(
+            vec!["http://found.test/x.zip".into()],
+            true,
+        )));
+        let out = install(
+            &Arc::new(crate::fs::Mem::default()),
+            &song_query(md5),
+            &[],
+            sources,
+            Batch::default(),
+            &cx,
+            &net,
+        );
+        assert!(matches!(&out.done[..], [Done::Failed(_)]), "{:?}", out.done);
+    }
+    let asked: Vec<String> = steps(&d)
+        .into_iter()
+        .filter(|s| s.contains("bmssearch"))
+        .collect();
+    assert_eq!(asked, [format!("get {api}/patterns/{a}")]);
+    // the next source was asked both times
+    let found = steps(&d)
+        .iter()
+        .filter(|s| s.contains("found.test"))
+        .count();
+    assert_eq!(found, 2);
+    let refused = cx.refused.all();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].host, "bmssearch.net");
+    assert_eq!(refused[0].status(), Some(403));
+}
+
+/// A file host that answers 429 is not asked again in the run (no wait,
+/// no other file there), and is no page for a browser.
+#[test]
+fn a_refusing_file_host_is_skipped() {
+    let d = Canned::default();
+    d.file("http://busy.test/1.zip", status(429));
+    d.file("http://busy.test/2.zip", zip_served());
+    d.file("http://other.test/3.zip", zip_served());
+    let cx = Context {
+        failures_are_pages: true,
+        ..Context::default()
+    };
+    let net = guarded(&d, &cx);
+    let got = acquire("http://busy.test/1.zip", &cx, &net);
+    assert!(
+        matches!(&got, Err(Fetch::Failed(NetError::Refused(r))) if r.host == "busy.test"),
+        "{got:?}"
+    );
+    assert!(matches!(
+        acquire("http://busy.test/2.zip", &cx, &net),
+        Err(Fetch::Failed(NetError::Refused(_)))
+    ));
+    assert!(acquire("http://other.test/3.zip", &cx, &net).is_ok());
+    assert_eq!(
+        steps(&d),
+        [
+            "download http://busy.test/1.zip",
+            "download http://other.test/3.zip"
+        ]
+    );
+}
+
+/// A browser check where the file should be: a refusal of its host.
+#[test]
+fn a_challenge_page_is_a_refusal() {
+    let d = Canned::default();
+    let check = b"<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>";
+    d.file(
+        "http://checked.test/a.zip",
+        Ok(Served::bytes(check.to_vec(), None, None)),
+    );
+    let cx = Context::default();
+    let got = acquire("http://checked.test/a.zip", &cx, &guarded(&d, &cx));
+    assert!(
+        matches!(&got, Err(Fetch::Failed(NetError::Refused(r)))
+            if r.why == crate::refusal::Why::Challenge),
+        "{got:?}"
+    );
+}
+
+const DRIVE_QUOTA_PAGE: &[u8] = b"<!DOCTYPE html><html><head><title>Google Drive - Quota exceeded</title></head>\
+<body><p>Too many users have viewed or downloaded this file recently. Please try accessing the file again later.</p></body></html>";
+
+const GOOGLE_SORRY_PAGE: &[u8] =
+    b"<html><head><title>https://drive.usercontent.google.com/</title></head><body>\
+<div>Our systems have detected unusual traffic from your computer network.</div>\
+<form id=\"captcha-form\" action=\"index\" method=\"post\"></form></body></html>";
+
+/// Google Drive's file at `id` (where its link leads).
+fn drive_file(id: &str) -> String {
+    format!("https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t")
+}
+
+/// A Google Drive file's 403 (its quota, its sharing) is that file's: the
+/// next Drive file is still tried.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_drive_files_403_is_its_own() {
+    use crate::native::http::answer_error;
+    let d = Canned::default();
+    let quota = drive_file("Q1");
+    let error = answer_error(&quota, &quota, 403, None, DRIVE_QUOTA_PAGE);
+    assert_eq!(error, NetError::Other(crate::hosts::DRIVE_QUOTA.into()));
+    d.file(&quota, Err(error.into()));
+    // shared privately ("You need access")
+    d.file(&drive_file("P2"), status(403));
+    d.file(&drive_file("F3"), zip_served());
+    let cx = Context::default();
+    let net = guarded(&d, &cx);
+    let link = |id: &str| format!("https://drive.google.com/file/d/{id}/view");
+    let got = acquire(&link("Q1"), &cx, &net);
+    assert!(
+        matches!(&got, Err(Fetch::Failed(NetError::Other(e))) if e == crate::hosts::DRIVE_QUOTA),
+        "{got:?}"
+    );
+    assert!(matches!(
+        acquire(&link("P2"), &cx, &net),
+        Err(Fetch::Failed(NetError::Status(403)))
+    ));
+    assert!(acquire(&link("F3"), &cx, &net).is_ok());
+    assert_eq!(steps(&d).len(), 3, "{:?}", steps(&d));
+    assert!(cx.refused.all().is_empty());
+}
+
+/// Google's "unusual traffic" CAPTCHA (`/sorry/`) refuses all of Drive.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn googles_sorry_page_refuses_drive() {
+    use crate::native::http::answer_error;
+    let d = Canned::default();
+    let first = drive_file("A1");
+    let sorry = "https://www.google.com/sorry/index?continue=https://drive.usercontent.google.com/";
+    let error = answer_error(&first, sorry, 429, None, GOOGLE_SORRY_PAGE);
+    d.file(
+        &first,
+        Err(Unserved {
+            error,
+            at: Some(sorry.into()),
+        }),
+    );
+    d.file(&drive_file("B2"), zip_served());
+    let cx = Context::default();
+    let net = guarded(&d, &cx);
+    let link = |id: &str| format!("https://drive.google.com/file/d/{id}/view");
+    let got = acquire(&link("A1"), &cx, &net);
+    assert!(
+        matches!(&got, Err(Fetch::Failed(NetError::Refused(r)))
+            if r.host == "drive.google.com" && r.why == crate::refusal::Why::Challenge),
+        "{got:?}"
+    );
+    // a 403 with it too
+    let page = answer_error(&first, &first, 403, None, GOOGLE_SORRY_PAGE);
+    assert!(matches!(page, NetError::Refused(r) if r.host == "drive.google.com"));
+    // the next Drive file is not asked, nor a folder's listing
+    assert!(matches!(
+        acquire(&link("B2"), &cx, &net),
+        Err(Fetch::Failed(NetError::Refused(_)))
+    ));
+    assert!(acquire("https://drive.google.com/drive/folders/F", &cx, &net).is_err());
+    assert_eq!(steps(&d), [format!("download {first}")]);
 }

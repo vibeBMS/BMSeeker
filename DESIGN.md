@@ -18,6 +18,7 @@ only the tool does: an event's works, probing a link, exporting a table),
 
 ```
 net            Request, Answer, NetError (code() for programs), Task / Next: requests as data
+refusal        Refusals: the services that refused in a run (Context::refused); guard, Guarded; challenge pages
 install::job   Effect / Fed / Job / Driver: downloads as data; run_job, TaskJob; Acquire, Files, Install
 native         Native: the driver natively (one HTTP agent, downloads on the calling thread); fetch, fetch_files
 hosts          Host strategies (a link -> a file, other links, or a page), Resolver, Context
@@ -43,9 +44,37 @@ fetch through its CORS proxy) and in tests (canned answers).
 A download is an `install::job::Job`: it asks for `Effect`s (a request, a
 file downloaded into a slot, a wait) and is fed what came of them (`Fed`).
 `run_job` runs one with a `Driver`; `TaskJob` runs a task as a job. A
-request or a download that meets a server's passing failure (429, 502, 503,
+request or a download that meets a server's passing failure (502, 503,
 504) is asked again by the job after a wait (3 s, then 10 s), so every
 driver retries alike and none needs to.
+
+### Refusals
+
+A service that answers 429, 401, 403 or 451, or with a browser check
+whatever the status (`cf-mitigated: challenge`; a page with "Just a
+moment...", `_cf_chl_opt` or `challenges.cloudflare.com`; Google's
+"unusual traffic" CAPTCHA), or whose API says it limits us (MEGA's -4),
+has refused BMSeeker. A file host's (Google Drive's, MEGA's, Dropbox's,
+MediaFire's, pixeldrain's) 401, 403 or 451 is one file's or link's
+failure (`refusal::refuses`): Drive answers 403 for a file's quota or
+sharing. The drivers read a failed answer's start to tell
+(`native::http::answer_error`; Drive's quota said as such). `refusal::Refusals` keeps it for the run, by
+its host (`refusal::service`: `www.` and the port left out; the hosts of
+Google Drive, MEGA, Dropbox, MediaFire, pixeldrain and BMS SEARCH as one
+each). It lives in the run's `Context` (`refused`, shared by its clones),
+so every source, host and job sees it. `Refusals::guard` keeps a
+driver's effects to it: an effect for a refused service is not done but
+fed back `NetError::Refused` at once (no other URL, query or header
+tried, no wait), and an answer that refuses is kept and fed back so. It
+is no passing failure, so nothing retries it, and no page (not even with
+`failures_are_pages`). A source fed it finds nothing and the next is
+asked; a host's link fails and its page's other links are tried.
+`native::Native` guards itself; `refusal::Guarded` wraps any other driver
+and hands each new refusal to a callback: the CLI's `Cli::run` wraps its
+driver so (both the native and the web page's), writing a `refused`
+record, and tells the progress (`Progress::refusals`). A run is one CLI
+process; the window keeps refusals for its session and hands them to the
+next runs (`--skip-host`).
 
 - `Acquire`: one link to its file (resolved through the hosts; a page
   reached through redirects opened from where it ended; a page's other
@@ -133,7 +162,7 @@ settings are listed in the README.
 
 ## CLI
 
-`bmseeker [--json] [--config FILE] [--third-party] [--name-folders] <noun> <verb> ...`
+`bmseeker [--json] [--config FILE] [--third-party] [--name-folders] [--skip-host HOST]... <noun> <verb> ...`
 (the commands: README). With `--json` every command writes JSON Lines (one
 record per line).
 
@@ -147,10 +176,11 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
 link   {"link","state":"file|page|gone|error","host","url"?,"code"?,"error"?}
 got    {"file","name","format","link","errors":[...]}
 done   {"title","state":"added|owned|placed|waiting|page|failed","path"?,"link"?,"code"?,"error"?}
+refused {"refused": host,"code":"status|challenge|rate_limited|earlier","status"?,"error"}
 ```
 
 `"error"` is for a person; `"code"` for a program: `status`, `stalled`,
-`cancelled`, `gone`, `other` (the download), `not_the_chart`,
+`cancelled`, `gone`, `refused`, `other` (the download), `not_the_chart`,
 `no_chart_link`, `no_link`, `downloaded` (the install), `unpack`.
 
 `--overrides` takes work records (JSON or JSONL) whose fields replace the

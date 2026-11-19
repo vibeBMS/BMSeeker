@@ -406,10 +406,16 @@ pub(crate) fn mega_answer(body: &[u8]) -> Result<String, NetError> {
 }
 
 /// The API's refusal, `answer` its words: -9 (no such file) and -2 (a
-/// handle that is no more) say the file is gone.
+/// handle that is no more) say the file is gone; -4 that it limits
+/// BMSeeker's requests (MEGA is not asked again in the run).
 fn refused(answer: &str) -> NetError {
     let e = format!("MEGA refused ({answer})");
-    if ["[-9]", "[-2]"].iter().any(|c| answer.contains(c)) {
+    if answer.contains("[-4]") || answer == "-4" {
+        NetError::Refused(crate::refusal::Refusal::of(
+            "mega.nz",
+            crate::refusal::Why::RateLimited,
+        ))
+    } else if ["[-9]", "[-2]"].iter().any(|c| answer.contains(c)) {
         NetError::Gone(e)
     } else {
         NetError::Other(e)
@@ -478,6 +484,13 @@ mod tests {
 
     #[test]
     fn refusals() {
+        assert!(matches!(
+            mega_answer(b"[-4]").unwrap_err(),
+            NetError::Refused(crate::refusal::Refusal {
+                why: crate::refusal::Why::RateLimited,
+                ..
+            })
+        ));
         let gone = mega_answer(b"[-9]").unwrap_err();
         assert_eq!(gone.to_string(), "MEGA refused ([-9])");
         assert!(gone.gone());
