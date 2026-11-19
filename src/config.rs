@@ -150,19 +150,15 @@ impl Default for Uploader {
 impl Uploader {
     /// The file number in `url` (a link to this uploader).
     pub fn number(&self, url: &str) -> Option<u64> {
-        let lower = url.to_ascii_lowercase();
-        let host = lower.split('/').nth(2)?;
-        if self.site.is_empty()
-            || !(host == self.site || host.ends_with(&format!(".{}", self.site)))
-        {
+        let host = crate::net::host(url);
+        if self.site.is_empty() || !url.contains("://") || !crate::net::under(host, &self.site) {
             return None;
         }
-        let rest = &lower[lower.find(host)? + host.len()..];
-        let digits: String = rest
+        url[url.find(host)? + host.len()..]
             .rsplit(|c: char| !c.is_ascii_digit())
             .find(|d| !d.is_empty())?
-            .to_string();
-        digits.parse().ok()
+            .parse()
+            .ok()
     }
 
     /// `url`'s file on each mirror.

@@ -4,7 +4,7 @@
 //! has its song; and a batch of entries ([`Batch`]: a table's missing
 //! charts) gets each file once. [`EntryJob`] takes them.
 
-use super::job::{Fed, Install, Installed, Job, Step};
+use super::job::{Dead, Fed, Install, Installed, Job, Step};
 use super::{got, Done, Failure, Role};
 use crate::chart::md5_key;
 use crate::fs::Store;
@@ -12,9 +12,9 @@ use crate::hosts::{Context, DownloadKey, Want};
 use crate::library::Library;
 use crate::net::NetError;
 use crate::sources::{Query, Sources};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// A table's entry: the chart wanted, its song, and their links.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -147,12 +147,6 @@ pub struct Batch {
     pub(super) dead: Dead,
 }
 
-/// The files whose download failed, and why: another link that leads to
-/// one (a venue's page naming the links its event's index named, a
-/// source's link to the work a table links) fails at once, not after the
-/// host's timeout again.
-pub(crate) type Dead = Arc<Mutex<HashMap<DownloadKey, NetError>>>;
-
 impl Batch {
     /// A batch for the charts `wanted` (MD5s).
     pub fn new(wanted: impl IntoIterator<Item = String>) -> Batch {
@@ -173,12 +167,13 @@ impl Batch {
         self.seen.contains(key)
     }
 
-    /// The file of `key` came to `done`: had, unless it was not the chart
-    /// looked for (found by name, it may be another's) or cancelled.
+    /// The file of `key` came to `done`: had, unless it did not come (a
+    /// failed download: `dead` answers for it; cancelled) or was not the
+    /// chart looked for (found by name, it may be another's).
     pub(crate) fn tried(&mut self, key: DownloadKey, done: &[Done]) {
         let again = done
             .iter()
-            .any(|d| matches!(d, Done::Failed(f) if f.cancelled() || *f == Failure::NotTheChart));
+            .any(|d| matches!(d, Done::Failed(Failure::Net(_) | Failure::NotTheChart)));
         if !again {
             self.seen.insert(key);
         }
@@ -211,7 +206,8 @@ pub struct EntryJob {
     steps: VecDeque<(EntryStep, bool)>,
     sources: Sources,
     have_song: bool,
-    last: Vec<Done>,
+    /// Where the last step's outcomes start in `done`.
+    last: usize,
     done: Vec<Done>,
 }
 
@@ -240,7 +236,7 @@ impl EntryJob {
             steps,
             sources,
             have_song,
-            last: Vec::new(),
+            last: 0,
             done: Vec::new(),
         }
     }
@@ -273,12 +269,12 @@ impl EntryJob {
     fn next(&mut self) -> Step<Installed> {
         while let Some((step, ask)) = self.steps.pop_front() {
             if self.install.cx.cancelled() {
-                if !cancelled(&self.last) {
+                if !cancelled(&self.done[self.last..]) {
                     self.done.push(Done::Failed(NetError::Cancelled.into()));
                 }
                 break;
             }
-            if !step.due(&self.e, &self.install.lib, &self.last) {
+            if !step.due(&self.e, &self.install.lib, &self.done[self.last..]) {
                 continue;
             }
             let sources = match ask && asks(&self.e, step.role, &self.install.lib) {
@@ -302,8 +298,8 @@ impl EntryJob {
         match step {
             Step::Do(e) => Step::Do(e),
             Step::Done(done) => {
-                self.done.extend(done.iter().cloned());
-                self.last = done;
+                self.last = self.done.len();
+                self.done.extend(done);
                 self.next()
             }
         }
@@ -447,6 +443,12 @@ mod tests {
         b.tried(
             Batch::key(other, &diff),
             &[Done::Failed(crate::net::NetError::Cancelled.into())],
+        );
+        assert!(!b.has(&Batch::key(other, &diff)));
+        // nor one whose download failed (the batch's dead files say why)
+        b.tried(
+            Batch::key(other, &diff),
+            &[Done::Failed(crate::net::NetError::Status(404).into())],
         );
         assert!(!b.has(&Batch::key(other, &diff)));
         // a folder's link: the song looked for in it counts

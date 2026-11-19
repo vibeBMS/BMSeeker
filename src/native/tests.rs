@@ -71,11 +71,7 @@ fn downloads() {
             ..Target::url(url)
         };
         let slot = dir.join("slot");
-        match n.perform(Effect::Download {
-            target,
-            slot,
-            any: false,
-        }) {
+        match n.perform(Effect::Download { target, slot }) {
             Fed::Downloaded(Ok(s)) => s,
             _ => panic!("no file"),
         }
@@ -112,7 +108,6 @@ fn downloads_share_a_connection() {
         let effect = Effect::Download {
             target: Target::url(format!("{}{p}", s.url)),
             slot: dir.join("slot"),
-            any: false,
         };
         match n.perform(effect) {
             Fed::Downloaded(Ok(got)) => heads.push(got.head),
@@ -271,11 +266,7 @@ fn user_agents_sent() {
     let sent = user_agent_heard(|url| {
         let target = Target::url(url);
         let slot = dir.join("slot");
-        let effect = Effect::Download {
-            target,
-            slot,
-            any: false,
-        };
+        let effect = Effect::Download { target, slot };
         assert!(matches!(n.perform(effect), Fed::Downloaded(Ok(_))));
     });
     assert_eq!(sent, format!("{HTTP_CLIENT} {USER_AGENT} {app}"));

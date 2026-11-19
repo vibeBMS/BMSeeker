@@ -23,6 +23,7 @@ mod mega;
 mod uploader;
 mod venues;
 
+pub use browser::PRESS_DOWNLOAD_JS;
 pub(crate) use key::DownloadKey;
 pub(crate) use mega::pack_artist;
 pub use mega::MegaCipher;
@@ -122,7 +123,7 @@ impl Link {
         if !(lower.starts_with("https://") || lower.starts_with("http://")) {
             return None;
         }
-        let host = lower.split('/').nth(2).unwrap_or("").to_string();
+        let host = crate::net::host(&lower).to_string();
         Some(Link {
             url,
             lower,
@@ -133,8 +134,66 @@ impl Link {
 
     /// Whether its host is `domain` or under it.
     pub(crate) fn on(&self, domain: &str) -> bool {
-        self.host == domain || self.host.ends_with(&format!(".{domain}"))
+        crate::net::under(&self.host, domain)
     }
+}
+
+/// A service BMSeeker knows by its hosts' names: a refusal by one of them
+/// is the others' too ([`crate::refusal`]), and a file is one download
+/// whichever of them its link names ([`DownloadKey`]).
+pub(crate) struct Service {
+    /// Its name (its main host's).
+    pub(crate) name: &'static str,
+    /// The domains its hosts are, or are under.
+    domains: &'static [&'static str],
+    /// A file host: its 401, 403 and 451 are a file's (Google Drive's
+    /// quota, a file shared privately), not a refusal of BMSeeker.
+    pub(crate) file_host: bool,
+}
+
+const SERVICES: &[Service] = &[
+    Service {
+        name: "drive.google.com",
+        domains: &[
+            "drive.google.com",
+            "drive.usercontent.google.com",
+            "docs.google.com",
+            "googleusercontent.com",
+        ],
+        file_host: true,
+    },
+    Service {
+        name: "mega.nz",
+        domains: &["mega.nz", "mega.co.nz", "mega.io"],
+        file_host: true,
+    },
+    Service {
+        name: "dropbox.com",
+        domains: &["dropbox.com", "dropboxusercontent.com", "db.tt"],
+        file_host: true,
+    },
+    Service {
+        name: "mediafire.com",
+        domains: &["mediafire.com"],
+        file_host: true,
+    },
+    Service {
+        name: "pixeldrain.com",
+        domains: &["pixeldrain.com", "pixeldrain.net"],
+        file_host: true,
+    },
+    Service {
+        name: "bmssearch.net",
+        domains: &["bmssearch.net"],
+        file_host: false,
+    },
+];
+
+/// The service of the host name `host`, if BMSeeker knows it.
+pub(crate) fn service_of(host: &str) -> Option<&'static Service> {
+    SERVICES
+        .iter()
+        .find(|s| s.domains.iter().any(|d| crate::net::under(host, d)))
 }
 
 /// A kind of link: a strategy of [`Resolver`].
@@ -237,20 +296,14 @@ impl Context {
         }
     }
 
-    /// The progress to report to: this context's, else the thread's
-    /// ([`crate::progress::scope`], kept for older callers).
-    pub(crate) fn progress(&self) -> Option<Arc<Progress>> {
-        self.progress.clone().or_else(crate::progress::current)
-    }
-
     /// Whether the download was cancelled.
     pub(crate) fn cancelled(&self) -> bool {
-        self.progress().is_some_and(|p| p.cancelled())
+        self.progress.as_ref().is_some_and(|p| p.cancelled())
     }
 
     /// Set the progress' stage (if there is one).
     pub fn stage(&self, s: Stage) {
-        if let Some(p) = self.progress() {
+        if let Some(p) = &self.progress {
             p.set_stage(s);
         }
     }
@@ -258,10 +311,12 @@ impl Context {
     /// Tell the progress (if there is one) where it is looking: `place`,
     /// a source's name or a link's host.
     pub(crate) fn at(&self, place: &str) {
-        if let Some(p) = self.progress() {
-            let host = Link::parse(place, 0).map(|l| l.host);
-            let at = host.as_deref().unwrap_or(place);
-            p.set_at(at.strip_prefix("www.").unwrap_or(at));
+        if let Some(p) = &self.progress {
+            let at = match Link::parse(place, 0) {
+                Some(l) => l.host,
+                None => place.to_string(),
+            };
+            p.set_at(at.strip_prefix("www.").unwrap_or(&at));
         }
     }
 }
@@ -376,7 +431,7 @@ impl Resolver {
                 // (a refusal an API said in its answer: MEGA's)
                 if let NetError::Refused(r) = &e {
                     let r = self.cx.refused.keep(r.clone());
-                    if let Some(p) = self.cx.progress() {
+                    if let Some(p) = &self.cx.progress {
                         p.refused(&r.host);
                     }
                 }
@@ -420,33 +475,6 @@ where
     })
 }
 
-/// For a browser showing a [`Fetch::Page`]: on a OneDrive share (a file,
-/// or a folder, which comes as a zip) it presses the page's Download button
-/// once, as a person would. OneDrive has no download URL to fetch without a
-/// browser any more (its API wants an app's token; its pages are built by
-/// script). Run it on every page load (wry: `with_initialization_script`;
-/// Android: `evaluateJavascript` when the page has finished).
-pub const PRESS_DOWNLOAD_JS: &str = r#"(function () {
-  if (window.top !== window || window.__bmseekerPressed) return;
-  if (!/(^|\.)(onedrive\.live\.com|1drv\.ms|sharepoint\.com)$/i.test(location.hostname)) return;
-  var name = /^\s*(download|ダウンロード|다운로드|下载|下載)\s*$/i;
-  var tries = 0;
-  var timer = setInterval(function () {
-    if (++tries > 120) return clearInterval(timer);
-    var all = document.querySelectorAll('button, [role="button"], [role="menuitem"]');
-    for (var i = 0; i < all.length; i++) {
-      var b = all[i];
-      var label = b.getAttribute("aria-label") || b.textContent || "";
-      if (name.test(label) && !b.disabled && b.offsetParent !== null) {
-        window.__bmseekerPressed = true;
-        clearInterval(timer);
-        b.click();
-        return;
-      }
-    }
-  }, 500);
-})();"#;
-
 /// Google Drive's answer for a file downloaded too often lately.
 pub(crate) const DRIVE_QUOTA: &str =
     "Google Drive: the file was downloaded too often lately (try again later, up to a day)";
@@ -455,7 +483,7 @@ pub(crate) const DRIVE_QUOTA: &str =
 /// answered 403: "Too many users have viewed or downloaded this file
 /// recently").
 pub(crate) fn drive_quota(head: &[u8]) -> bool {
-    let head = String::from_utf8_lossy(&head[..head.len().min(4096)]);
+    let head = String::from_utf8_lossy(&head[..head.len().min(crate::unpack::HEAD)]);
     head.contains("<title>Google Drive")
         && (head.contains("Quota exceeded")
             || head.contains("Too many users have viewed or downloaded this file recently"))

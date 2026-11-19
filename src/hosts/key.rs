@@ -49,45 +49,47 @@ fn plain(url: &str) -> String {
 
 /// A host's own key for `l`, and whether it is a folder's.
 fn known(l: &super::Link) -> Option<(String, bool)> {
-    if l.on("google.com") || l.on("googleusercontent.com") {
-        let id = super::drive::drive_id(&l.url)?;
-        let folder = l.lower.contains("/folders/") || l.lower.contains("folderview");
-        let kind = if folder { "gdrive-folder" } else { "gdrive" };
-        return Some((format!("{kind}:{id}"), folder));
-    }
-    if l.on("mediafire.com") {
-        // `/file/ID/name/file`, `/download/ID/...`, `/?ID`, `/view/ID`
-        let path = l.url.split_once("mediafire.com").map(|(_, p)| p)?;
-        let id = ["/file/", "/download/", "/view/", "/?", "?"]
-            .iter()
-            .find_map(|k| path.find(k).map(|i| &path[i + k.len()..]))?;
-        let id: String = id
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect();
-        return (!id.is_empty()).then(|| (format!("mediafire:{}", id.to_lowercase()), false));
-    }
-    if l.on("mega.nz") || l.on("mega.co.nz") {
-        if let Some((h, _)) = super::mega::mega_link(&l.url) {
-            return Some((format!("mega:{h}"), false));
+    match super::service_of(&l.host)?.name {
+        "drive.google.com" => {
+            let id = super::drive::drive_id(&l.url)?;
+            let folder = l.lower.contains("/folders/") || l.lower.contains("folderview");
+            let kind = if folder { "gdrive-folder" } else { "gdrive" };
+            Some((format!("{kind}:{id}"), folder))
         }
-        let (h, node) = super::mega::folder_handle(&l.url)?;
-        let node = node.map(|n| format!("/{n}")).unwrap_or_default();
-        return Some((format!("mega-folder:{h}{node}"), true));
+        "mediafire.com" => {
+            // `/file/ID/name/file`, `/download/ID/...`, `/?ID`, `/view/ID`
+            let path = l.url.split_once("mediafire.com").map(|(_, p)| p)?;
+            let id = ["/file/", "/download/", "/view/", "/?", "?"]
+                .iter()
+                .find_map(|k| path.find(k).map(|i| &path[i + k.len()..]))?;
+            let id: String = id
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            (!id.is_empty()).then(|| (format!("mediafire:{}", id.to_lowercase()), false))
+        }
+        "mega.nz" => {
+            if let Some((h, _)) = super::mega::mega_link(&l.url) {
+                return Some((format!("mega:{h}"), false));
+            }
+            let (h, node) = super::mega::folder_handle(&l.url)?;
+            let node = node.map(|n| format!("/{n}")).unwrap_or_default();
+            Some((format!("mega-folder:{h}{node}"), true))
+        }
+        "dropbox.com" => {
+            // the path, and the share's key (`rlkey`); not `dl=`
+            let rest = &l.url[l.url.find(&l.host)? + l.host.len()..];
+            let rest = rest.split('#').next().unwrap_or(rest);
+            let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let rlkey = query
+                .split('&')
+                .find(|p| p.starts_with("rlkey="))
+                .map(|p| format!("?{p}"))
+                .unwrap_or_default();
+            Some((format!("dropbox:{path}{rlkey}"), false))
+        }
+        _ => None,
     }
-    if l.on("dropbox.com") || l.on("dropboxusercontent.com") {
-        // the path, and the share's key (`rlkey`); not `dl=`
-        let rest = &l.url[l.url.find(&l.host)? + l.host.len()..];
-        let rest = rest.split('#').next().unwrap_or(rest);
-        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let rlkey = query
-            .split('&')
-            .find(|p| p.starts_with("rlkey="))
-            .map(|p| format!("?{p}"))
-            .unwrap_or_default();
-        return Some((format!("dropbox:{path}{rlkey}"), false));
-    }
-    None
 }
 
 #[cfg(test)]
