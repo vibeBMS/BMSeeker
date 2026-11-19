@@ -1,7 +1,7 @@
 //! The network in a web page: a job's requests and downloads as the
 //! browser's own (synchronous `XMLHttpRequest`, which a worker may make),
 //! through the vibeBMS CORS proxy but to hosts that send CORS headers
-//! themselves, as vibeBMS's web build does.
+//! themselves, as vibeBMS's web build does (`bmseeker::web`).
 //!
 //! A page cannot set a request's `User-Agent` (browsers forbid it), and
 //! this does not try: a host that sends CORS headers gets the browser's
@@ -10,30 +10,7 @@
 //! proxy's own refusals (this page's origin not allowed: no
 //! `X-Final-Url`) are no host's.
 
-/// The proxy the web builds reach download hosts and difficulty tables
-/// through (vibeBMS/proxy `worker.js`): it serves the vibebms.github.io
-/// pages and localhost.
-pub const PROXY: &str = "https://proxy.vibebms.workers.dev/";
-
-/// Whether `url`'s host sends CORS headers (a page reads it itself): BMS
-/// SEARCH's API, GitHub's raw files, Konmai's.
-pub fn sends_cors(url: &str) -> bool {
-    let host = url.split('/').nth(2).unwrap_or("").to_ascii_lowercase();
-    matches!(
-        host.as_str(),
-        "api.bmssearch.net" | "raw.githubusercontent.com" | "bms.alvorna.com"
-    )
-}
-
-/// `url` as the page asks for it: through `proxy` (a URL ending in `/`),
-/// but a host that sends CORS headers itself.
-pub fn proxied(proxy: &str, url: &str) -> String {
-    if sends_cors(url) {
-        url.to_string()
-    } else {
-        format!("{proxy}?url={}", bmseeker::net::url_encode(url))
-    }
-}
+pub use bmseeker::web::{proxied, sends_cors, PROXY};
 
 #[cfg(target_arch = "wasm32")]
 pub use xhr::Xhr;
@@ -41,11 +18,10 @@ pub use xhr::Xhr;
 #[cfg(target_arch = "wasm32")]
 mod xhr {
     use super::{proxied, sends_cors};
-    use bmseeker::hosts::MegaCipher;
-    use bmseeker::install::job::{Driver, Effect, Fed, Served, Unserved};
+    use bmseeker::install::job::{Driver, Effect, Fed, Unserved};
     use bmseeker::net::disposition_name;
     use bmseeker::net::{NetError, Request};
-    use bmseeker::refusal::{Refusal, Why};
+    use bmseeker::web::{served, unserved};
     use web_sys::{XmlHttpRequest, XmlHttpRequestResponseType};
 
     /// The job's effects done in a worker, one at a time, blocking it:
@@ -60,6 +36,12 @@ mod xhr {
         status: u16,
         body: Vec<u8>,
         xhr: XmlHttpRequest,
+    }
+
+    impl Got {
+        fn header(&self, name: &str) -> Option<String> {
+            self.xhr.get_response_header(name).ok().flatten()
+        }
     }
 
     fn send(
@@ -105,27 +87,6 @@ mod xhr {
         Ok(Got { status, body, xhr })
     }
 
-    /// The error of an answer to `url` with no success.
-    fn failed(url: &str, proxied: bool, g: &Got) -> NetError {
-        let from_host = !proxied
-            || g.xhr
-                .get_response_header("X-Final-Url")
-                .ok()
-                .flatten()
-                .is_some();
-        if !from_host {
-            return NetError::Other(format!(
-                "the CORS proxy refused (HTTP {}): {}",
-                g.status,
-                String::from_utf8_lossy(&g.body[..g.body.len().min(200)])
-            ));
-        }
-        if bmseeker::refusal::blocked(None, &g.body) {
-            return NetError::Refused(Refusal::of(url, Why::Challenge));
-        }
-        NetError::Status(g.status)
-    }
-
     impl Driver for Xhr {
         fn perform(&self, effect: Effect) -> Fed {
             match effect {
@@ -140,7 +101,13 @@ mod xhr {
                     let through = !sends_cors(url);
                     Fed::Http(got.and_then(|g| match g.status {
                         200..=299 => Ok(g.body),
-                        _ => Err(failed(url, through, &g)),
+                        n => Err(unserved(
+                            url,
+                            n,
+                            through,
+                            g.header("X-Final-Url").as_deref(),
+                            &g.body,
+                        )),
                     }))
                 }
                 Effect::Download { target, .. } => {
@@ -148,32 +115,22 @@ mod xhr {
                     let got = send("GET", &proxied(&self.proxy, &target.url), None, 0);
                     Fed::Downloaded(match got {
                         Ok(g) => {
-                            let at = g.xhr.get_response_header("X-Final-Url").ok().flatten();
+                            let at = g.header("X-Final-Url");
                             if (200..300).contains(&g.status) {
                                 let name = g
-                                    .xhr
-                                    .get_response_header("Content-Disposition")
-                                    .ok()
-                                    .flatten()
+                                    .header("Content-Disposition")
                                     .and_then(|h| disposition_name(&h));
-                                let mut b = g.body;
-                                if let Some(k) = &target.mega_key {
-                                    MegaCipher::new(k).apply(&mut b);
-                                }
-                                Ok(Served::bytes(b, name, at))
+                                Ok(served(&target, g.body, name, at))
                             } else {
                                 let through = !sends_cors(&target.url);
-                                Err(Unserved {
-                                    // (Google's CAPTCHA is the service's asked)
-                                    error: failed(
-                                        at.as_deref()
-                                            .filter(|a| !a.contains("google.com/sorry"))
-                                            .unwrap_or(&target.url),
-                                        through,
-                                        &g,
-                                    ),
-                                    at,
-                                })
+                                let error = unserved(
+                                    &target.url,
+                                    g.status,
+                                    through,
+                                    at.as_deref(),
+                                    &g.body,
+                                );
+                                Err(Unserved { error, at })
                             }
                         }
                         Err(error) => Err(Unserved { error, at: None }),
@@ -188,24 +145,5 @@ mod xhr {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proxied_but_hosts_with_cors() {
-        assert_eq!(
-            proxied(PROXY, "https://drive.google.com/uc?id=a&x=1"),
-            "https://proxy.vibebms.workers.dev/?url=https%3A%2F%2Fdrive.google.com%2Fuc%3Fid%3Da%26x%3D1"
-        );
-        let api = "https://api.bmssearch.net/v1/bms/search?q=x";
-        assert_eq!(proxied(PROXY, api), api);
-        assert_eq!(
-            proxied("http://localhost:8788/", "http://127.0.0.1:9/s.zip"),
-            "http://localhost:8788/?url=http%3A%2F%2F127.0.0.1%3A9%2Fs.zip"
-        );
     }
 }

@@ -1,17 +1,20 @@
 //! Services that refused BMSeeker. A server that answers 401, 403, 429 or
-//! 451, or with a browser check (a Cloudflare challenge page, a Turnstile
-//! widget), has refused it: its service is not asked again for the rest of
-//! the run (no other query, no other URL on it, no other headers), and the
-//! run goes on with the other sources and hosts. A `Retry-After` is kept
-//! to by not asking again in this run at all.
+//! 451, or with a browser check (a Cloudflare challenge page; where an
+//! answer failed, a Turnstile widget too), has refused it: its service is
+//! not asked again for the rest of the run (no other query, no other URL on
+//! it, no other headers), and the run goes on with the other sources and
+//! hosts. A `Retry-After` is kept to by not asking again in this run at
+//! all.
 //!
 //! [`Refusals`] is a run's memory of them, in its
 //! [`Context`](crate::hosts::Context), so every source, host and job of the
-//! run sees it. [`Refusals::guard`] keeps a driver's effects to it:
-//! `native::Native` does natively, [`Guarded`] wraps any other driver (a
-//! web page's). What refused is told to the run's progress and, by the
-//! command-line tool, written as a `refused` record.
+//! run sees it. [`Guarded`] keeps a driver's effects to it (a transport,
+//! `native::Native` or a web page's, keeps to nothing itself); a driver that
+//! answers later (asynchronously) keeps to it with [`Refusals::before`] and
+//! [`Refusals::after`]. What refused is told to the run's progress and, by
+//! the command-line tool, written as a `refused` record.
 
+use crate::hosts::Context;
 use crate::install::job::{Driver, Effect, Fed};
 use crate::net::NetError;
 use crate::progress::Progress;
@@ -40,7 +43,7 @@ pub struct Refusal {
 
 impl Refusal {
     /// `url`'s service refused for `why`.
-    pub fn of(url: &str, why: Why) -> Refusal {
+    pub(crate) fn of(url: &str, why: Why) -> Refusal {
         Refusal {
             host: service(url),
             why,
@@ -83,11 +86,6 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// Whether an HTTP status refuses (401, 403, 429, 451).
-pub fn refusing(status: u16) -> bool {
-    matches!(status, 401 | 403 | 429 | 451)
-}
-
 /// The file hosts: their 401, 403 and 451 are a file's (Google Drive's
 /// quota, a file shared privately), not a refusal of BMSeeker, unless the
 /// answer says so ([`blocked`]); their 429 is one.
@@ -102,27 +100,73 @@ const FILE_HOSTS: &[&str] = &[
 /// Whether `status` from `url` refuses BMSeeker itself: 429 anywhere; 401,
 /// 403 and 451 but from a file host (there, one file's or link's
 /// failure).
-pub fn refuses(url: &str, status: u16) -> bool {
-    status == 429 || refusing(status) && !FILE_HOSTS.contains(&service(url).as_str())
+pub(crate) fn refuses(url: &str, status: u16) -> bool {
+    match status {
+        429 => true,
+        401 | 403 | 451 => !FILE_HOSTS.contains(&service(url).as_str()),
+        _ => false,
+    }
 }
 
-/// Whether a page is Google's "unusual traffic" CAPTCHA (`/sorry/`):
-/// Google refusing automated requests.
-pub fn google_sorry(body: &[u8]) -> bool {
-    html_has(
-        body,
-        &[
-            b"our systems have detected unusual traffic",
-            b"sending automated queries",
-            b"/sorry/index",
-        ],
-    )
+/// The marks of a page that is a browser check whatever its status:
+/// Cloudflare's challenge page ("Just a moment...", `_cf_chl_opt`) and
+/// Google's "unusual traffic" CAPTCHA (`/sorry/`), Google refusing
+/// automated requests. (Cloudflare's script on ordinary pages,
+/// `/cdn-cgi/challenge-platform/`, is no check.)
+const CHECKS: &[&[u8]] = &[
+    b"<title>just a moment...</title>",
+    b"_cf_chl_opt",
+    b"our systems have detected unusual traffic",
+    b"sending automated queries",
+    b"/sorry/index",
+];
+
+/// A Turnstile widget's script: a check where an answer failed, but no
+/// refusal on a page that came (beside a comment or login form).
+const TURNSTILE: &[u8] = b"challenges.cloudflare.com";
+
+/// Whether an answer that came (a success) is a browser check: a page of
+/// [`CHECKS`].
+pub(crate) fn checked(body: &[u8]) -> bool {
+    html_has(body, CHECKS)
 }
 
-/// Whether an answer refuses the client whatever its status: a browser
-/// check ([`challenge`]) or Google's CAPTCHA page ([`google_sorry`]).
-pub fn blocked(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
-    challenge(cf_mitigated, body) || google_sorry(body)
+/// Whether an answer that failed refuses the client whatever its status:
+/// Cloudflare's `cf-mitigated: challenge` header, a page of [`CHECKS`] or
+/// with a Turnstile widget.
+pub(crate) fn blocked(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
+    cf_mitigated.is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
+        || checked(body)
+        || html_has(body, &[TURNSTILE])
+}
+
+/// The error of an answer of `status` to `url` that is no success (or
+/// flagged `cf-mitigated`), its redirects ending `at`, with its
+/// `cf-mitigated` header and its first bytes `head`: a browser check is a
+/// refusal of the service ([`refused_at`]); Google Drive's quota is said as
+/// such; else the status.
+pub(crate) fn answer_error(
+    url: &str,
+    at: &str,
+    status: u16,
+    mitigated: Option<&str>,
+    head: &[u8],
+) -> NetError {
+    if blocked(mitigated, head) {
+        return NetError::Refused(Refusal::of(refused_at(url, Some(at)), Why::Challenge));
+    }
+    if crate::hosts::drive_quota(head) {
+        return NetError::Other(crate::hosts::DRIVE_QUOTA.into());
+    }
+    NetError::Status(status)
+}
+
+/// What refused when `url` was asked: where its redirects ended `at` (a
+/// short link's host did not), but Google's CAPTCHA, which is the service
+/// asked refusing.
+fn refused_at<'a>(url: &'a str, at: Option<&'a str>) -> &'a str {
+    at.filter(|a| !a.contains("google.com/sorry"))
+        .unwrap_or(url)
 }
 
 /// The hosts of one service: a refusal by one is the others' too.
@@ -149,7 +193,7 @@ const SERVICES: &[(&str, &[&str])] = &[
 /// without `www.` and a port; one name for the hosts of a service
 /// BMSeeker knows (Google Drive's, MEGA's, Dropbox's, MediaFire's,
 /// pixeldrain's, BMS SEARCH's).
-pub fn service(url: &str) -> String {
+pub(crate) fn service(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit('@').next().unwrap_or(host);
@@ -160,25 +204,6 @@ pub fn service(url: &str) -> String {
         .iter()
         .find(|(_, hosts)| hosts.iter().any(|d| under(d)))
         .map_or_else(|| host.to_string(), |(name, _)| name.to_string())
-}
-
-/// Whether an answer is a browser check: Cloudflare's `cf-mitigated:
-/// challenge` header, or a page with its challenge ("Just a moment...",
-/// `_cf_chl_opt`) or a Turnstile widget (`challenges.cloudflare.com`).
-/// (Cloudflare's script on ordinary pages, `/cdn-cgi/challenge-platform/`,
-/// is no check.)
-pub fn challenge(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
-    if cf_mitigated.is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge")) {
-        return true;
-    }
-    html_has(
-        body,
-        &[
-            b"challenges.cloudflare.com",
-            b"<title>just a moment...</title>",
-            b"_cf_chl_opt",
-        ],
-    )
 }
 
 /// Whether `body` is a page (HTML) with one of `marks` (lower case) in its
@@ -205,7 +230,7 @@ pub struct Refusals(Mutex<Vec<(Refusal, bool)>>);
 
 impl Refusals {
     /// Whether `url`'s service refused: how.
-    pub fn of(&self, url: &str) -> Option<Refusal> {
+    fn of(&self, url: &str) -> Option<Refusal> {
         let host = service(url);
         let all = self.0.lock().unwrap();
         all.iter()
@@ -215,7 +240,7 @@ impl Refusals {
 
     /// `r` kept: its service is not asked again. The refusal kept for it
     /// (the first, when it had refused already).
-    pub fn keep(&self, r: Refusal) -> Refusal {
+    pub(crate) fn keep(&self, r: Refusal) -> Refusal {
         let mut all = self.0.lock().unwrap();
         if let Some((first, _)) = all.iter().find(|(k, _)| k.host == r.host) {
             return first.clone();
@@ -235,7 +260,8 @@ impl Refusals {
     }
 
     /// Every refusal kept.
-    pub fn all(&self) -> Vec<Refusal> {
+    #[cfg(test)]
+    pub(crate) fn all(&self) -> Vec<Refusal> {
         self.0
             .lock()
             .unwrap()
@@ -245,7 +271,7 @@ impl Refusals {
     }
 
     /// The refusals kept since the last call (to tell a person once).
-    pub fn news(&self) -> Vec<Refusal> {
+    fn news(&self) -> Vec<Refusal> {
         let mut all = self.0.lock().unwrap();
         all.iter_mut()
             .filter(|(_, told)| !*told)
@@ -256,82 +282,114 @@ impl Refusals {
             .collect()
     }
 
-    /// `effect` done by `raw`, kept to the refusals: one for a service
-    /// that refused is not done but fails at once ([`NetError::Refused`]);
-    /// an answer that refuses (a status of [`refusing`], a browser check)
-    /// is kept and fails so. Either is told to `progress`.
-    pub fn guard(
-        &self,
-        effect: Effect,
-        progress: Option<&Progress>,
-        raw: impl FnOnce(Effect) -> Fed,
-    ) -> Fed {
-        let (url, http) = match &effect {
-            Effect::Http(r) => (r.url().to_string(), true),
-            Effect::Download { target, .. } => (target.url.clone(), false),
-            Effect::Sleep(_) => return raw(effect),
+    /// Before `effect` is done: what it gets at once when its service
+    /// refused ([`NetError::Refused`], told to `progress`), else nothing
+    /// (do it, then [`Refusals::after`]).
+    pub fn before(&self, effect: &Effect, progress: Option<&Progress>) -> Option<Fed> {
+        let (url, http) = match effect {
+            Effect::Http(r) => (r.url(), true),
+            Effect::Download { target, .. } => (target.url.as_str(), false),
+            Effect::Sleep(_) => return None,
         };
-        let failed = |r: Refusal| {
-            if let Some(p) = progress {
-                p.refused(&r.host);
-            }
-            let e = NetError::Refused(r);
-            match http {
-                true => Fed::Http(Err(e)),
-                false => Fed::Downloaded(Err(e.into())),
-            }
-        };
-        if let Some(r) = self.of(&url) {
-            return failed(r);
-        }
-        let fed = raw(effect);
-        // what refused: where the redirects ended (a short link's host did
-        // not), but Google's CAPTCHA, which is the service's asked
-        let at = |a: &Option<String>| -> String {
-            match a {
-                Some(a) if !a.contains("google.com/sorry") => a.clone(),
-                _ => url.clone(),
-            }
-        };
+        Some(failed(self.of(url)?, http, progress))
+    }
+
+    /// What came of asking `url` (a request, or a download): an answer
+    /// that refuses (a status [`refuses`], a browser check) is kept and
+    /// fails so, told to `progress`.
+    pub fn after(&self, url: &str, fed: Fed, progress: Option<&Progress>) -> Fed {
         let of_error = |e: &NetError, from: &str| match e {
             NetError::Status(n) if refuses(from, *n) => Some(Refusal::of(from, Why::Status(*n))),
             NetError::Refused(r) => Some(r.clone()),
             _ => None,
         };
-        let refusal = match &fed {
-            Fed::Http(Err(e)) => of_error(e, &url),
-            Fed::Http(Ok(body)) => blocked(None, body).then(|| Refusal::of(&url, Why::Challenge)),
-            Fed::Downloaded(Err(u)) => of_error(&u.error, &at(&u.at)),
-            Fed::Downloaded(Ok(s)) => {
-                blocked(None, &s.head).then(|| Refusal::of(&at(&s.at), Why::Challenge))
+        let (refusal, http) = match &fed {
+            Fed::Http(Err(e)) => (of_error(e, url), true),
+            Fed::Http(Ok(body)) => (
+                checked(body).then(|| Refusal::of(url, Why::Challenge)),
+                true,
+            ),
+            Fed::Downloaded(Err(u)) => {
+                (of_error(&u.error, refused_at(url, u.at.as_deref())), false)
             }
-            Fed::Woke => None,
+            Fed::Downloaded(Ok(s)) => (
+                checked(&s.head)
+                    .then(|| Refusal::of(refused_at(url, s.at.as_deref()), Why::Challenge)),
+                false,
+            ),
+            Fed::Woke => (None, false),
         };
         match refusal {
-            Some(r) => failed(self.keep(r)),
+            Some(r) => failed(self.keep(r), http, progress),
             None => fed,
         }
     }
 }
 
-/// A driver kept to a run's refusals ([`Refusals::guard`]), each new one
-/// handed to `told` as it comes (the command-line tool's `refused`
-/// records).
+/// A request's (`http`) or a download's failure for refusal `r`, told to
+/// `progress`.
+fn failed(r: Refusal, http: bool, progress: Option<&Progress>) -> Fed {
+    if let Some(p) = progress {
+        p.refused(&r.host);
+    }
+    let e = NetError::Refused(r);
+    match http {
+        true => Fed::Http(Err(e)),
+        false => Fed::Downloaded(Err(e.into())),
+    }
+}
+
+/// A driver kept to a run's refusals ([`Refusals::before`],
+/// [`Refusals::after`]): a service that refused is not asked again. Each
+/// new refusal goes to `told` (the command-line tool's `refused` records).
 pub struct Guarded<'a> {
-    pub net: &'a dyn Driver,
-    pub refusals: Arc<Refusals>,
-    pub progress: Option<Arc<Progress>>,
-    pub told: Box<dyn Fn(&Refusal) + 'a>,
+    net: &'a dyn Driver,
+    refusals: &'a Refusals,
+    progress: Option<Arc<Progress>>,
+    told: &'a dyn Fn(&Refusal),
+}
+
+impl<'a> Guarded<'a> {
+    /// `net` kept to `cx`'s refusals, telling `cx`'s progress.
+    pub fn new(net: &'a dyn Driver, cx: &'a Context) -> Guarded<'a> {
+        fn untold(_: &Refusal) {}
+        Guarded {
+            net,
+            refusals: &cx.refused,
+            progress: cx.progress(),
+            told: &untold,
+        }
+    }
+
+    /// Each new refusal told to `told` as it comes.
+    pub fn telling(self, told: &'a dyn Fn(&Refusal)) -> Guarded<'a> {
+        Guarded { told, ..self }
+    }
+
+    /// The refusals kept since the last effect (one a task kept from an
+    /// answer: MEGA's `-4`) to `told`.
+    pub fn tell(&self) {
+        for r in self.refusals.news() {
+            (self.told)(&r);
+        }
+    }
 }
 
 impl Driver for Guarded<'_> {
     fn perform(&self, effect: Effect) -> Fed {
-        let fed = self
-            .refusals
-            .guard(effect, self.progress.as_deref(), |e| self.net.perform(e));
-        for r in self.refusals.news() {
-            (self.told)(&r);
-        }
+        let p = self.progress.as_deref();
+        let fed = match self.refusals.before(&effect, p) {
+            Some(fed) => fed,
+            None => {
+                let url = match &effect {
+                    Effect::Http(r) => r.url().to_string(),
+                    Effect::Download { target, .. } => target.url.clone(),
+                    Effect::Sleep(_) => String::new(),
+                };
+                self.refusals.after(&url, self.net.perform(effect), p)
+            }
+        };
+        self.tell();
         fed
     }
 }
@@ -371,29 +429,36 @@ mod tests {
         );
     }
 
+    const TURNSTILE_PAGE: &[u8] = br#"<html><body><h1>Comments</h1><form><div class="cf-turnstile"></div></form>
+        <a href="song.zip">song.zip</a>
+        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async></script></body></html>"#;
+
     #[test]
     fn challenge_pages() {
         let page = br#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>
             <script>window._cf_chl_opt={cvId: '3'}</script></head></html>"#;
-        assert!(challenge(None, page));
-        let turnstile = br#"<html><body><div class="cf-turnstile"></div>
-            <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async></script></body></html>"#;
-        assert!(challenge(None, turnstile));
-        assert!(challenge(Some("challenge"), b"{}"));
+        assert!(checked(page) && blocked(None, page));
+        // a Turnstile widget: a check where the answer failed only
+        assert!(!checked(TURNSTILE_PAGE) && blocked(None, TURNSTILE_PAGE));
+        assert!(blocked(Some("challenge"), b"{}") && !checked(b"{}"));
         // an ordinary page that Cloudflare serves (its script in it)
         let ordinary = br#"<html><head><meta name="bmstable" content="header.json"></head><body>
             <script>var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5'</script></body></html>"#;
-        assert!(!challenge(None, ordinary));
-        assert!(!challenge(Some("managed"), ordinary));
+        assert!(!blocked(None, ordinary) && !checked(ordinary));
+        assert!(!blocked(Some("managed"), ordinary));
         // an archive or JSON that names it is no page
-        assert!(!challenge(None, b"PK\x03\x04 challenges.cloudflare.com"));
-        assert!(!challenge(None, br#"{"t":"Just a moment..."}"#));
+        assert!(!blocked(None, b"PK\x03\x04 challenges.cloudflare.com"));
+        assert!(!blocked(None, br#"{"t":"Just a moment..."}"#));
         // Google's CAPTCHA
         let sorry = br#"<html><head><title>https://drive.usercontent.google.com/download</title></head><body>
             <div>Our systems have detected unusual traffic from your computer network.</div>
             <form id="captcha-form" action="index" method="post"></form></body></html>"#;
-        assert!(google_sorry(sorry) && blocked(None, sorry) && !challenge(None, sorry));
-        assert!(!google_sorry(ordinary));
+        assert!(checked(sorry) && blocked(None, sorry));
+        let at = "https://www.google.com/sorry/index?continue=x";
+        assert!(matches!(
+            answer_error("https://drive.google.com/x", at, 429, None, sorry),
+            NetError::Refused(r) if r.host == "drive.google.com"
+        ));
     }
 
     #[test]
@@ -462,13 +527,10 @@ mod tests {
             },
         };
         let told = RefCell::new(Vec::new());
+        let tell = |r: &Refusal| told.borrow_mut().push(r.to_string());
         let progress = Progress::new();
-        let g = Guarded {
-            net: &net,
-            refusals: Arc::default(),
-            progress: Some(progress.clone()),
-            told: Box::new(|r| told.borrow_mut().push(r.to_string())),
-        };
+        let cx = Context::default().with_progress(progress.clone());
+        let g = Guarded::new(&net, &cx).telling(&tell);
         let refused = |f: Fed| match f {
             Fed::Http(Err(NetError::Refused(r))) => r,
             f => panic!("{f:?}"),
@@ -499,6 +561,12 @@ mod tests {
         // told once
         assert_eq!(told.borrow().len(), 1);
         assert_eq!(progress.refusals(), ["refusing.test"]);
+        // one a task kept from an answer (MEGA's -4) is told by the next
+        // `tell`
+        cx.refused
+            .keep(Refusal::of("https://mega.nz/x", Why::RateLimited));
+        g.tell();
+        assert_eq!(told.borrow().len(), 2);
     }
 
     #[test]
@@ -515,53 +583,71 @@ mod tests {
                     None,
                     None,
                 ))),
+                u if u.contains("widget") => Fed::Http(Ok(TURNSTILE_PAGE.to_vec())),
                 _ => Fed::Downloaded(Ok(Served::bytes(b"PK\x03\x04".to_vec(), None, None))),
             },
         };
-        let refusals = Refusals::default();
-        let guard = |e| refusals.guard(e, None, |e| net.perform(e));
+        let told = RefCell::new(0);
+        let tell = |_: &Refusal| *told.borrow_mut() += 1;
+        let cx = Context::default();
+        let g = Guarded::new(&net, &cx).telling(&tell);
         let error = |f: Fed| match f {
             Fed::Downloaded(Err(u)) => u.error,
             f => panic!("{f:?}"),
         };
         assert!(matches!(
-            error(guard(download("https://busy.test/1.zip"))),
+            error(g.perform(download("https://busy.test/1.zip"))),
             NetError::Refused(Refusal {
                 why: Why::Status(429),
                 ..
             })
         ));
         assert!(matches!(
-            error(guard(download("https://busy.test/2.zip"))),
+            error(g.perform(download("https://busy.test/2.zip"))),
             NetError::Refused(_)
         ));
         assert!(matches!(
-            error(guard(download("https://checked.test/1.zip"))),
+            error(g.perform(download("https://checked.test/1.zip"))),
             NetError::Refused(Refusal {
                 why: Why::Challenge,
                 ..
             })
         ));
         assert!(matches!(
-            guard(get("https://checked.test/api")),
+            g.perform(get("https://checked.test/api")),
             Fed::Http(Err(NetError::Refused(_)))
         ));
         assert!(matches!(
-            guard(download("https://fine.test/1.zip")),
+            g.perform(download("https://fine.test/1.zip")),
             Fed::Downloaded(Ok(_))
+        ));
+        // a page that came with a Turnstile widget (a form) is no refusal
+        assert!(matches!(
+            g.perform(get("https://widget.test/p")),
+            Fed::Http(Ok(_))
+        ));
+        assert!(matches!(
+            g.perform(get("https://widget.test/q")),
+            Fed::Http(Ok(_))
         ));
         assert_eq!(
             *net.asked.borrow(),
             [
                 "https://busy.test/1.zip",
                 "https://checked.test/1.zip",
-                "https://fine.test/1.zip"
+                "https://fine.test/1.zip",
+                "https://widget.test/p",
+                "https://widget.test/q",
             ]
         );
+        assert_eq!(*told.borrow(), 2);
         // a refusal from an earlier run: skipped, not told again
-        refusals.earlier("other.test");
-        assert!(refusals.of("https://other.test/x").is_some());
-        assert_eq!(refusals.news().len(), 2);
-        assert!(refusals.news().is_empty());
+        cx.refused.earlier("other.test");
+        assert!(matches!(
+            g.perform(get("https://other.test/x")),
+            Fed::Http(Err(NetError::Refused(_)))
+        ));
+        assert_eq!(*told.borrow(), 2);
+        assert_eq!(cx.refused.all().len(), 3);
     }
 }
