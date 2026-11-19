@@ -6,6 +6,7 @@ use crate::hosts::{Target, STALL_MS};
 use crate::net::{disposition_name, Answer, NetError, Request};
 use crate::progress::Progress;
 use crate::refusal::{Refusal, Why};
+use crate::unpack::BUDGET;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -120,8 +121,14 @@ pub(super) fn download(
             .is_none()
             .then(|| ureq::ResponseExt::get_uri(&res).to_string()),
     };
+    // (no larger than an archive may unpack to)
+    let too_large = || crate::unpack::Error::TooLarge(BUDGET).to_string();
+    let length = header("content-length").and_then(|l| l.trim().parse().ok());
+    if length.is_some_and(|l| l > BUDGET) {
+        return Err(too_large().into());
+    }
     if let Some(p) = p {
-        p.start_file(header("content-length").and_then(|l| l.trim().parse().ok()));
+        p.start_file(length);
     }
     let mut mega = target
         .mega_key
@@ -131,6 +138,7 @@ pub(super) fn download(
     let mut w = std::io::BufWriter::new(file);
     let mut body = res.body_mut().as_reader();
     let mut buf = vec![0u8; 1 << 16];
+    let mut got = 0;
     loop {
         let n = match &mut mega {
             // (whole buffers, so its chunks stay on 16-byte blocks)
@@ -140,6 +148,10 @@ pub(super) fn download(
         .map_err(|e| failed(e.into()))?;
         if n == 0 {
             break;
+        }
+        got += n as u64;
+        if got > BUDGET {
+            return Err(too_large().into());
         }
         w.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         if let Some(p) = p {
