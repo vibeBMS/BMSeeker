@@ -90,12 +90,27 @@ fn slot(c: Class) -> usize {
 }
 
 impl Keys {
-    fn of<'a>(names: &Names, files: impl IntoIterator<Item = &'a String>) -> Keys {
+    /// Of `files` (paths in a folder), their keys numbered by `names`.
+    pub(crate) fn of<'a>(names: &Names, files: impl IntoIterator<Item = &'a String>) -> Keys {
         let mut out = Keys::default();
         for f in files {
             out.add(names, f);
         }
         out
+    }
+
+    /// Whether they hold every one of `sounds` that can be held (by path
+    /// and name, any sound extension).
+    pub(crate) fn covers(&self, names: &Names, sounds: &[String]) -> bool {
+        let need = Need::of(names, sounds.iter().map(|s| s.as_str()));
+        need.keys.iter().all(|&k| self.has(Class::Audio, k))
+    }
+
+    /// The share of `sounds` they hold: 1 when there are none (a sound
+    /// outside the folder, `../`, is never held).
+    pub(crate) fn coverage(&self, names: &Names, sounds: &[String]) -> f32 {
+        let need = Need::of(names, sounds.iter().map(|s| s.as_str()));
+        need.share(Class::Audio, self, &Keys::default())
     }
 
     /// Adds `file`: its class and key's number when no file of them was
@@ -191,22 +206,19 @@ impl Needs {
     }
 }
 
-/// The share of `sounds` that `files` (paths in a song's folder) hold: by
-/// path and name, any sound extension; 1 when there are none (a sound
-/// outside the folder, `../`, is never held).
+/// The share of `sounds` that `files` (paths in a song's folder) hold
+/// ([`Keys::coverage`]).
+#[cfg(any(test, all(feature = "tools", not(target_arch = "wasm32"))))]
 pub(crate) fn coverage(files: &[String], sounds: &[String]) -> f32 {
     let names = Names::default();
-    let need = Need::of(&names, sounds.iter().map(|s| s.as_str()));
-    need.share(Class::Audio, &Keys::of(&names, files), &Keys::default())
+    Keys::of(&names, files).coverage(&names, sounds)
 }
 
 /// Whether `files` (paths in a song's folder) hold every one of `sounds`
-/// that can be held (by path and name, any sound extension).
+/// that can be held ([`Keys::covers`]).
 pub(crate) fn covers(files: &[String], sounds: &[String]) -> bool {
     let names = Names::default();
-    let need = Need::of(&names, sounds.iter().map(|s| s.as_str()));
-    let have = Keys::of(&names, files);
-    need.keys.iter().all(|&k| have.has(Class::Audio, k))
+    Keys::of(&names, files).covers(&names, sounds)
 }
 
 /// How a chart's folder is chosen.
@@ -506,7 +518,7 @@ pub(crate) fn song_folders_except(
 
 /// The title, artist and files of a chart file.
 pub fn chart_info(fs: &dyn Fs, path: &std::path::Path) -> Option<ChartInfo> {
-    let bytes = fs.read(path).ok()?;
+    let bytes = crate::chart::read(fs, path)?;
     crate::chart::info(path, &bytes)
 }
 
@@ -548,17 +560,29 @@ pub(crate) fn locate_by(
     index: &Library,
     rules: Rules,
 ) -> (Located, Vec<(Candidate, String)>) {
+    let brought = Keys::of(index.names(fs), bundled);
+    locate_with(fs, info, &brought, here, index, rules)
+}
+
+/// [`locate_by`], the files that go with the chart as `brought` (their
+/// keys by `index`'s numbers: the same for each chart of a folder).
+pub(crate) fn locate_with(
+    fs: &dyn Fs,
+    info: &ChartInfo,
+    brought: &Keys,
+    here: &Path,
+    index: &Library,
+    rules: Rules,
+) -> (Located, Vec<(Candidate, String)>) {
     // the folders with any of its sounds; their charts read for the best
-    let names = index.names(fs);
-    let need = Needs::of(names, info);
-    let brought = Keys::of(names, bundled);
+    let need = Needs::of(index.names(fs), info);
     let near = contenders(
         &need,
-        &brought,
+        brought,
         index.near(fs, &need.audio.keys, here),
         rules,
     );
-    let keep: Vec<Folder> = ranked(info, &need, &brought, &near)
+    let keep: Vec<Folder> = ranked(info, &need, brought, &near)
         .into_iter()
         .enumerate()
         .filter(|(i, (c, _))| c.coverage >= rules.min_coverage || *i < 3)
@@ -577,7 +601,7 @@ pub(crate) fn locate_by(
         })
         .collect();
     let (ranked, at): (Vec<Candidate>, Vec<usize>) =
-        ranked(info, &need, &brought, &keep).into_iter().unzip();
+        ranked(info, &need, brought, &keep).into_iter().unzip();
     let labels: Vec<String> = at
         .iter()
         .map(|&f| {
@@ -705,7 +729,8 @@ pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<
     let mut to = dir.join(&name);
     let chart = is_chart(file);
     if chart && fs.stamp(&to).is_some() {
-        let same = |a: &Path, b: &Path| fs.read(a).ok().is_some_and(|x| fs.read(b).ok() == Some(x));
+        let read = |p: &Path| crate::chart::read(fs, p);
+        let same = |a: &Path, b: &Path| read(a).is_some_and(|x| read(b) == Some(x));
         if same(file, &to) {
             fs.remove(file)?;
             return Ok(Some(to));

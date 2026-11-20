@@ -50,6 +50,9 @@ type app struct {
 	pages []page
 	prows ui.ListState
 	prow  int
+	// What a page's window runs on each page (the CLI's: pageScript).
+	scriptOnce sync.Once
+	script     string
 
 	// Asking before third-party sources are turned on
 	askThirdParty bool

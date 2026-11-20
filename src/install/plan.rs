@@ -10,12 +10,15 @@ use crate::chart::{md5_key, ChartInfo};
 use crate::fs::{file_name, move_file, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
+use crate::net::NetError;
 use crate::package::{classify, split, Package, PackageKind, Staged};
-use crate::placement::{self, covers, is_chart, Located, Rules};
-use crate::unpack::{unpack, Blob, Member, BUDGET};
+use crate::placement::{self, is_chart, Keys, Located, Names, Rules};
+use crate::progress::Progress;
+use crate::unpack::{unpack_watched, Blob, Member, BUDGET};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 /// What the link a download came from was for: it counts most in what a
 /// package is.
@@ -88,6 +91,15 @@ pub struct Request {
     /// Other charts wanted (MD5s: a batch's, a table's missing charts):
     /// from a separate chart's archive they wait for their songs too.
     pub also: Vec<String>,
+    /// The download's progress: once it is cancelled, unpacking and
+    /// planning are given up (nothing comes in).
+    pub progress: Option<Arc<Progress>>,
+}
+
+impl Request {
+    fn cancelled(&self) -> bool {
+        self.progress.as_ref().is_some_and(|p| p.cancelled())
+    }
 }
 
 /// What a package comes to.
@@ -250,14 +262,21 @@ fn fits(
             .filter_map(|f| f.strip_prefix(&at).map(String::from))
             .collect()
     };
+    // (a folder's files looked at once, whatever the number of its charts)
+    let names = Names::default();
+    let mut held: HashMap<&Path, Keys> = HashMap::new();
     charts.iter().all(|&c| {
         let Some(info) = &s.charts[c].info else {
             return false;
         };
-        let mut files = files_at(&sub(s, p, c));
-        files.extend(p.files_for(s, c));
-        covers(&files, &info.sounds)
-            || placement::coverage(&files, &info.sounds) >= rules.min_coverage
+        let dir = s.chart_dir(c);
+        let keys = held.entry(dir).or_insert_with(|| {
+            let mut files = files_at(&sub(s, p, c));
+            files.extend(p.files_for(s, dir));
+            Keys::of(&names, &files)
+        });
+        keys.covers(&names, &info.sounds)
+            || keys.coverage(&names, &info.sounds) >= rules.min_coverage
     })
 }
 
@@ -286,7 +305,7 @@ fn laid_out(
         .iter()
         .filter_map(|&f| {
             let m = &s.members[f];
-            let chart = s.charts.iter().position(|c| c.member == f);
+            let chart = s.chart_of(f);
             if chart.is_some_and(|c| s.owned(c, lib)) {
                 return None;
             }
@@ -363,18 +382,26 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         Vote::None => {}
     }
     // each chart by its sounds (a song's whole folder: the library's must
-    // hold them itself)
+    // hold them itself); the files that go with a folder's charts looked
+    // at once, whatever the number of its charts
+    let names = lib.names(fs);
+    let mut bundled: HashMap<&Path, Keys> = HashMap::new();
+    let none = Keys::default();
     let located: Vec<(usize, Located, bool)> = new
         .iter()
         .map(|&c| {
-            let Some(info) = &s.charts[c].info else {
+            // (cancelled: no more is looked for)
+            let Some(info) = s.charts[c].info.as_ref().filter(|_| !req.cancelled()) else {
                 return (c, Located::NoSong, false);
             };
-            let bundled = p.files_for(s, c);
-            let alone = covers(&bundled, &info.sounds);
-            let here = s.root.join(s.chart_dir(c));
-            let with: &[String] = if alone { &[] } else { &bundled };
-            let (l, _) = placement::locate_by(fs, info, with, &here, lib, req.rules);
+            let dir = s.chart_dir(c);
+            let with = bundled
+                .entry(dir)
+                .or_insert_with(|| Keys::of(names, &p.files_for(s, dir)));
+            let alone = with.covers(names, &info.sounds);
+            let here = s.root.join(dir);
+            let with = if alone { &none } else { &*with };
+            let (l, _) = placement::locate_with(fs, info, with, &here, lib, req.rules);
             (c, l, alone)
         })
         .collect();
@@ -390,21 +417,25 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
             return vec![into(first.clone())];
         }
     }
-    // each chart on its own: the files right beside it with it
-    let mut taken: HashSet<usize> = HashSet::new();
+    // each chart on its own: the files right beside it with it (with the
+    // first of a folder's charts)
+    let mut emptied: HashSet<&Path> = HashSet::new();
     located
         .into_iter()
         .map(|(c, l, alone)| match l {
             Located::Move(to) => {
                 let rel = s.chart_rel(c);
                 let mut moves = vec![(s.root.join(rel), to.join(file_name(rel)))];
-                if !alone {
-                    let dir = s.chart_dir(c);
-                    for &f in &p.files {
-                        let m = &s.members[f].rel;
-                        if m.parent() == Some(dir) && !is_chart(m) && taken.insert(f) {
-                            moves.push((s.root.join(m), to.join(file_name(m))));
-                        }
+                let dir = s.chart_dir(c);
+                if !alone && emptied.insert(dir) {
+                    let beside = |f: &usize| {
+                        let m = &s.members[*f].rel;
+                        m.parent() == Some(dir) && !is_chart(m)
+                    };
+                    let mut beside: Vec<usize> = p.below(s, dir).filter(beside).collect();
+                    beside.sort_unstable();
+                    for m in beside.iter().map(|&f| &s.members[f].rel) {
+                        moves.push((s.root.join(m), to.join(file_name(m))));
                     }
                 }
                 Item {
@@ -523,8 +554,14 @@ fn of_song(c: &Option<ChartInfo>, want: &Want) -> bool {
 /// as a song of its own unless where it goes is sure. What waits from a
 /// separate chart's archive is only the chart `md5` and those of `also` (a
 /// pack of many songs' charts keeps no others): nothing at all,
-/// [`Failure::NotTheChart`].
+/// [`Failure::NotTheChart`]. Cancelled (`req.progress`): nothing comes in,
+/// whatever was planned by then.
 pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec<Item> {
+    let cancelled = || vec![Item::rejected(NetError::Cancelled.into())];
+    // (its charts may not all have been read)
+    if req.cancelled() {
+        return cancelled();
+    }
     let md5 = req.md5.as_deref().and_then(md5_key);
     if let Some(m) = md5.as_deref().filter(|_| req.check) {
         let holds = s.charts.iter().any(|c| c.md5 == m)
@@ -551,6 +588,9 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
     let mut items = Vec::new();
     let mut new: Vec<&Package> = Vec::new();
     for p in &packages {
+        if req.cancelled() {
+            return cancelled();
+        }
         match classify(p, s, lib, req.role, req.rules) {
             PackageKind::Owned => {
                 let dest = match owned_vote(fs, s, p, lib) {
@@ -596,16 +636,15 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
     // a separate chart's archive: only the charts wanted wait
     if let (Some(m), true) = (md5.as_deref(), req.role == Role::Diff && !s.loose) {
         let also: HashSet<String> = req.also.iter().filter_map(|m| md5_key(m)).collect();
-        let wanted = |c: &str| c == m || also.contains(c);
+        let wanted: HashSet<PathBuf> = (s.charts.iter())
+            .filter(|c| c.md5 == m || also.contains(&c.md5))
+            .map(|c| s.root.join(&s.members[c.member].rel))
+            .collect();
         items.retain_mut(|i| {
             if !matches!(i.outcome, Outcome::Waiting | Outcome::Ask(_)) {
                 return true;
             }
-            i.moves.retain(|(from, _)| {
-                s.charts
-                    .iter()
-                    .any(|c| wanted(&c.md5) && s.root.join(&s.members[c.member].rel) == *from)
-            });
+            i.moves.retain(|(from, _)| wanted.contains(from));
             !i.moves.is_empty()
         });
     }
@@ -627,6 +666,9 @@ fn move_in(
 ) -> Result<(), (PathBuf, io::Error)> {
     // (short names: a file's name near the disk's limit moves as well)
     let aside = root.join(format!(".in-{}", unique()));
+    if let Err(e) = store.create_new_dir(&aside) {
+        return Err((aside, e));
+    }
     let new = |i: usize| aside.join(i.to_string());
     let old = |i: usize| aside.join(format!("{i}.old"));
     for (i, (from, to)) in moves.iter().enumerate() {
@@ -707,7 +749,7 @@ fn applied(
         let at = placement::bring(store, from, dir).map_err(|e| failed(to, e))?;
         if let Some(at) = &at {
             let md5 = is_chart(at)
-                .then(|| fs.read(at).ok().map(|b| md5_hex(&b)))
+                .then(|| crate::chart::read(fs, at).map(|b| md5_hex(&b)))
                 .flatten();
             lib.add(at, md5.as_deref());
         }
@@ -827,29 +869,37 @@ pub(crate) fn taken(
     if req.file.is_none() {
         req.file = file.as_deref().map(file_name);
     }
+    let rejected = |f: Failure| {
+        let done = vec![Done::Failed(f.clone())];
+        (vec![(Outcome::Rejected(f), done)], Vec::new())
+    };
+    super::sweep(store, downloads);
     let stage = downloads.join(format!(".take-{}", unique()));
+    if let Err(e) = store.create_new_dir(&stage) {
+        return rejected(format!("{}: {e}", stage.display()).into());
+    }
     let loose = req.file.as_deref().filter(|n| is_chart(Path::new(n)));
+    let stop = req.progress.as_deref();
     let members = match loose {
-        Some(name) => put_loose(store, blob, &stage.join(safe_name(name))),
-        None => unpack(blob, store, &stage, BUDGET),
+        Some(name) => put_loose(store, blob, &stage.join(safe_name(name))).map_err(Failure::Other),
+        None => unpack_watched(blob, store, &stage, BUDGET, stop).map_err(|e| match e {
+            crate::unpack::Error::Cancelled => NetError::Cancelled.into(),
+            e => Failure::Other(e.to_string()),
+        }),
     };
     let members = match members {
         Ok(m) => m,
-        Err(e) => {
+        Err(f) => {
             store.remove_dir(&stage);
-            let f = Failure::Other(e);
-            return (
-                vec![(Outcome::Rejected(f.clone()), vec![Done::Failed(f)])],
-                Vec::new(),
-            );
+            return rejected(f);
         }
     };
-    // (it is in the folder now)
-    if let Some(p) = &file {
+    let s = Staged::read(fs, &stage, members, loose.is_some(), stop);
+    let items = plan(fs, &s, lib, &req);
+    // (it is in the folder now; stopped, it stays as it came)
+    if let Some(p) = file.as_ref().filter(|_| !req.cancelled()) {
         let _ = store.remove(p);
     }
-    let s = Staged::read(fs, &stage, members, loose.is_some());
-    let items = plan(fs, &s, lib, &req);
     let out = applied(store, items, downloads, lib);
     // (a song added, or files a song's folder lacked brought in)
     let came = out.iter().any(|(o, d)| match o {

@@ -314,10 +314,10 @@ impl Acquire {
             return self.failed(e, moved);
         }
         // (a host's and a server's name: whatever they said)
-        let safe = |n: Option<String>| n.as_deref().and_then(crate::text::safe_file_name);
+        let safe = |n: Option<String>| n.as_deref().and_then(super::file_name_of);
         let name = safe(t.name)
             .or_else(|| safe(s.name))
-            .or_else(|| crate::hosts::url_file_name(&t.url))
+            .or_else(|| safe(crate::hosts::url_file_name(&t.url)))
             .unwrap_or_else(|| "download".into());
         Step::Done(Ok(Got {
             blob: s.blob,
@@ -642,8 +642,13 @@ impl Install {
                 continue;
             }
             let check = self.checked && crate::chart::md5_key(&self.q.md5).is_some();
+            super::sweep(&*self.store, &self.downloads);
             let job = self.downloads.join(format!(".job-{}", super::unique()));
-            self.store.create_dir_all(&job);
+            if let Err(e) = self.store.create_new_dir(&job) {
+                let failed = Failure::Other(format!("{}: {e}", job.display()));
+                self.tries.record(vec![Done::Failed(failed)]);
+                continue;
+            }
             let chart = super::chart_link(&link).then(|| super::chart_name(&link));
             let acquire = match &chart {
                 Some(name) => Acquire::plain(&link, job.join(name), &self.cx),
@@ -711,6 +716,7 @@ impl Install {
                 let file = t.chart.unwrap_or_else(|| "download".into());
                 let mut req = super::request(&self.q, t.check, Some(file), &self.cx.config);
                 req.also = self.batch.also(&self.q);
+                req.progress = self.cx.progress.clone();
                 super::take(&*self.store, g.blob, &req, &self.downloads, &mut self.lib)
             }
             Err(Fetch::Page) => vec![Done::Page(t.link)],

@@ -125,22 +125,67 @@ pub(crate) fn chart_name(u: &str) -> String {
     safe_name(&crate::net::percent_decode(name))
 }
 
-/// `name` as one file name (no path, nothing a file system refuses).
-pub fn safe_name(name: &str) -> String {
-    crate::text::safe_file_name(name).unwrap_or_else(|| "download".into())
+/// `name` as one file name: no path, nothing a file system refuses,
+/// Windows' too ([`safe_part`](crate::fs::safe_part)). None: nothing is
+/// left.
+pub(crate) fn file_name_of(name: &str) -> Option<String> {
+    crate::text::safe_file_name(name).and_then(|n| crate::fs::safe_part(&n))
 }
 
-/// A name no other download of this process or another has (a web
-/// page: of this page).
+/// `name` as one file name ([`file_name_of`]; `download` when nothing is
+/// left).
+pub fn safe_name(name: &str) -> String {
+    file_name_of(name).unwrap_or_else(|| "download".into())
+}
+
+/// Seconds since 1970.
+fn now() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A name no other download has, of this process or another, and none
+/// could make ready for it (a folder of this name is this run's own):
+/// `t`, the time (seconds, hex: what a run that died left is known by its
+/// age, [`sweep`]), a count, and what cannot be guessed.
 pub(crate) fn unique() -> String {
+    use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    if cfg!(target_arch = "wasm32") {
-        // (no process ids there)
-        format!("w-{n}")
-    } else {
-        format!("{}-{n}", std::process::id())
+    // (a hasher's keys are the system's random numbers; a web page has
+    // none, and no other user)
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    format!("t{:x}-{n}-{random:016x}", now())
+}
+
+/// When the folder `name` a download passes through (`.take-…`, `.job-…`,
+/// `.in-…`) was made (seconds), by its name ([`unique`]).
+fn staged_at(name: &str) -> Option<u64> {
+    let rest = [".take-t", ".job-t", ".in-t"]
+        .iter()
+        .find_map(|p| name.strip_prefix(p))?;
+    u64::from_str_radix(rest.split('-').next()?, 16).ok()
+}
+
+/// What a run that died left in `downloads` goes: the folders downloads
+/// pass through that are a day old. Once a run for each folder, when it is
+/// first used.
+pub(crate) fn sweep(store: &dyn Store, downloads: &Path) {
+    static SWEPT: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if !SWEPT.lock().unwrap().insert(downloads.to_path_buf()) {
+        return;
+    }
+    let day_ago = now().saturating_sub(24 * 60 * 60);
+    for e in store.read_dir(downloads).unwrap_or_default() {
+        let at = staged_at(&crate::fs::file_name(&e.path));
+        if e.is_dir && at.is_some_and(|t| t < day_ago) {
+            store.remove_dir(&e.path);
+        }
     }
 }
 
@@ -164,6 +209,7 @@ pub fn request(
         file,
         reinstall: config.reinstall,
         also: Vec::new(),
+        progress: None,
     }
 }
 
@@ -204,7 +250,7 @@ pub(crate) fn place_waiting(fs: &dyn Store, downloads: &Path, lib: &mut Library)
         };
         match at {
             Some(Some(at)) => {
-                let md5 = fs.read(&at).ok().map(|b| md5_hex(&b));
+                let md5 = crate::chart::read(fs, &at).map(|b| md5_hex(&b));
                 lib.add(&at, md5.as_deref());
                 out.push(at);
             }
@@ -411,7 +457,55 @@ mod tests {
 
     #[test]
     fn unique_names() {
-        assert_ne!(unique(), unique());
+        let (a, b) = (unique(), unique());
+        assert_ne!(a, b);
+        // the time, a count, and 64 bits that are not the other's
+        let parts = |n: &str| n.split('-').map(String::from).collect::<Vec<_>>();
+        let (a, b) = (parts(&a), parts(&b));
+        assert!(a.len() == 3 && a[0].starts_with('t') && a[2].len() == 16);
+        assert_ne!(a[2], b[2]);
+        let at = staged_at(&format!(".job-{}", a.join("-")));
+        assert!(at.is_some_and(|t| now() - t < 60));
+    }
+
+    /// The folders a run that died left go when a downloads folder is
+    /// first used, a day old; nothing else there does.
+    #[test]
+    fn stale_staged_folders_go() {
+        let m = crate::fs::Mem::default();
+        let dl = Path::new("dl-stale");
+        let old = now() - 25 * 60 * 60;
+        let kept = [
+            format!(".take-{}/a.bms", unique()),
+            format!(".job-t{:x}-0-0/download", now() - 23 * 60 * 60),
+            // (not named as this version names them: their age is not known)
+            ".take-4242-0/a.bms".into(),
+            format!("song-t{old:x}-0-0/a.bms"),
+            "waiting.bms".into(),
+            "scan.json".into(),
+        ];
+        let gone = [
+            format!(".take-t{old:x}-0-00aa/Song/a.bms"),
+            format!(".job-t{old:x}-1-00bb/download"),
+            format!(".in-t{old:x}-2-00cc/0.old"),
+        ];
+        for f in kept.iter().chain(&gone) {
+            m.put(&dl.join(f), b"x", 0);
+        }
+        // (a download that is no archive: nothing comes of it but the sweep)
+        let lib = &mut Library::new(Path::new("bms-stale"));
+        let blob = crate::unpack::Blob::Bytes(b"<html>".to_vec());
+        take(&m, blob, &Request::default(), dl, lib);
+        for f in &kept {
+            assert!(m.get(&dl.join(f)).is_some(), "{f}");
+        }
+        for f in &gone {
+            assert!(m.get(&dl.join(f)).is_none(), "{f}");
+        }
+        // once a run: what looks old later is not this run's to judge
+        m.put(&dl.join(&gone[0]), b"x", 0);
+        sweep(&m, dl);
+        assert!(m.get(&dl.join(&gone[0])).is_some());
     }
 
     #[test]
@@ -425,6 +519,11 @@ mod tests {
             "b c(M).bms"
         );
         assert_eq!(safe_name("a/b: c?"), "a_b_ c_");
+        // a name Windows keeps for a device, or would cut the end of
+        assert_eq!(safe_name("NUL.zip"), "_NUL.zip");
+        assert_eq!(safe_name("song.bms ."), "song.bms");
+        assert_eq!(safe_name(" . "), "download");
+        assert_eq!(chart_name("https://x.org/a/con.bms%20"), "_con.bms");
     }
 
     #[test]

@@ -20,6 +20,10 @@ pub(super) enum Link {
         #[command(flatten)]
         song: SongArgs,
     },
+    /// The script for a window showing a link's page to run on each page
+    /// (it presses a OneDrive share's Download button, on OneDrive's hosts
+    /// only).
+    PageScript,
     /// Download the file the links lead to, trying them in turn.
     #[cfg(not(target_arch = "wasm32"))]
     Get {
@@ -85,6 +89,12 @@ pub(super) fn link(r: &Run, c: Link) -> Result<(), String> {
             }
             Ok(())
         }
+        Link::PageScript => {
+            let script = crate::hosts::PRESS_DOWNLOAD_JS;
+            r.out
+                .record(json!({"script": script}), || script.to_string());
+            Ok(())
+        }
         #[cfg(not(target_arch = "wasm32"))]
         Link::Get {
             links,
@@ -122,7 +132,7 @@ fn get(
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     }
     let tmp = if into_dir {
-        out.join(format!(".bmseeker-{}", std::process::id()))
+        out.join(format!(".bmseeker-{}", crate::install::unique()))
     } else {
         out.to_path_buf()
     };

@@ -10,8 +10,11 @@
 //!   shows the table without reading it (a table it cannot reach, or with
 //!   [`links`](crate::links) filled).
 
+use crate::fs::Store;
 use crate::table::DifficultyTable;
 use serde_json::{json, Value};
+use std::io::Write;
+use std::path::Path;
 
 /// `s` as an SQL string literal.
 fn sql_quote(s: &str) -> String {
@@ -52,6 +55,61 @@ fn one_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ")
 }
 
+/// The file `p` of `store` written as `bytes` (one there replaced).
+pub fn write(store: &dyn Store, p: &Path, bytes: &[u8]) -> Result<(), String> {
+    (store.create(p, None))
+        .and_then(|mut w| w.write_all(bytes).and_then(|()| w.flush()))
+        .map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// The file in a folder of LR2 custom folders that says which table an
+/// export wrote them for, and names them.
+const LR2_MARK: &str = "bmseeker-export.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Lr2Mark {
+    /// The table's URL.
+    table: String,
+    folders: Vec<String>,
+}
+
+/// The table's LR2 custom folders ([`lr2_folders`]) written into the folder
+/// `dir` of `store`; those an earlier export of this table wrote there
+/// that it no longer has (a level gone) removed, by what that export
+/// noted ([`LR2_MARK`]). No other file is removed: a folder is named after
+/// its table, and any table may take any name. One noted as another
+/// table's is not written into. Returns how many were written.
+pub fn write_lr2(store: &dyn Store, t: &DifficultyTable, dir: &Path) -> Result<usize, String> {
+    let mark = dir.join(LR2_MARK);
+    let before: Option<Lr2Mark> =
+        (store.read(&mark).ok()).and_then(|b| serde_json::from_slice(&b).ok());
+    if let Some(other) = before.as_ref().filter(|m| m.table != t.source_url) {
+        return Err(format!(
+            "{} holds the folders of another table ({}): remove it, or export elsewhere",
+            dir.display(),
+            one_line(&other.table)
+        ));
+    }
+    let folders = lr2_folders(t);
+    let ours = |n: &String| {
+        n.ends_with(".lr2folder") && crate::install::file_name_of(n).as_ref() == Some(n)
+    };
+    for old in before.iter().flat_map(|m| &m.folders).filter(|n| ours(n)) {
+        if !folders.iter().any(|(n, _)| n == old) {
+            let _ = store.remove(&dir.join(old));
+        }
+    }
+    for (name, text) in &folders {
+        write(store, &dir.join(name), text)?;
+    }
+    let now = Lr2Mark {
+        table: t.source_url.clone(),
+        folders: folders.iter().map(|(n, _)| n.clone()).collect(),
+    };
+    write(store, &mark, &serde_json::to_vec(&now).unwrap_or_default())?;
+    Ok(folders.len())
+}
+
 /// A table's course constraint as beatoraja names it.
 fn constraint_name(c: &str) -> Option<&'static str> {
     Some(match c.trim().to_ascii_lowercase().as_str() {
@@ -82,7 +140,6 @@ pub fn bmt_file_name(url: &str) -> String {
 /// The table as beatoraja caches it: gzip of its JSON (`url`, `name`,
 /// `tag`, a `folder` per level with its `songs`, and the `course`s).
 pub fn beatoraja_bmt(t: &DifficultyTable) -> Vec<u8> {
-    use std::io::Write;
     let folders: Vec<Value> = t
         .levels()
         .into_iter()
@@ -194,6 +251,56 @@ mod tests {
         assert!(text.contains("#CATEGORY 発狂BMS難易度表\r\n#TITLE ★1\r\n"));
         let (text, _, _) = encoding_rs::SHIFT_JIS.decode(&f[1].1);
         assert!(text.contains("'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'") && text.contains("#TITLE ★2"));
+    }
+
+    /// An export removes the folders its own earlier export wrote and the
+    /// table no longer has; nothing else of the folder, and nothing of a
+    /// folder another table's export wrote.
+    #[test]
+    fn lr2_export_removes_only_its_own() {
+        use crate::fs::{Fs, Mem};
+        let m = Mem::default();
+        let dir = Path::new("lr2/Table");
+        // (a player's own custom folders, and one an older version wrote)
+        m.put(&dir.join("mine.lr2folder"), b"mine", 0);
+        m.put(&dir.join("0007.lr2folder"), b"older", 0);
+        let mut t = table();
+        assert_eq!(write_lr2(&m, &t, dir), Ok(2));
+        assert_eq!(m.get(&dir.join("mine.lr2folder")).unwrap().0, b"mine");
+        assert_eq!(m.get(&dir.join("0007.lr2folder")).unwrap().0, b"older");
+        assert!(m.get(&dir.join("0001.lr2folder")).is_some());
+        // a level gone: its file goes, the others stay
+        t.entries.remove(0);
+        assert_eq!(write_lr2(&m, &t, dir), Ok(1));
+        assert!(m.get(&dir.join("0000.lr2folder")).is_some());
+        assert!(m.get(&dir.join("0001.lr2folder")).is_none());
+        assert!(m.get(&dir.join("mine.lr2folder")).is_some());
+        assert!(m.get(&dir.join("0007.lr2folder")).is_some());
+        // another table of the same name: refused, nothing touched
+        let before = m.read(&dir.join("0000.lr2folder")).unwrap();
+        let mut other = table();
+        other.source_url = "https://other.example/table.html".into();
+        other.entries.truncate(1);
+        let e = write_lr2(&m, &other, dir).unwrap_err();
+        assert!(
+            e.contains("another table (https://example.com/table.html)"),
+            "{e}"
+        );
+        assert_eq!(m.read(&dir.join("0000.lr2folder")).unwrap(), before);
+        // what the note names is only ever a custom folder right in it
+        let note = r#"{"table":"https://example.com/table.html","folders":["../mine.lr2folder","mine.txt","a/b.lr2folder"]}"#;
+        m.put(Path::new("lr2/mine.lr2folder"), b"mine", 0);
+        m.put(&dir.join("mine.txt"), b"mine", 0);
+        m.put(&dir.join("a/b.lr2folder"), b"mine", 0);
+        m.put(&dir.join(LR2_MARK), note.as_bytes(), 0);
+        assert_eq!(write_lr2(&m, &t, dir), Ok(1));
+        for kept in [
+            "lr2/mine.lr2folder",
+            "lr2/Table/mine.txt",
+            "lr2/Table/a/b.lr2folder",
+        ] {
+            assert!(m.get(Path::new(kept)).is_some(), "{kept}");
+        }
     }
 
     #[test]

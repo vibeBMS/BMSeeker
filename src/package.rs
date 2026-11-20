@@ -11,11 +11,12 @@ use crate::chart::ChartInfo;
 use crate::fs::Fs;
 use crate::install::plan::Role;
 use crate::library::Library;
-use crate::placement::{class_of, covers, is_chart, key, rel};
-use crate::placement::{Class, Rules};
+use crate::placement::{class_of, is_chart, key, rel};
+use crate::placement::{Class, Keys, Names, Rules};
+use crate::progress::Progress;
 use crate::titles::Song;
 use crate::unpack::Member;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A chart of a staged download.
@@ -36,34 +37,63 @@ pub(crate) struct StagedChart {
 pub(crate) struct Staged {
     pub(crate) root: PathBuf,
     pub(crate) members: Vec<Member>,
+    /// In the order of their files.
     pub(crate) charts: Vec<StagedChart>,
     /// A file on its own (a chart's link), not an archive.
     pub(crate) loose: bool,
+    /// Its files by their paths, in order: a folder's are together.
+    by_path: Vec<usize>,
 }
 
 impl Staged {
-    /// The download unpacked into `root` as `members`, its charts read.
-    pub(crate) fn read(fs: &dyn Fs, root: &Path, members: Vec<Member>, loose: bool) -> Staged {
+    /// The download unpacked into `root` as `members`, its charts read
+    /// (those there are when `stop` is cancelled: the rest are not).
+    pub(crate) fn read(
+        fs: &dyn Fs,
+        root: &Path,
+        members: Vec<Member>,
+        loose: bool,
+        stop: Option<&Progress>,
+    ) -> Staged {
         let charts = members
             .iter()
             .enumerate()
             .filter(|(_, m)| is_chart(&m.rel))
+            .take_while(|_| !stop.is_some_and(|p| p.cancelled()))
             .map(|(i, m)| {
-                let bytes = fs.read(&root.join(&m.rel)).unwrap_or_default();
+                // (one that cannot be read, or larger than any: no hash is
+                // its own)
+                let bytes = crate::chart::read(fs, &root.join(&m.rel));
+                let hash = |of: fn(&[u8]) -> String| bytes.as_deref().map(of).unwrap_or_default();
                 StagedChart {
                     member: i,
-                    md5: crate::install::md5_hex(&bytes),
-                    sha256: crate::library::sha256_hex(&bytes),
-                    info: crate::chart::info(&m.rel, &bytes),
+                    md5: hash(crate::install::md5_hex),
+                    sha256: hash(crate::library::sha256_hex),
+                    info: bytes.as_deref().and_then(|b| crate::chart::info(&m.rel, b)),
                 }
             })
             .collect();
+        let mut by_path: Vec<usize> = (0..members.len()).collect();
+        by_path.sort_by(|&a, &b| members[a].rel.cmp(&members[b].rel));
         Staged {
             root: root.to_path_buf(),
             members,
             charts,
             loose,
+            by_path,
         }
+    }
+
+    /// Its files at and below the folder `dir`.
+    pub(crate) fn below<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = usize> + 'a {
+        let rel = |f: &usize| &self.members[*f].rel;
+        let start = self.by_path.partition_point(|f| rel(f).as_path() < dir);
+        (self.by_path[start..].iter().copied()).take_while(move |f| rel(f).starts_with(dir))
+    }
+
+    /// The chart that the file `member` is.
+    pub(crate) fn chart_of(&self, member: usize) -> Option<usize> {
+        (self.charts.binary_search_by_key(&member, |c| c.member)).ok()
     }
 
     /// The chart `c`'s path in the download.
@@ -111,29 +141,38 @@ impl Package {
             .any(|&f| class_of(&rel(&s.members[f].rel, Path::new(""))) == Some(Class::Audio))
     }
 
-    /// Its files below the folder of its chart `c`, by their path there
-    /// (what goes with the chart).
-    pub(crate) fn files_for(&self, s: &Staged, c: usize) -> Vec<String> {
-        let dir = s.chart_dir(c);
-        self.files
-            .iter()
-            .map(|&f| &s.members[f].rel)
-            .filter(|p| p.starts_with(dir))
-            .map(|p| rel(p, dir))
-            .collect()
+    /// Its files at and below the folder `dir`.
+    pub(crate) fn below<'a>(
+        &'a self,
+        s: &'a Staged,
+        dir: &'a Path,
+    ) -> impl Iterator<Item = usize> + 'a {
+        s.below(dir).filter(|f| self.files.binary_search(f).is_ok())
+    }
+
+    /// Its files below the folder `dir` of one of its charts, by their
+    /// path there (what goes with the chart).
+    pub(crate) fn files_for(&self, s: &Staged, dir: &Path) -> Vec<String> {
+        (self.below(s, dir).map(|f| rel(&s.members[f].rel, dir))).collect()
     }
 
     /// Whether it holds the sounds of each of its charts (`rules`' share)
     /// and a sound file at all: a song's own folder.
     pub(crate) fn complete(&self, s: &Staged, rules: Rules) -> bool {
+        // (a folder's files looked at once, whatever the number of its charts)
+        let names = Names::default();
+        let mut held: HashMap<&Path, Keys> = HashMap::new();
         self.has_audio(s)
             && self.charts.iter().all(|&c| {
                 let Some(info) = &s.charts[c].info else {
                     return false;
                 };
-                let files = self.files_for(s, c);
-                covers(&files, &info.sounds)
-                    || crate::placement::coverage(&files, &info.sounds) >= rules.min_coverage
+                let dir = s.chart_dir(c);
+                let keys = held
+                    .entry(dir)
+                    .or_insert_with(|| Keys::of(&names, &self.files_for(s, dir)));
+                keys.covers(&names, &info.sounds)
+                    || keys.coverage(&names, &info.sounds) >= rules.min_coverage
             })
     }
 }
@@ -167,11 +206,9 @@ impl Tree {
 
 /// The files below `dir` (paths in it) by kind, as a chart names them.
 fn keys_below(s: &Staged, dir: &Path) -> HashSet<(Class, String)> {
-    s.members
-        .iter()
-        .filter(|m| m.rel.starts_with(dir))
-        .filter_map(|m| {
-            let r = rel(&m.rel, dir);
+    s.below(dir)
+        .filter_map(|f| {
+            let r = rel(&s.members[f].rel, dir);
             Some((class_of(&r)?, key(&r)?.ok()?))
         })
         .collect()
@@ -255,17 +292,15 @@ fn walk(s: &Staged, tree: &Tree, dir: &Path, out: &mut Vec<Package>) -> bool {
     let Some((files, subdirs)) = tree.dirs.get(dir) else {
         return false;
     };
-    let charts: Vec<usize> = (0..s.charts.len())
-        .filter(|&c| s.chart_dir(c) == dir)
-        .collect();
-    let below = |d: &Path| Package {
-        root: d.to_path_buf(),
-        charts: (0..s.charts.len())
-            .filter(|&c| s.chart_rel(c).starts_with(d))
-            .collect(),
-        files: (0..s.members.len())
-            .filter(|&f| s.members[f].rel.starts_with(d))
-            .collect(),
+    let charts: Vec<usize> = files.iter().filter_map(|&f| s.chart_of(f)).collect();
+    let below = |d: &Path| {
+        let mut files: Vec<usize> = s.below(d).collect();
+        files.sort_unstable();
+        Package {
+            root: d.to_path_buf(),
+            charts: files.iter().filter_map(|&f| s.chart_of(f)).collect(),
+            files,
+        }
     };
     if !charts.is_empty() {
         // (1) what its charts use is here: all of it is one song's
@@ -364,7 +399,7 @@ mod tests {
                 }
             })
             .collect();
-        Staged::read(&mem, root, members, false)
+        Staged::read(&mem, root, members, false, None)
     }
 
     fn roots(s: &Staged) -> Vec<(String, usize, usize)> {
@@ -471,6 +506,90 @@ mod tests {
         assert_eq!(roots(&s), [("".into(), 2, 3)]);
         // no chart: no package
         assert!(split(&staged(&[("x.ogg", "x")])).is_empty());
+    }
+
+    /// A download of folders and charts beyond counting: each folder's
+    /// files are looked at once, whatever the number of the others and of
+    /// the charts beside them.
+    #[test]
+    fn many_folders_and_many_charts() {
+        // a pack of 20,000 songs, each a folder of its own
+        let paths: Vec<(String, String)> = (0..20_000)
+            .flat_map(|i| {
+                let chart = format!("#TITLE Song {i}\n#WAV01 01.wav\n");
+                [
+                    (format!("Pack/{i}/a.bms"), chart),
+                    (format!("Pack/{i}/01.ogg"), "x".into()),
+                ]
+            })
+            .collect();
+        let files: Vec<(&str, &str)> =
+            (paths.iter().map(|(p, b)| (p.as_str(), b.as_str()))).collect();
+        let s = staged(&files);
+        let packages = split(&s);
+        assert_eq!(packages.len(), 20_000);
+        assert!(packages
+            .iter()
+            .all(|p| p.charts.len() == 1 && p.files.len() == 2));
+        // one song's folder of 3,000 charts and 30,000 sounds
+        let chart = |i| format!("#TITLE Song [{i}]\n#ARTIST a\n#WAV01 {i}.wav\n#WAV02 none.wav\n");
+        let paths: Vec<(String, String)> = (0..3_000)
+            .map(|i| (format!("Song/{i}.bms"), chart(i)))
+            .chain((0..30_000).map(|i| (format!("Song/{i}.ogg"), "x".into())))
+            .collect();
+        let files: Vec<(&str, &str)> =
+            (paths.iter().map(|(p, b)| (p.as_str(), b.as_str()))).collect();
+        let s = staged(&files);
+        let packages = split(&s);
+        assert_eq!(roots(&s), [("Song".into(), 3_000, 33_000)]);
+        assert!(packages[0].has_audio(&s));
+        // (each chart has one of its two sounds)
+        assert!(!packages[0].complete(&s, Rules::default()));
+        let half = Rules {
+            min_coverage: 0.5,
+            ..Rules::default()
+        };
+        assert!(packages[0].complete(&s, half));
+        assert_eq!(packages[0].files_for(&s, Path::new("Song")).len(), 33_000);
+        assert_eq!(s.below(Path::new("Song")).count(), 33_000);
+        assert_eq!(s.below(Path::new("Son")).count(), 0);
+    }
+
+    /// A chart larger than any is one that cannot be read: it has no
+    /// hash of its own, and its download is one package.
+    #[test]
+    fn a_chart_too_large_is_not_read() {
+        let mem = crate::fs::Mem::default();
+        let root = Path::new("dl/.take");
+        let big = vec![b'\n'; crate::chart::MAX as usize + 1];
+        let files: [(&str, &[u8]); 3] = [
+            ("a/a.bms", SONG.as_bytes()),
+            ("b/big.bms", &big),
+            ("b/01.ogg", b"x"),
+        ];
+        let members = (files.iter())
+            .map(|(p, body)| {
+                mem.put(&root.join(p), body, 0);
+                Member {
+                    rel: PathBuf::from(p),
+                    size: body.len() as u64,
+                    mtime: None,
+                }
+            })
+            .collect();
+        let s = Staged::read(&mem, root, members, false, None);
+        assert!(s.charts[0].info.is_some() && s.charts[0].md5.len() == 32);
+        assert!(s.charts[1].info.is_none());
+        assert_eq!(
+            (s.charts[1].md5.as_str(), s.charts[1].sha256.as_str()),
+            ("", "")
+        );
+        assert_eq!(roots(&s), [("".into(), 2, 3)]);
+        // cancelled: the charts are read no further
+        let stop = Progress::new();
+        stop.cancel();
+        let s = Staged::read(&mem, root, s.members, false, Some(&stop));
+        assert!(s.charts.is_empty());
     }
 
     #[test]

@@ -32,7 +32,8 @@ pub enum Imported {
 }
 
 /// Bring a downloaded `file` into the library `lib` (what comes in added
-/// to it), as `req` says (where the file came from; `reinstall`...): as
+/// to it), as `req` says (where the file came from; `reinstall`; the name
+/// it was published under, when the file's own is not it...): as
 /// [`install::take`](crate::install::take) does, as one outcome. Archives
 /// are unpacked: a song new to the library into a folder named after the
 /// archive (when one of that name holds another song: `name (2)`...); a
@@ -47,7 +48,8 @@ pub fn import(
     lib: &mut Library,
     req: &Request,
 ) -> Result<(Imported, Vec<PathBuf>), String> {
-    if !is_archive(file) && !placement::is_chart(file) {
+    let named = req.file.as_deref().map_or(file, Path::new);
+    if !is_archive(named) && !placement::is_chart(named) {
         return Ok((Imported::Other(file.to_path_buf()), Vec::new()));
     }
     let downloads = file.parent().unwrap_or(Path::new(""));
@@ -95,7 +97,7 @@ pub fn unpack_into(
     store.create_dir_all(dest);
     let blob = match open(blob, store)? {
         Opened::Archive(format, r) => {
-            return Ok(unpack_from(r, format, store, dest, BUDGET)?.len());
+            return Ok(unpack_from(r, format, store, dest, BUDGET, None)?.len());
         }
         Opened::Not(_) if is_archive(Path::new(name)) => return Err("not an archive".into()),
         Opened::Not(blob) => blob,
@@ -265,6 +267,50 @@ mod tests {
         // nothing left of the folder it went through
         let left: Vec<PathBuf> = mem.0.lock().unwrap().keys().cloned().collect();
         assert_eq!(left.len(), 4, "{left:?}");
+    }
+
+    /// A download kept under a name of its keeper's making (a browser's
+    /// window's): what it is, and what its song's folder is named after,
+    /// are by the name it was published under.
+    #[test]
+    fn a_file_kept_under_another_name() {
+        use crate::fs::Mem;
+        let mem = Mem::default();
+        let kept = Path::new("dl/page-123.part");
+        let chart = "#TITLE Aurora\n#WAV01 01.wav\n";
+        let z = zip(&[("a.bms", chart), ("01.ogg", "x")]);
+        let lib = &mut Library::new(Path::new("bms"));
+        let named = |name: &str| Request {
+            file: Some(name.into()),
+            ..Default::default()
+        };
+        // by its own name, or one that is no archive's or chart's: nothing
+        // to bring in, whatever the file is
+        for req in [Request::default(), named("scan.json")] {
+            mem.put(kept, &z, 0);
+            let got = import(&mem, kept, lib, &req).unwrap().0;
+            assert_eq!(got, Imported::Other(kept.into()));
+        }
+        let got = import(&mem, kept, lib, &named("Aurora (ogg).zip"))
+            .unwrap()
+            .0;
+        assert_eq!(got, Imported::Unpacked("bms/Aurora (ogg)".into(), 2));
+        assert!(mem.get(kept).is_none());
+        // a name Windows keeps for a device names no folder
+        mem.put(
+            kept,
+            &zip(&[("b.bms", "#TITLE Other\n"), ("02.ogg", "x")]),
+            0,
+        );
+        let got = import(&mem, kept, lib, &named("nul.zip")).unwrap().0;
+        assert_eq!(got, Imported::Unpacked("bms/_nul".into(), 2));
+        // a chart on its own, by its name
+        mem.put(kept, b"#TITLE Aurora [X]\n#WAV01 01.wav\n", 0);
+        let got = import(&mem, kept, lib, &named("aurora_x.bms")).unwrap().0;
+        assert_eq!(
+            got,
+            Imported::Placed("bms/Aurora (ogg)/aurora_x.bms".into())
+        );
     }
 
     /// One library for a run: a song imported into it is there for the

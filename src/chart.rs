@@ -43,6 +43,17 @@ const MOVIE: [&str; 15] = [
     "flv", "rm",
 ];
 
+/// The largest chart file read (as vibeBMS's scan has it): a larger one is
+/// a chart that cannot be read.
+pub(crate) const MAX: u64 = 32 << 20;
+
+/// The chart file `p`, whole (None: it cannot be read, or is larger than
+/// [`MAX`]).
+pub(crate) fn read(fs: &dyn crate::fs::Fs, p: &Path) -> Option<Vec<u8>> {
+    let (_, size) = fs.stamp(p)?;
+    (size <= MAX).then(|| fs.read(p).ok()).flatten()
+}
+
 /// A chart's MD5 as it is compared: 32 hex digits, lower case (None: not
 /// one).
 pub(crate) fn md5_key(m: &str) -> Option<String> {
@@ -67,20 +78,13 @@ pub(crate) fn class_of(name: &str) -> Option<Class> {
     }
 }
 
-/// `list` with `name` added (once; none empty).
-fn push(list: &mut Vec<String>, name: &str) {
-    if !name.is_empty() && !list.iter().any(|x| x == name) {
-        list.push(name.to_string());
-    }
-}
-
 impl ChartInfo {
     /// A BGA file (`#BMPxx`, `bga_header`): an image or a movie by its
     /// extension (anything else is left out).
     fn add_bga(&mut self, name: &str) {
         match class_of(name) {
-            Some(Class::Image) => push(&mut self.images, name),
-            Some(Class::Movie) => push(&mut self.movies, name),
+            Some(Class::Image) => self.images.push(name.to_string()),
+            Some(Class::Movie) => self.movies.push(name.to_string()),
             _ => {}
         }
     }
@@ -154,43 +158,66 @@ pub(crate) fn info(path: &Path, bytes: &[u8]) -> Option<ChartInfo> {
         .filter(|f| seen.insert(*f))
         .map(String::from)
         .collect();
-    for f in bmps.into_values() {
+    seen.clear();
+    for f in bmps.into_values().filter(|f| seen.insert(*f)) {
         out.add_bga(f);
     }
     Some(out)
 }
 
+/// What is read of a bmson: its texts and the names of its sounds and BGA
+/// files (its notes, most of it, are passed by: nothing of them is kept).
+#[derive(serde::Deserialize)]
+struct Bmson {
+    info: BmsonInfo,
+    sound_channels: Option<Vec<Named>>,
+    key_channels: Option<Vec<Named>>,
+    mine_channels: Option<Vec<Named>>,
+    bga: Option<Bga>,
+}
+
+#[derive(serde::Deserialize)]
+struct BmsonInfo {
+    title: Option<String>,
+    artist: Option<String>,
+    eyecatch_image: Option<String>,
+    banner_image: Option<String>,
+    back_image: Option<String>,
+    preview_music: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Named {
+    name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Bga {
+    bga_header: Option<Vec<Named>>,
+}
+
 fn bmson_info(bytes: &[u8]) -> Option<ChartInfo> {
-    let v: serde_json::Value =
+    let b: Bmson =
         serde_json::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)).ok()?;
-    let info = v.get("info")?;
-    let s = |k: &str| {
-        info.get(k)
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
     let mut out = ChartInfo {
-        title: s("title"),
-        artist: s("artist"),
-        stagefile: s("eyecatch_image"),
-        banner: s("banner_image"),
-        backbmp: s("back_image"),
-        preview: s("preview_music"),
+        title: b.info.title.unwrap_or_default(),
+        artist: b.info.artist.unwrap_or_default(),
+        stagefile: b.info.eyecatch_image.unwrap_or_default(),
+        banner: b.info.banner_image.unwrap_or_default(),
+        backbmp: b.info.back_image.unwrap_or_default(),
+        preview: b.info.preview_music.unwrap_or_default(),
         ..Default::default()
     };
-    for key in ["sound_channels", "key_channels", "mine_channels"] {
-        for ch in v.get(key).and_then(|c| c.as_array()).into_iter().flatten() {
-            if let Some(n) = ch.get("name").and_then(|n| n.as_str()) {
-                push(&mut out.sounds, n);
-            }
-        }
-    }
-    let headers = v.pointer("/bga/bga_header").and_then(|h| h.as_array());
-    for h in headers.into_iter().flatten() {
-        if let Some(n) = h.get("name").and_then(|n| n.as_str()) {
-            out.add_bga(n);
-        }
+    // (each name once: a chart may name any number)
+    let names = |list: Option<Vec<Named>>| {
+        let mut seen = std::collections::HashSet::new();
+        let all = list.into_iter().flatten().filter_map(|n| n.name);
+        all.filter(move |n| !n.is_empty() && seen.insert(n.clone()))
+    };
+    let channels = [b.sound_channels, b.key_channels, b.mine_channels];
+    out.sounds = names(Some(channels.into_iter().flatten().flatten().collect())).collect();
+    for n in names(b.bga.and_then(|b| b.bga_header)) {
+        out.add_bga(&n);
     }
     Some(out)
 }
@@ -234,5 +261,37 @@ mod tests {
         assert_eq!(class_of("x.jpeg"), Some(Class::Image));
         assert_eq!(class_of("x.txt"), None);
         assert_eq!(class_of("noext"), None);
+    }
+
+    /// A chart larger than any is one that cannot be read; a bmson's
+    /// names are kept once each, however many it has.
+    #[test]
+    fn charts_too_large_and_names_without_end() {
+        let m = crate::fs::Mem::default();
+        m.put(Path::new("a.bms"), b"#TITLE A", 0);
+        m.put(Path::new("big.bms"), &vec![b' '; MAX as usize + 1], 0);
+        assert_eq!(read(&m, Path::new("a.bms")).unwrap(), b"#TITLE A");
+        assert!(read(&m, Path::new("big.bms")).is_none());
+        assert!(read(&m, Path::new("none.bms")).is_none());
+        // (their notes are not kept; a field left null is none)
+        let names = |n: usize, ext: &str| -> String {
+            let one = |i| format!(r#"{{"name":"{i}.{ext}","notes":[{{"x":1,"y":0}}]}}"#);
+            (0..n)
+                .map(|i| one(i) + "," + &one(i))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let j = format!(
+            r#"{{"info":{{"title":"t","artist":null}},"sound_channels":[{}],"mine_channels":null,"bga":{{"bga_header":[{}]}}}}"#,
+            names(20_000, "wav"),
+            names(20_000, "png")
+        );
+        let i = info(Path::new("x.bmson"), j.as_bytes()).unwrap();
+        assert_eq!((i.title.as_str(), i.artist.as_str()), ("t", ""));
+        assert_eq!((i.sounds.len(), i.images.len()), (20_000, 20_000));
+        assert_eq!(
+            (i.sounds[1].as_str(), i.images[1].as_str()),
+            ("1.wav", "1.png")
+        );
     }
 }

@@ -52,6 +52,17 @@ pub trait Store: Fs {
     /// Make the folder `p` and those above it (a store without folders of
     /// their own needs nothing).
     fn create_dir_all(&self, _p: &Path) {}
+    /// Make the folder `p` (and those above it), which must not be there
+    /// (`AlreadyExists`): a folder what passes through is staged in is
+    /// this run's own, not one another made first. A store that can makes
+    /// it for its owner only.
+    fn create_new_dir(&self, p: &Path) -> io::Result<()> {
+        if self.stamp(p).is_some() || self.read_dir(p).is_ok() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        self.create_dir_all(p);
+        Ok(())
+    }
     /// Copy the file `from` to the new file `to`, with its time: read
     /// whole and written, unless the store can do better.
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -90,6 +101,43 @@ pub fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Whether Windows keeps the file name `name` for a device, whatever
+/// comes after its first dot (`CON`, `nul.txt`, `COM1`, `LPT²`).
+pub(crate) fn device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    let numbered = |port: &str| {
+        let mut rest = stem.strip_prefix(port).unwrap_or("").chars();
+        let digit = rest.next().is_some_and(|c| "0123456789¹²³".contains(c));
+        digit && rest.next().is_none()
+    };
+    let devices = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"];
+    devices.contains(&stem.as_str()) || numbered("COM") || numbered("LPT")
+}
+
+/// One part of a path (a file's or a folder's name) as every file system
+/// holds it, Windows' too, wherever it is written (a library may be
+/// copied there): the characters Windows refuses and control characters
+/// as `_`, no dot or space at its end (Windows drops them: `a.bms.` would
+/// be `a.bms`), `_` before a device's name. None: nothing is left, or it
+/// is `.` or `..`.
+pub(crate) fn safe_part(part: &str) -> Option<String> {
+    let part: String = part
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let part = part.trim_end_matches(['.', ' ']);
+    match part {
+        "" => None,
+        p if device_name(p) => Some(format!("_{p}")),
+        p => Some(p.to_string()),
+    }
 }
 
 /// `std::fs`.
@@ -192,6 +240,17 @@ impl Store for Disk {
 
     fn create_dir_all(&self, p: &Path) {
         let _ = std::fs::create_dir_all(p);
+    }
+
+    fn create_new_dir(&self, p: &Path) -> io::Result<()> {
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut dir = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+        dir.create(p)
     }
 
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -338,5 +397,60 @@ mod tests {
         Disk.rename(&a, &d.join("e")).unwrap();
         assert!(!a.exists() && d.join("e").is_file());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A new folder is made only where there is nothing (not even a link
+    /// that leads nowhere), for its owner alone.
+    #[test]
+    fn a_new_folder_is_this_runs_own() {
+        let d = crate::testkit::tmp("new-dir");
+        let stage = d.join("dl/.take-x");
+        Disk.create_new_dir(&stage).unwrap();
+        assert!(stage.is_dir());
+        let e = Disk.create_new_dir(&stage).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&stage).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+            let link = d.join("dl/.take-y");
+            std::os::unix::fs::symlink(d.join("elsewhere"), &link).unwrap();
+            let e = Disk.create_new_dir(&link).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+            assert!(!d.join("elsewhere").exists());
+        }
+        // a store without folders of its own: none where files are
+        let m = Mem::default();
+        m.put(Path::new("dl/.take-x/a"), b"a", 0);
+        let e = m.create_new_dir(Path::new("dl/.take-x")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert!(m.create_new_dir(Path::new("dl/.take-y")).is_ok());
+    }
+
+    #[test]
+    fn parts_windows_holds_too() {
+        for (name, safe) in [
+            ("a.bms", Some("a.bms")),
+            ("a.bms.", Some("a.bms")),
+            ("a.bms . .", Some("a.bms")),
+            (" a b ", Some(" a b")),
+            ("CON", Some("_CON")),
+            ("nul.wav", Some("_nul.wav")),
+            ("Com1.tar.gz", Some("_Com1.tar.gz")),
+            ("LPT² .txt", Some("_LPT² .txt")),
+            ("aux ", Some("_aux")),
+            ("COM10", Some("COM10")),
+            ("console.log", Some("console.log")),
+            ("a<b>c|d?e*f\"g", Some("a_b_c_d_e_f_g")),
+            ("a\tb\u{1b}[2J", Some("a_b_[2J")),
+            ("ソ.bms", Some("ソ.bms")),
+            ("...", None),
+            (". .", None),
+            ("..", None),
+            ("", None),
+        ] {
+            assert_eq!(safe_part(name).as_deref(), safe, "{name:?}");
+        }
     }
 }

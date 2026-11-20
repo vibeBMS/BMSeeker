@@ -4,7 +4,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -12,32 +11,45 @@ import (
 
 const pagesHint = "These links give a page, not a file: open one, and its download comes into the library."
 
-// pressDownload presses a share page's Download button (or link) once, as
-// a person would: OneDrive's pages build theirs by script, so it is looked
-// for again for a minute.
-const pressDownload = `(function () {
-  if (window.top !== window || window.__bmseekerPressed) return;
-  var name = /^\s*(download|ダウンロード|다운로드|下载|下載|普通下载)(\s*\(.*\))?\s*$/i;
-  var tries = 0;
-  var timer = setInterval(function () {
-    if (++tries > 120) return clearInterval(timer);
-    var all = document.querySelectorAll('button, [role="button"], [role="menuitem"], a, #downloadButton');
-    for (var i = 0; i < all.length; i++) {
-      var b = all[i];
-      var label = (b.getAttribute("aria-label") || b.textContent || "").trim();
-      if ((b.id === "downloadButton" || name.test(label)) && !b.disabled && b.offsetParent !== null) {
-        window.__bmseekerPressed = true;
-        clearInterval(timer);
-        b.click();
-        return;
-      }
-    }
-  }, 500);
-})();`
+// pageScript is what a page's window runs on every page it shows: the
+// CLI's (`link page-script`), which presses a OneDrive share's Download
+// button as a person would and does nothing on any other host. The window
+// has no script of its own: where a button is pressed for the user is the
+// library's to say. Asked once; "" when the CLI has none to give (the
+// button is then the user's to press).
+func (a *app) pageScript() string {
+	a.scriptOnce.Do(func() {
+		err := runCLI([]string{"link", "page-script"}, func(r Record) { a.script = r.S("script") }, nil)
+		if err != nil {
+			a.log = append(a.log, "a page's Download button is not pressed for you: "+err.Error())
+		}
+	})
+	return a.script
+}
 
-// openPage shows p's link in a window of its own; what it downloads goes
-// into the library's downloads folder and is imported, and the window
-// closes.
+// savePath is where a page's download is kept until it is imported: a new
+// file in dir (the library's downloads folder), under a name of the
+// window's making. The page's name for it is no file's name here: it may
+// be that of a file the folder has (the library's scan, a chart that
+// waits for its song), which it would replace.
+func savePath(dir string) (string, error) {
+	f, err := os.CreateTemp(dir, "page-*.part")
+	if err != nil {
+		return "", err
+	}
+	return f.Name(), f.Close()
+}
+
+// importArgs is the CLI's command for the download at path, which its
+// page named name: the name says what it is (an archive, a chart) and
+// names a song's folder, as the CLI makes a name of it.
+func importArgs(lib, name, path string) []string {
+	return []string{"library", "import", "--library=" + lib, "--name=" + name, "--", path}
+}
+
+// openPage shows p's link in a window of its own; its download (the first:
+// a page is opened for one song) goes into the library's downloads folder
+// and is imported, and the window closes.
 func (a *app) openPage(p page) {
 	if !a.browsable(p) {
 		return
@@ -53,7 +65,7 @@ func (a *app) openPage(p page) {
 		URL:    p.Link,
 		Width:  1100,
 		Height: 800,
-		Page:   mygo.PageOptions{PreloadScript: pressDownload},
+		Page:   mygo.PageOptions{PreloadScript: a.pageScript()},
 	})
 	pg := win.Page()
 	if pg == nil {
@@ -61,19 +73,41 @@ func (a *app) openPage(p page) {
 		win.Close()
 		return
 	}
+	// the download's name as its page gives it ("": none has begun)
+	var name string
 	pg.OnWillDownload(func(e *mygo.DownloadEvent) {
-		e.Path = filepath.Join(dir, filepath.Base(e.SuggestedName))
-		a.say("%s: downloading %s", p.Title, e.SuggestedName)
+		if name != "" {
+			e.PreventDefault()
+			return
+		}
+		path, err := savePath(dir)
+		if err != nil {
+			e.PreventDefault()
+			a.say("%s: %v", p.Title, err)
+			return
+		}
+		name, e.Path = e.SuggestedName, path
+		a.say("%s: downloading %s", p.Title, name)
 	})
 	pg.OnDownloadDone(func(d *mygo.Download) {
+		named := name
 		if d.Err != nil {
+			// (another try may follow)
+			name = ""
+			os.Remove(d.Path)
 			a.say("%s: %v", p.Title, d.Err)
 			return
 		}
 		mygo.RunOnMain(func() { win.Close() })
-		a.job("Importing", func() error {
+		a.job("Importing "+named, func() error {
+			// (what did not come in has no name to be kept under)
+			defer os.Remove(d.Path)
 			got := false
-			err := a.cli([]string{"library", "import", "--library=" + lib, "--", d.Path}, func(r Record) {
+			err := a.cli(importArgs(lib, named, d.Path), func(r Record) {
+				if r.S("state") == "other" {
+					a.say("%s: %s is no archive or chart: not kept", p.Title, named)
+					return
+				}
 				got = true
 				a.say("%s: %s %s", p.Title, r.S("state"), r.S("path"))
 			})

@@ -10,6 +10,7 @@
 
 use crate::chart::ChartInfo;
 use crate::text::pattern::Pattern;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -59,10 +60,18 @@ fn invalid(c: char) -> bool {
     matches!(c, '"' | '<' | '>' | '|' | ':' | '*' | '?' | '\\' | '/') || c.is_control()
 }
 
-/// Wide ASCII and spaces narrow, narrow kana wide (NFKC), spaces as one.
+/// Characters of a title or an artist that count in a folder's name (the
+/// name is [`MAX_NAME`] bytes at most), and the charts whose titles are
+/// compared, each with each: no song has as many, and a download made to
+/// be slow to name is cut to them.
+const MAX_CHARS: usize = 256;
+const MAX_CHARTS: usize = 256;
+
+/// Wide ASCII and spaces narrow, narrow kana wide (NFKC: [`MAX_CHARS`] of
+/// it), spaces as one.
 fn natural(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
-    let s: String = s.nfkc().collect();
+    let s: String = s.nfkc().take(MAX_CHARS).collect();
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -113,40 +122,56 @@ fn tidy(s: &str) -> String {
 /// none of two letters: each one, its chart name cut. Tidied (prefixes, credits, level tails),
 /// the best is the one with the most of length^0.65 × count.
 pub(crate) fn longest_common(strings: &[&str]) -> String {
-    let given: Vec<&str> = strings
+    let given: Vec<String> = strings
         .iter()
-        .copied()
         .filter(|s| !s.trim().is_empty())
+        .take(MAX_CHARTS)
+        .map(|s| natural(s))
         .collect();
-    let mut list: Vec<String> = Vec::new();
-    for (i, a) in given.iter().enumerate() {
+    let cut: Vec<String> = given.iter().map(|s| cut_chart_name(s)).collect();
+    let mut list = Counted::default();
+    for (i, a) in cut.iter().enumerate() {
         for b in &given[i + 1..] {
-            let a = cut_chart_name(&natural(a));
-            let c = common_start(&a, &natural(b)).trim().to_string();
+            let c = common_start(a, b).trim().to_string();
             if c.chars().count() > 1 {
-                list.push(c);
+                list.add(c, 1);
             }
         }
     }
-    if list.is_empty() {
-        list = given.iter().map(|s| cut_chart_name(&natural(s))).collect();
-    }
-    // (name, count) in the order first met
-    let mut groups: Vec<(String, usize)> = Vec::new();
-    for s in list.iter().map(|s| tidy(s)) {
-        match groups.iter_mut().find(|g| g.0 == s) {
-            Some(g) => g.1 += 1,
-            None => groups.push((s, 1)),
+    if list.0.is_empty() {
+        for a in cut {
+            list.add(a, 1);
         }
+    }
+    // (each candidate tidied once, however many pairs gave it)
+    let mut groups = Counted::default();
+    for (s, n) in &list.0 {
+        groups.add(tidy(s), *n);
     }
     let score = |g: &(String, usize)| (g.0.chars().count() as f64).powf(0.65) * g.1 as f64;
     let mut best: Option<&(String, usize)> = None;
-    for g in &groups {
+    for g in &groups.0 {
         if best.is_none_or(|b| score(g) > score(b)) {
             best = Some(g);
         }
     }
     best.map(|b| b.0.clone()).unwrap_or_default()
+}
+
+/// Names with how many times each was given, in the order first met.
+#[derive(Default)]
+struct Counted(Vec<(String, usize)>, HashMap<String, usize>);
+
+impl Counted {
+    fn add(&mut self, name: String, n: usize) {
+        match self.1.get(&name) {
+            Some(&at) => self.0[at].1 += n,
+            None => {
+                self.1.insert(name.clone(), self.0.len());
+                self.0.push((name, n));
+            }
+        }
+    }
 }
 
 /// Bytes `s` takes in Shift_JIS (a character it cannot have: as UTF-8).
@@ -178,19 +203,9 @@ fn sjis_only(s: &str) -> String {
 fn valid(s: &str) -> String {
     let s: String = s.chars().filter(|c| !invalid(*c)).collect();
     let s = s.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '\u{3000}');
-    let upper = s.to_ascii_uppercase();
-    let stem = upper.split('.').next().unwrap_or("");
-    let reserved = matches!(stem, "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
+    if crate::fs::device_name(s) {
         // (`CON.x` is `x`)
-        return s
-            .split_once('.')
-            .map(|(_, r)| r.trim_start_matches('.'))
-            .unwrap_or("")
-            .into();
+        return valid(s.split_once('.').map_or("", |(_, rest)| rest));
     }
     s.to_string()
 }
@@ -279,6 +294,8 @@ mod tests {
         assert_eq!(longest_common(&["A/B: C?"]), "A／B： C？");
         assert_eq!(longest_common(&["ＡＢＣ"]), "ABC");
         assert_eq!(longest_common(&[]), "");
+        // the same title given by many charts counts as many times
+        assert_eq!(longest_common(&["Song", "Song", "Song", "Other"]), "Song");
         // the longer shared by more wins
         assert_eq!(
             longest_common(&["Longer Title [A]", "Longer Title [B]", "Lo"]),
@@ -311,7 +328,22 @@ mod tests {
         assert_eq!(valid(" .name. "), "name");
         assert_eq!(valid("CON"), "");
         assert_eq!(valid("com1.txt"), "txt");
+        assert_eq!(valid("CON.nul.x"), "x");
         let parent = Path::new("/").join("x".repeat(240));
         assert_eq!(fit_path(&parent, "abcdefghijkl"), "abcdefgh");
+    }
+
+    /// A download made to be slow to name (charts beyond counting, titles
+    /// of brackets without end): named by its first charts and the start
+    /// of their titles.
+    #[test]
+    fn many_charts_and_long_titles() {
+        let charts: Vec<ChartInfo> = (0..20_000)
+            .map(|i| chart(&format!("Song [{i}]"), "alpha"))
+            .collect();
+        assert_eq!(folder_name(&charts, DEFAULT_FORMAT, false), "[alpha] Song");
+        let long = "(".repeat(100_000);
+        let n = folder_name(&[chart(&long, "a"), chart(&long, "a")], "%TITLE%", false);
+        assert!(sjis_len(&n) <= MAX_NAME, "{}", n.len());
     }
 }
