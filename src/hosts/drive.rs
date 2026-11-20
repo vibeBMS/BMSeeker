@@ -270,5 +270,15 @@ mod tests {
         .unwrap();
         assert!(t.url.contains("id=B"));
         assert_eq!(t.name.as_deref(), Some("song_ogg.zip"));
+        // a listing's name is one file name, whatever it says
+        let page = br#"<div class="flip-entry"><a href="https://drive.google.com/file/d/A/view"><div class="flip-entry-title">../../x/song.zip</div></a></div>"#;
+        let listing = "https://drive.google.com/embeddedfolderview?id=F";
+        for link in [
+            "https://drive.google.com/drive/folders/F",
+            "https://drive.google.com/drive/folders/F#..%2F..%2Fx%2Fsong.zip",
+        ] {
+            let t = resolve(link, &[(listing, page)]).unwrap();
+            assert_eq!(t.name.as_deref(), Some("_.._x_song.zip"), "{link}");
+        }
     }
 }

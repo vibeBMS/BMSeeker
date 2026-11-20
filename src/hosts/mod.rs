@@ -72,7 +72,7 @@ pub struct Target {
     /// A MEGA file's 32-byte key: the bytes come encrypted ([`MegaCipher`]).
     pub mega_key: Option<Vec<u8>>,
     /// Its name where the host tells it (a folder's listing, MEGA, the
-    /// mirror); else the server's or the URL's.
+    /// mirror), made one file name; else the server's or the URL's.
     pub name: Option<String>,
 }
 
@@ -85,9 +85,11 @@ impl Target {
         }
     }
 
+    /// With the name a host told (whatever text it is): one file name of
+    /// it, no path.
     fn named(url: impl Into<String>, name: Option<String>) -> Target {
         Target {
-            name,
+            name: name.as_deref().and_then(crate::text::safe_file_name),
             ..Target::url(url)
         }
     }

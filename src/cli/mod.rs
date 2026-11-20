@@ -226,4 +226,49 @@ mod tests {
         assert_eq!(refused["refused"], "mega.nz");
         assert_eq!(refused["code"], "rate_limited");
     }
+
+    /// `link get` into a folder: the file is put right in it, under one
+    /// file name, whatever its host named it (a Drive folder's listing).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn link_get_keeps_to_its_folder() {
+        const ZIP: &[u8] = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        const LISTING: &[u8] = br#"<div class="flip-entry"><a href="https://drive.google.com/file/d/A/view"><div class="flip-entry-title">../../evil.zip</div></a></div>"#;
+        struct Drive;
+        impl Driver for Drive {
+            fn perform(&self, effect: Effect) -> Fed {
+                match effect {
+                    Effect::Http(_) => Fed::Http(Ok(LISTING.to_vec())),
+                    Effect::Download { slot, .. } => {
+                        std::fs::write(&slot, ZIP).unwrap();
+                        Fed::Downloaded(Ok(crate::install::job::Served {
+                            blob: crate::unpack::Blob::File(slot),
+                            name: None,
+                            at: None,
+                            head: ZIP.to_vec(),
+                        }))
+                    }
+                    Effect::Sleep(_) => Fed::Woke,
+                }
+            }
+        }
+        let tmp = crate::testkit::tmp("link-get");
+        let out = tmp.join("a/b/out");
+        std::fs::create_dir_all(&out).unwrap();
+        let run = Run {
+            out: Out::new(true, |_| {}),
+            cx: Context::default(),
+            fs: Arc::new(crate::fs::Disk),
+            net: &Drive,
+        };
+        let link = "https://drive.google.com/drive/folders/F";
+        let args = ["bmseeker", "link", "get", link, "-o", out.to_str().unwrap()];
+        Cli::try_parse_from(args).unwrap().run(&run).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["_.._evil.zip"]);
+        assert!(!tmp.join("a/evil.zip").exists());
+    }
 }

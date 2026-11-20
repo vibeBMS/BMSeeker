@@ -93,11 +93,13 @@ impl Task for MegaTask {
         };
         match std::mem::replace(&mut self.state, State::Done) {
             State::File { key, .. } => Next::Done(match mega_answer(&body) {
-                Ok(url) => Resolved::File(Target {
-                    url,
-                    name: mega_file_name(&body, &key),
-                    mega_key: Some(key),
-                }),
+                Ok(url) => {
+                    let named = Target::named(url, mega_file_name(&body, &key));
+                    Resolved::File(Target {
+                        mega_key: Some(key),
+                        ..named
+                    })
+                }
                 Err(e) => Resolved::Failed(e),
             }),
             // the folder's archive, then its download URL
@@ -125,9 +127,8 @@ impl Task for MegaTask {
             }
             State::Picked { key, name } => Next::Done(match mega_answer(&body) {
                 Ok(url) => Resolved::File(Target {
-                    url,
-                    name: Some(name),
                     mega_key: Some(key),
+                    ..Target::named(url, Some(name))
                 }),
                 Err(e) => Resolved::Failed(e),
             }),
@@ -185,7 +186,14 @@ pub(crate) fn mega_link(u: &str) -> Option<(String, Vec<u8>)> {
         u[u.find("#!")? + 2..].split_once('!')?
     };
     let key = b64url(k).filter(|k| k.len() == 32)?;
-    Some((h.to_string(), key))
+    Some((handle(h)?, key))
+}
+
+/// A file's, folder's or node's handle as MEGA writes them (letters,
+/// digits, `-`, `_`): it goes into the API's requests as it is.
+fn handle(h: &str) -> Option<String> {
+    let ok = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    (!h.is_empty() && h.bytes().all(ok)).then(|| h.to_string())
 }
 
 /// A MEGA folder link (`mega.nz/folder/H#K`, with `/file/N` or
@@ -202,7 +210,7 @@ fn mega_folder(u: &str) -> Option<(String, Vec<u8>, Option<String>)> {
     let node = parts
         .rfind(|p| !p.is_empty() && *p != "file" && *p != "folder")
         .map(str::to_string);
-    Some((h.to_string(), key, node))
+    Some((handle(h)?, key, node))
 }
 
 /// A MEGA folder link's handle and the node in it (as [`mega_folder`]).
@@ -261,7 +269,7 @@ fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, NetError> {
             let name = mega_attr_name(&attr, &k)?;
             Some((k, name))
         });
-        if let Some((key, name)) = found {
+        if let (Some((key, name)), Some(handle)) = (found, handle(s("h"))) {
             let mut under = Vec::new();
             let mut at = s("p");
             while let Some(p) = parent.get(at).filter(|_| under.len() < 64) {
@@ -269,7 +277,7 @@ fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, NetError> {
                 at = p;
             }
             out.push(MegaFile {
-                handle: s("h").to_string(),
+                handle,
                 under,
                 name,
                 key,
@@ -513,6 +521,17 @@ mod tests {
         assert_eq!(t.mega_key.map(|k| k.len()), Some(32));
         assert_eq!(b64url("AQID").unwrap(), [1, 2, 3]);
         assert_eq!(b64url("-_8").unwrap(), [0xfb, 0xff]);
+        // a handle is letters, digits, `-` and `_`: any other text is no
+        // MEGA link, and the API is not asked
+        let (key, folder_key) = (link.split_once('#').unwrap().1, "wfv-iI4UuSIaGpP0oFZdtQ");
+        for h in [r#"x","a":"f"#, "x&sid=1", "x y", ""] {
+            let file = format!("https://mega.nz/file/{h}#{key}");
+            assert_eq!(mega_link(&file), None, "{h}");
+            assert_eq!(resolve(&file, &[]), Err(crate::hosts::Fetch::Page), "{h}");
+            let folder = format!("https://mega.nz/folder/{h}#{folder_key}");
+            assert!(mega_folder(&folder).is_none(), "{h}");
+            assert_eq!(resolve(&folder, &[]), Err(crate::hosts::Fetch::Page), "{h}");
+        }
     }
 
     /// Which archive of a MEGA pack each song gets: `BMSEEKER_PACKS=FILE`
@@ -661,5 +680,31 @@ mod tests {
             pick_mega(&files, Some("B"), None).map(|f| f.handle.as_str()),
             Some("B")
         );
+
+        // a node whose handle is not one is left out
+        let odd = format!(r#"[{{"f":[{}]}}]"#, node(r#"A\",\"a\":\"f"#, "a.zip", 1));
+        assert!(mega_nodes(odd.as_bytes(), &folder).unwrap().is_empty());
+
+        // a name is one file name, whatever the attributes say: a folder's
+        // file, and a file link's
+        const API: &str = "https://g.api.mega.co.nz/cs?id=0";
+        let body = format!(
+            r#"[{{"g":"https://gfs.example/dl/x","f":[{}]}}]"#,
+            node("A", "../../evil.zip", 1)
+        );
+        let link = format!("https://mega.nz/folder/FNFDCQaT#{}", b64(&folder));
+        let listing = format!("{API}&n=FNFDCQaT");
+        let t = resolve(&link, &[(listing.as_str(), body.as_bytes())]).unwrap();
+        assert_eq!(t.name.as_deref(), Some("_.._evil.zip"));
+        let key = "Og0LBoWkfbKwxUceGvzLHDl2exyI0l1DiQ3XNw79zMw";
+        let k = b64url(key).unwrap();
+        let ak: Vec<u8> = (0..16).map(|i| k[i] ^ k[i + 16]).collect();
+        let mut a = br#"MEGA{"n":"/home/u/.bashrc"}"#.to_vec();
+        a.resize(a.len().div_ceil(16) * 16, 0);
+        enc(&ak, &mut a, true);
+        let body = format!(r#"[{{"g":"https://gfs.example/dl/x","at":"{}"}}]"#, b64(&a));
+        let link = format!("https://mega.nz/file/bzQy3bYS#{key}");
+        let t = resolve(&link, &[(API, body.as_bytes())]).unwrap();
+        assert_eq!(t.name.as_deref(), Some("_home_u_.bashrc"));
     }
 }

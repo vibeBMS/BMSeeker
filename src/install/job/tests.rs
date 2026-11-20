@@ -112,6 +112,56 @@ fn a_file_and_its_name() {
     );
 }
 
+/// A host that names its file as it likes.
+struct Named(&'static str);
+
+impl Host for Named {
+    fn name(&self) -> &'static str {
+        "named"
+    }
+    fn accepts(&self, link: &Link) -> bool {
+        link.on("naming.test")
+    }
+    fn open(&self, l: &Link, _: Option<&Want>, _: &crate::config::Config) -> BoxTask<Resolved> {
+        Ready::boxed(Resolved::File(Target {
+            name: Some(self.0.into()),
+            ..Target::url(l.url.clone())
+        }))
+    }
+}
+
+/// The name is one file name, whoever said it (a host, the server's
+/// transport) and whatever it says: nothing a path could be made of.
+#[test]
+fn a_name_is_one_file_name() {
+    let link = "https://naming.test/f";
+    let got = |host: &'static str, server: Option<&str>| {
+        let mut hosts = Hosts::default();
+        hosts.first(Box::new(Named(host)));
+        let cx = Context {
+            hosts: Arc::new(hosts),
+            ..Default::default()
+        };
+        let d = Canned::default();
+        let served = Served::bytes(ZIP.to_vec(), server.map(String::from), None);
+        d.file(link, Ok(served));
+        acquire(link, &cx, &d).unwrap().name
+    };
+    assert_eq!(got("../../.bashrc", None), "_.._.bashrc");
+    assert_eq!(
+        got("/home/u/.ssh/authorized_keys", None),
+        "_home_u_.ssh_authorized_keys"
+    );
+    assert_eq!(got(r"C:\Users\u\x.zip", None), "C__Users_u_x.zip");
+    assert_eq!(got("..", Some(r"..\..\y.zip")), "_.._y.zip");
+    assert_eq!(got("...", Some("/")), "_");
+    assert_eq!(got("", Some("..")), "f");
+    assert_eq!(
+        got("[xi] Beatrice (ogg).zip", None),
+        "[xi] Beatrice (ogg).zip"
+    );
+}
+
 #[test]
 fn a_page_is_a_page() {
     let d = Canned::default();
