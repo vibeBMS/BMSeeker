@@ -9,6 +9,11 @@
 //! browser check) is kept by the commands' run (`bmseeker::refusal`); the
 //! proxy's own refusals (this page's origin not allowed: no
 //! `X-Final-Url`) are no host's.
+//!
+//! A synchronous request has one time limit and gives its body whole: an
+//! answer has `ANSWER_MS`, a download `DOWNLOAD_MS`, and what came larger
+//! than it may be (an answer's kind, `DOWNLOAD_MAX`) is dropped before it
+//! is copied into the page's memory.
 
 pub use bmseeker::web::{proxied, sends_cors, PROXY};
 
@@ -21,7 +26,7 @@ mod xhr {
     use bmseeker::install::job::{Driver, Effect, Fed, Unserved};
     use bmseeker::net::disposition_name;
     use bmseeker::net::{NetError, Request};
-    use bmseeker::web::{served, unserved};
+    use bmseeker::web::{served, unserved, ANSWER_MS, DOWNLOAD_MAX, DOWNLOAD_MS};
     use web_sys::{XmlHttpRequest, XmlHttpRequestResponseType};
 
     /// The job's effects done in a worker, one at a time, blocking it:
@@ -44,19 +49,26 @@ mod xhr {
         }
     }
 
+    /// `url`'s answer within `timeout_ms`, its body if it has `limit`
+    /// bytes at most (a larger one is left where the browser has it).
     fn send(
         method: &str,
         url: &str,
         body: Option<&[u8]>,
         timeout_ms: u32,
+        limit: usize,
     ) -> Result<Got, NetError> {
         let fail = |e: wasm_bindgen::JsValue| {
-            NetError::Other(
-                js_sys::Reflect::get(&e, &"message".into())
-                    .ok()
-                    .and_then(|m| m.as_string())
-                    .unwrap_or_else(|| "the connection failed".into()),
-            )
+            let said = |key: &str| {
+                let v = js_sys::Reflect::get(&e, &key.into()).ok();
+                v.and_then(|m| m.as_string())
+            };
+            NetError::Other(match said("name").as_deref() {
+                Some("TimeoutError") => {
+                    format!("took longer than {} s: given up", timeout_ms / 1000)
+                }
+                _ => said("message").unwrap_or_else(|| "the connection failed".into()),
+            })
         };
         let xhr = XmlHttpRequest::new().map_err(fail)?;
         xhr.open_with_async(method, url, false).map_err(fail)?;
@@ -78,12 +90,18 @@ mod xhr {
                 "the connection failed (or the proxy refused it)".into(),
             ));
         }
-        let body = xhr
+        let bytes = xhr
             .response()
             .ok()
             .filter(|r| !r.is_null() && !r.is_undefined())
-            .map(|r| js_sys::Uint8Array::new(&r).to_vec())
-            .unwrap_or_default();
+            .map(|r| js_sys::Uint8Array::new(&r));
+        let body = match bytes {
+            Some(b) if b.length() as usize > limit => {
+                return Err(bmseeker::net::too_large(limit));
+            }
+            Some(b) => b.to_vec(),
+            None => Vec::new(),
+        };
         Ok(Got { status, body, xhr })
     }
 
@@ -92,10 +110,12 @@ mod xhr {
             match effect {
                 Effect::Http(r) => {
                     let url = r.url();
+                    let asked = proxied(&self.proxy, url);
+                    let limit = r.limit();
                     let got = match &r {
-                        Request::Get(u) => send("GET", &proxied(&self.proxy, u), None, 60_000),
-                        Request::Post { url, body } => {
-                            send("POST", &proxied(&self.proxy, url), Some(body), 60_000)
+                        Request::Get(..) => send("GET", &asked, None, ANSWER_MS, limit),
+                        Request::Post { body, .. } => {
+                            send("POST", &asked, Some(body), ANSWER_MS, limit)
                         }
                     };
                     let through = !sends_cors(url);
@@ -111,8 +131,8 @@ mod xhr {
                     }))
                 }
                 Effect::Download { target, .. } => {
-                    // no time limit but the browser's: a song may be large
-                    let got = send("GET", &proxied(&self.proxy, &target.url), None, 0);
+                    let asked = proxied(&self.proxy, &target.url);
+                    let got = send("GET", &asked, None, DOWNLOAD_MS, DOWNLOAD_MAX as usize);
                     Fed::Downloaded(match got {
                         Ok(g) => {
                             let at = g.header("X-Final-Url");
@@ -120,7 +140,8 @@ mod xhr {
                                 let name = g
                                     .header("Content-Disposition")
                                     .and_then(|h| disposition_name(&h));
-                                Ok(served(&target, g.body, name, at))
+                                served(&target, g.body, name, at.clone())
+                                    .map_err(|error| Unserved { error, at })
                             } else {
                                 let through = !sends_cors(&target.url);
                                 let error = unserved(

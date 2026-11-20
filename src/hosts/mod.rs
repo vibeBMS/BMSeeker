@@ -27,8 +27,10 @@ mod venues;
 
 pub use browser::PRESS_DOWNLOAD_JS;
 pub(crate) use key::DownloadKey;
-pub(crate) use mega::pack_artist;
+#[cfg(test)]
+pub(crate) use mega::tests::mega_file;
 pub use mega::MegaCipher;
+pub(crate) use mega::{pack_artist, MEGA_CHANGED};
 
 use crate::config::Config;
 use crate::net::{Answer, BoxTask, NetError, Next, Task};
@@ -119,17 +121,24 @@ pub(crate) struct Link {
     pub(crate) hops: u8,
 }
 
-/// What a link that is not an http(s) one comes to: no request is made
-/// for it, and it is no page for a browser either (`file:`,
-/// `javascript:`, an option of a command line).
-pub(crate) const NOT_WEB: &str = "not a web link (http:// or https://)";
+/// What a link that is not an http(s) one, or not plainly written, comes
+/// to: no request is made for it, and it is no page for a browser either
+/// (`file:`, `javascript:`, an option of a command line; a link whose host
+/// a browser would read otherwise).
+pub(crate) const NOT_WEB: &str =
+    "not a web link (http:// or https://, without a user name, backslash or control character)";
 
 impl Link {
-    /// An http(s) link.
+    /// An http(s) link, written as every URL parser reads it
+    /// ([`plainly_written`](crate::net::plainly_written)): the one place a
+    /// link's host is taken from, before any host's rule or key looks at
+    /// it.
     pub(crate) fn parse(url: &str, hops: u8) -> Option<Link> {
         let url = url.trim().to_string();
         let lower = url.to_ascii_lowercase();
-        if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        if !(lower.starts_with("https://") || lower.starts_with("http://"))
+            || !crate::net::plainly_written(&url)
+        {
             return None;
         }
         let host = crate::net::host(&lower).to_string();
@@ -156,7 +165,9 @@ pub(crate) struct Service {
     /// The domains its hosts are, or are under.
     domains: &'static [&'static str],
     /// A file host: its 401, 403 and 451 are a file's (Google Drive's
-    /// quota, a file shared privately), not a refusal of BMSeeker.
+    /// quota, a file shared privately), not a refusal of BMSeeker, and a
+    /// file that came from it is its uploader's, whatever page it looks
+    /// like.
     pub(crate) file_host: bool,
 }
 
@@ -189,6 +200,13 @@ const SERVICES: &[Service] = &[
     Service {
         name: "pixeldrain.com",
         domains: &["pixeldrain.com", "pixeldrain.net"],
+        file_host: true,
+    },
+    // (whoever has a repository puts files there: the event mirror's
+    // lists, and anyone's)
+    Service {
+        name: "raw.githubusercontent.com",
+        domains: &["raw.githubusercontent.com"],
         file_host: true,
     },
     Service {
@@ -423,7 +441,11 @@ impl Resolver {
     fn step(&mut self, next: Next<Resolved>) -> Next<Result<Target, Fetch>> {
         match next {
             Next::Ask(r) => Next::Ask(r),
-            Next::Done(Resolved::File(t)) => Next::Done(Ok(t)),
+            // (a file's address a page or an API gave is a link too)
+            Next::Done(Resolved::File(t)) => match Link::parse(&t.url, 0) {
+                Some(_) => Next::Done(Ok(t)),
+                None => self.or_next(Fetch::Failed(NOT_WEB.into())),
+            },
             Next::Done(Resolved::Follow(mut links))
                 if self.hops < MAX_HOPS && !links.is_empty() =>
             {
@@ -472,13 +494,13 @@ impl Task for Resolver {
     }
 }
 
-/// A GET whose answer `then` makes into a [`Resolved`] (a failed request:
-/// [`Resolved::Failed`]).
-pub(crate) fn get_then<F>(url: String, then: F) -> BoxTask<Resolved>
+/// A GET of `kind` whose answer `then` makes into a [`Resolved`] (a
+/// failed request: [`Resolved::Failed`]).
+pub(crate) fn get_then<F>(url: String, kind: crate::net::Kind, then: F) -> BoxTask<Resolved>
 where
     F: FnOnce(Vec<u8>) -> Resolved + Send + 'static,
 {
-    crate::net::get_then(url, |answer| match answer {
+    crate::net::get_as(url, kind, |answer| match answer {
         Ok(body) => then(body),
         Err(e) => Resolved::Failed(e),
     })

@@ -77,7 +77,7 @@ mod tests {
         fn perform(&self, effect: Effect) -> Fed {
             let find = |u: &str| self.0.iter().find(|(k, _)| *k == u).map(|(_, b)| b.clone());
             match effect {
-                Effect::Http(Request::Get(u) | Request::Post { url: u, .. }) => {
+                Effect::Http(Request::Get(u, _) | Request::Post { url: u, .. }) => {
                     Fed::Http(find(&u).ok_or(NetError::Status(404)))
                 }
                 Effect::Download { target, .. } => Fed::Downloaded(
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!((code, notes[0].as_str()), (0, version));
     }
 
-    /// Answers 403 on refusing.example, else 404; notes what was asked.
+    /// Answers 429 on refusing.example, else 404; notes what was asked.
     struct Refusing(RefCell<Vec<String>>);
 
     impl Driver for Refusing {
@@ -241,7 +241,7 @@ mod tests {
             };
             self.0.borrow_mut().push(url.clone());
             let n = if url.contains("refusing.example") {
-                403
+                429
             } else {
                 404
             };
@@ -289,7 +289,7 @@ mod tests {
             .collect();
         assert_eq!(refused.len(), 1, "{records:?}");
         assert_eq!(refused[0]["refused"], "refusing.example");
-        assert_eq!(refused[0]["status"], 403);
+        assert_eq!(refused[0]["status"], 429);
         assert_eq!(refused[0]["code"], "status");
         assert!(refused[0]["error"]
             .as_str()

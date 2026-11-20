@@ -16,6 +16,11 @@ use crate::chart::md5_key;
 use crate::table::{DifficultyTable, TableEntry};
 use std::collections::HashMap;
 
+/// The links kept for one chart: the sources give a few, and a list that
+/// gives one MD5 a link in each of its thousands of rows is looked through
+/// no further.
+const PER_CHART: usize = 64;
+
 /// Hosts that are gone (their links are filled as if empty).
 const DEAD: &[&str] = &["gnqg.rosx.net", "absolute.pv.land.to"];
 
@@ -75,7 +80,7 @@ impl Links {
             return;
         }
         let known = self.map.entry(k).or_default();
-        if !known.contains(&pair) {
+        if known.len() < PER_CHART && !known.contains(&pair) {
             known.push(pair);
         }
     }
@@ -105,15 +110,43 @@ impl Links {
         out
     }
 
-    /// The Stella uploader's list's format (an array of `{md5, url, url_diff, ...}`).
+    /// The Stella uploader's list's format (an array of `{md5, url, url_diff, ...}`),
+    /// each row taken as it is read.
     pub fn from_stella(json: &[u8]) -> Links {
+        use serde::de::{Deserializer, SeqAccess, Visitor};
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct Row {
+            #[serde(deserialize_with = "crate::json::text")]
+            md5: String,
+            #[serde(deserialize_with = "crate::json::text")]
+            url: String,
+            #[serde(deserialize_with = "crate::json::text")]
+            url_diff: String,
+        }
+        struct Rows<'a>(&'a mut Links);
+        impl<'de> Visitor<'de> for Rows<'_> {
+            type Value = ();
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of rows")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<(), A::Error> {
+                while let Some(row) = s.next_element::<crate::json::Object<Row>>()? {
+                    if let Some(r) = row.0 {
+                        self.0.add(&r.md5, &r.url, &r.url_diff);
+                    }
+                }
+                Ok(())
+            }
+        }
         let mut out = Links::default();
-        let rows: Vec<serde_json::Value> = serde_json::from_slice(json).unwrap_or_default();
-        let s = |r: &serde_json::Value, k: &str| {
-            r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
-        };
-        for r in &rows {
-            out.add(&s(r, "md5"), &s(r, "url"), &s(r, "url_diff"));
+        // (what is no list of rows, or ends as none, gives none)
+        let mut d = serde_json::Deserializer::from_slice(json);
+        if d.deserialize_seq(Rows(&mut out))
+            .and_then(|()| d.end())
+            .is_err()
+        {
+            return Links::default();
         }
         out
     }
@@ -123,7 +156,7 @@ impl Links {
         for (k, v) in other.map {
             let known = self.map.entry(k).or_default();
             for pair in v {
-                if !known.contains(&pair) {
+                if known.len() < PER_CHART && !known.contains(&pair) {
                     known.push(pair);
                 }
             }

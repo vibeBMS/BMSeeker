@@ -8,7 +8,7 @@
 
 use super::{between, get_then, pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, Memo, Next, Ready, Request, Task};
+use crate::net::{Answer, BoxTask, Kind, Memo, Next, Ready, Request, Task};
 use crate::unpack::is_archive;
 use std::path::Path;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ impl Host for Drive {
                 return self.0.wrap(Walk { folder: id, names });
             }
         }
-        get_then(listing_url(&id) + &key, |body| {
+        get_then(listing_url(&id) + &key, Kind::Listing, |body| {
             let page = String::from_utf8_lossy(&body);
             let files = folder_entries(&page);
             let best = pick_file(
@@ -152,7 +152,7 @@ impl Task for Walk {
     type Output = Resolved;
 
     fn start(&mut self) -> Next<Resolved> {
-        Next::Ask(Request::Get(listing_url(&self.folder)))
+        Next::Ask(Request::Get(listing_url(&self.folder), Kind::Listing))
     }
 
     fn feed(&mut self, answer: Answer) -> Next<Resolved> {

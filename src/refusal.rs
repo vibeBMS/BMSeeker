@@ -1,10 +1,18 @@
-//! Services that refused BMSeeker. A server that answers 401, 403, 429 or
-//! 451, or with a browser check (a Cloudflare challenge page; where an
-//! answer failed, a Turnstile widget too), has refused it: its service is
-//! not asked again for the rest of the run (no other query, no other URL on
+//! Services that refused BMSeeker. A server that answers 429, or 401, 403
+//! or 451 where BMSeeker asks a service's own page, API or listing, or
+//! with a browser check (a Cloudflare challenge page; where an answer
+//! failed, a Turnstile widget too), has refused it: its service is not
+//! asked again for the rest of the run (no other query, no other URL on
 //! it, no other headers), and the run goes on with the other sources and
 //! hosts. A `Retry-After` is kept to by not asking again in this run at
 //! all.
+//!
+//! What refuses is the service's own word, not what a link or a table can
+//! make it say: a 401, 403 or 451 for a file a link leads to, or for a
+//! table's header or data, is that file's failure (any server has
+//! addresses that answer so), and a file that came is a browser check
+//! only where no file was sent (no name, no file host). The service
+//! charged is the one that answered, where the redirects ended.
 //!
 //! [`Refusals`] is a run's memory of them, in its
 //! [`Context`](crate::hosts::Context), so every source, host and job of the
@@ -14,9 +22,9 @@
 //! [`Refusals::after`]. What refused is told to the run's progress and, by
 //! the command-line tool, written as a `refused` record.
 
-use crate::hosts::Context;
+use crate::hosts::{Context, Link, NOT_WEB};
 use crate::install::job::{Driver, Effect, Fed};
-use crate::net::NetError;
+use crate::net::{Kind, NetError};
 use crate::progress::Progress;
 use std::sync::{Arc, Mutex};
 
@@ -87,25 +95,47 @@ impl std::fmt::Display for Refusal {
 }
 
 /// Whether `status` from `url` refuses BMSeeker itself: 429 anywhere; 401,
-/// 403 and 451 but from a file host (there, one file's or link's failure,
-/// unless the answer says otherwise: [`blocked`]).
-pub(crate) fn refuses(url: &str, status: u16) -> bool {
+/// 403 and 451 from what BMSeeker asks a service as its own (`endpoint`: a
+/// page, an API, a listing; not a file a link names, nor a table's header
+/// or data, which are where the table says), but from a file host (there,
+/// one file's or link's failure, unless the answer says otherwise:
+/// [`blocked`]).
+pub(crate) fn refuses(url: &str, status: u16, endpoint: bool) -> bool {
     match status {
         429 => true,
-        401 | 403 | 451 => {
-            !crate::hosts::service_of(crate::net::host(url)).is_some_and(|s| s.file_host)
-        }
+        401 | 403 | 451 => endpoint && !file_host(url),
         _ => false,
     }
 }
 
-/// The marks of a page that is a browser check whatever its status:
-/// Cloudflare's challenge page ("Just a moment...", `_cf_chl_opt`) and
+/// Whether `url` is on a file host ([`hosts::service_of`](crate::hosts)).
+fn file_host(url: &str) -> bool {
+    crate::hosts::service_of(crate::net::host(url)).is_some_and(|s| s.file_host)
+}
+
+/// Whether a request of `kind` asks a service's own endpoint
+/// ([`refuses`]).
+fn endpoint(kind: Kind) -> bool {
+    !matches!(kind, Kind::Header | Kind::TableData)
+}
+
+/// The mark of a page that came (a success) and is a browser check:
+/// Cloudflare's challenge page, by the title it begins with. A title is
+/// the site's own; what a page shows further down of others' words (a
+/// work's comment, a stored file's text) makes no check of it.
+const TITLE: &[u8] = b"<title>just a moment...</title>";
+
+/// Where a page's title is looked for (a challenge page's is in its
+/// first hundred bytes).
+const TITLE_WITHIN: usize = 1024;
+
+/// The marks of an answer that failed and is a browser check whatever its
+/// status: Cloudflare's challenge page ([`TITLE`], `_cf_chl_opt`) and
 /// Google's "unusual traffic" CAPTCHA (`/sorry/`), Google refusing
 /// automated requests. (Cloudflare's script on ordinary pages,
 /// `/cdn-cgi/challenge-platform/`, is no check.)
 const CHECKS: &[&[u8]] = &[
-    b"<title>just a moment...</title>",
+    TITLE,
     b"_cf_chl_opt",
     b"our systems have detected unusual traffic",
     b"sending automated queries",
@@ -116,10 +146,13 @@ const CHECKS: &[&[u8]] = &[
 /// refusal on a page that came (beside a comment or login form).
 const TURNSTILE: &[u8] = b"challenges.cloudflare.com";
 
-/// Whether an answer that came (a success) is a browser check: a page of
-/// [`CHECKS`].
+/// Where a failed answer's marks are looked for.
+const MARKS_WITHIN: usize = 256 * 1024;
+
+/// Whether an answer that came (a success) is a browser check: a page
+/// that begins with [`TITLE`].
 pub(crate) fn checked(body: &[u8]) -> bool {
-    html_has(body, CHECKS)
+    html_has(body, &[TITLE], TITLE_WITHIN)
 }
 
 /// Whether an answer that failed refuses the client whatever its status:
@@ -127,15 +160,16 @@ pub(crate) fn checked(body: &[u8]) -> bool {
 /// with a Turnstile widget.
 pub(crate) fn blocked(cf_mitigated: Option<&str>, body: &[u8]) -> bool {
     cf_mitigated.is_some_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
-        || checked(body)
-        || html_has(body, &[TURNSTILE])
+        || html_has(body, CHECKS, MARKS_WITHIN)
+        || html_has(body, &[TURNSTILE], MARKS_WITHIN)
 }
 
 /// The error of an answer of `status` to `url` that is no success (or
 /// flagged `cf-mitigated`), its redirects ending `at`, with its
 /// `cf-mitigated` header and its first bytes `head`: a browser check is a
 /// refusal of the service ([`refused_at`]); Google Drive's quota is said as
-/// such; else the status.
+/// such; a 429 of another service than the one asked (a short link's
+/// redirect ended there) is that service's refusal; else the status.
 pub(crate) fn answer_error(
     url: &str,
     at: &str,
@@ -148,6 +182,9 @@ pub(crate) fn answer_error(
     }
     if crate::hosts::drive_quota(head) {
         return NetError::Other(crate::hosts::DRIVE_QUOTA.into());
+    }
+    if status == 429 && service(at) != service(url) {
+        return NetError::Refused(Refusal::of(at, Why::Status(status)));
     }
     NetError::Status(status)
 }
@@ -173,8 +210,8 @@ pub(crate) fn service(url: &str) -> String {
 }
 
 /// Whether `body` is a page (HTML) with one of `marks` (lower case) in its
-/// first 256 KiB, in any case.
-fn html_has(body: &[u8], marks: &[&[u8]]) -> bool {
+/// first `within` bytes, in any case.
+fn html_has(body: &[u8], marks: &[&[u8]], within: usize) -> bool {
     let page = body
         .strip_prefix(b"\xEF\xBB\xBF")
         .unwrap_or(body)
@@ -182,7 +219,7 @@ fn html_has(body: &[u8], marks: &[&[u8]]) -> bool {
     if !page.starts_with(b"<") {
         return false;
     }
-    let page = &page[..page.len().min(256 * 1024)];
+    let page = &page[..page.len().min(within)];
     marks
         .iter()
         .any(|m| page.windows(m.len()).any(|w| w.eq_ignore_ascii_case(m)))
@@ -196,7 +233,7 @@ pub struct Refusals(Mutex<Vec<(Refusal, bool)>>);
 
 impl Refusals {
     /// Whether `url`'s service refused: how.
-    fn of(&self, url: &str) -> Option<Refusal> {
+    pub(crate) fn of(&self, url: &str) -> Option<Refusal> {
         let host = service(url);
         let all = self.0.lock().unwrap();
         all.iter()
@@ -249,41 +286,55 @@ impl Refusals {
     }
 
     /// Before `effect` is done: what it gets at once when its service
-    /// refused ([`NetError::Refused`], told to `progress`), else nothing
-    /// (do it, then [`Refusals::after`]).
+    /// refused ([`NetError::Refused`], told to `progress`) or its address
+    /// is no web link ([`NOT_WEB`]: whatever asks, a host's rules and the
+    /// request agree on where it goes), else nothing (do it, then
+    /// [`Refusals::after`]).
     pub fn before(&self, effect: &Effect, progress: Option<&Progress>) -> Option<Fed> {
         let (url, http) = match effect {
             Effect::Http(r) => (r.url(), true),
             Effect::Download { target, .. } => (target.url.as_str(), false),
             Effect::Sleep(_) => return None,
         };
+        if Link::parse(url, 0).is_none() {
+            return Some(fed(NetError::Other(NOT_WEB.into()), http));
+        }
         Some(failed(self.of(url)?, http, progress))
     }
 
-    /// What came of asking `url` (a request, or a download): an answer
-    /// that refuses (a status [`refuses`], a browser check) is kept and
-    /// fails so, told to `progress`.
-    pub fn after(&self, url: &str, fed: Fed, progress: Option<&Progress>) -> Fed {
-        let of_error = |e: &NetError, from: &str| match e {
-            NetError::Status(n) if refuses(from, *n) => Some(Refusal::of(from, Why::Status(*n))),
+    /// What came of `effect` (a request, or a download): an answer that
+    /// refuses (a status [`refuses`], a browser check) is kept and fails
+    /// so, told to `progress`.
+    pub fn after(&self, effect: &Effect, fed: Fed, progress: Option<&Progress>) -> Fed {
+        let of_error = |e: &NetError, from: &str, endpoint: bool| match e {
+            NetError::Status(n) if refuses(from, *n, endpoint) => {
+                Some(Refusal::of(from, Why::Status(*n)))
+            }
             NetError::Refused(r) => Some(r.clone()),
             _ => None,
         };
-        let (refusal, http) = match &fed {
-            Fed::Http(Err(e)) => (of_error(e, url), true),
-            Fed::Http(Ok(body)) => (
-                checked(body).then(|| Refusal::of(url, Why::Challenge)),
+        let (refusal, http) = match (effect, &fed) {
+            (Effect::Http(r), Fed::Http(Err(e))) => {
+                (of_error(e, r.url(), endpoint(r.kind())), true)
+            }
+            // (a page asked for that came as a check; a table's or an
+            // API's JSON is whatever it is)
+            (Effect::Http(r), Fed::Http(Ok(body))) => (
+                (r.kind() == Kind::Page && checked(body))
+                    .then(|| Refusal::of(r.url(), Why::Challenge)),
                 true,
             ),
-            Fed::Downloaded(Err(u)) => {
-                (of_error(&u.error, refused_at(url, u.at.as_deref())), false)
+            (Effect::Download { target, .. }, Fed::Downloaded(Err(u))) => {
+                let at = refused_at(&target.url, u.at.as_deref());
+                (of_error(&u.error, at, false), false)
             }
-            Fed::Downloaded(Ok(s)) => (
-                checked(&s.head)
-                    .then(|| Refusal::of(refused_at(url, s.at.as_deref()), Why::Challenge)),
-                false,
-            ),
-            Fed::Woke => (None, false),
+            // (a file a host stores is its uploader's, whatever is in it)
+            (Effect::Download { target, .. }, Fed::Downloaded(Ok(s))) => {
+                let at = refused_at(&target.url, s.at.as_deref());
+                let check = s.name.is_none() && !file_host(at) && checked(&s.head);
+                (check.then(|| Refusal::of(at, Why::Challenge)), false)
+            }
+            _ => (None, false),
         };
         match refusal {
             Some(r) => failed(self.keep(r), http, progress),
@@ -298,7 +349,11 @@ fn failed(r: Refusal, http: bool, progress: Option<&Progress>) -> Fed {
     if let Some(p) = progress {
         p.refused(&r.host);
     }
-    let e = NetError::Refused(r);
+    fed(NetError::Refused(r), http)
+}
+
+/// A request's (`http`) or a download's failure `e`.
+fn fed(e: NetError, http: bool) -> Fed {
     match http {
         true => Fed::Http(Err(e)),
         false => Fed::Downloaded(Err(e.into())),
@@ -347,12 +402,8 @@ impl Driver for Guarded<'_> {
         let fed = match self.refusals.before(&effect, p) {
             Some(fed) => fed,
             None => {
-                let url = match &effect {
-                    Effect::Http(r) => r.url().to_string(),
-                    Effect::Download { target, .. } => target.url.clone(),
-                    Effect::Sleep(_) => String::new(),
-                };
-                self.refusals.after(&url, self.net.perform(effect), p)
+                let asked = effect.clone();
+                self.refusals.after(&asked, self.net.perform(effect), p)
             }
         };
         self.tell();
@@ -380,7 +431,7 @@ mod tests {
         // where Drive's downloads end: Drive's, a file host
         let dl = "https://doc-0s-docs.googleusercontent.com/docs/securesc/x";
         assert_eq!(service(dl), "drive.google.com");
-        assert!(!refuses(dl, 403) && refuses(dl, 429));
+        assert!(!refuses(dl, 403, true) && refuses(dl, 429, true));
         assert_eq!(
             service("https://dl.dropboxusercontent.com/s/a"),
             "dropbox.com"
@@ -419,11 +470,24 @@ mod tests {
         // an archive or JSON that names it is no page
         assert!(!blocked(None, b"PK\x03\x04 challenges.cloudflare.com"));
         assert!(!blocked(None, br#"{"t":"Just a moment..."}"#));
-        // Google's CAPTCHA
+        // Google's CAPTCHA (an answer that failed: 429)
         let sorry = br#"<html><head><title>https://drive.usercontent.google.com/download</title></head><body>
             <div>Our systems have detected unusual traffic from your computer network.</div>
             <form id="captcha-form" action="index" method="post"></form></body></html>"#;
-        assert!(checked(sorry) && blocked(None, sorry));
+        assert!(blocked(None, sorry));
+        // a page that came is a check by its title only: what a page shows
+        // of others' words (a comment, a file's text) is no check
+        let quoted = br#"<html><head><title>Work 12</title></head><body><p>window._cf_chl_opt
+            Our systems have detected unusual traffic. /sorry/index
+            &lt;title&gt;Just a moment...&lt;/title&gt;</p></body></html>"#;
+        assert!(!checked(sorry) && !checked(quoted) && blocked(None, quoted));
+        let deep = [
+            &b"<html><head><title>Work 12</title></head><body>"[..],
+            &[b' '; 2000],
+            TITLE,
+        ]
+        .concat();
+        assert!(!checked(&deep) && blocked(None, &deep));
         let at = "https://www.google.com/sorry/index?continue=x";
         assert!(matches!(
             answer_error("https://drive.google.com/x", at, 429, None, sorry),
@@ -433,6 +497,7 @@ mod tests {
 
     #[test]
     fn file_hosts_403_is_a_files() {
+        let refuses = |u: &str, status: u16| refuses(u, status, true);
         let drive = "https://drive.usercontent.google.com/download?id=1";
         assert!(!refuses(drive, 403) && !refuses(drive, 401) && !refuses(drive, 451));
         assert!(refuses(drive, 429));
@@ -441,6 +506,7 @@ mod tests {
             "https://dl.dropboxusercontent.com/s/a",
             "https://download1.mediafire.com/x/a.rar",
             "https://pixeldrain.net/api/filesystem/x",
+            "https://raw.githubusercontent.com/vibeBMS/BMS/main/events.json",
         ] {
             assert!(!refuses(u, 403) && refuses(u, 429), "{u}");
         }
@@ -455,6 +521,10 @@ mod tests {
             assert!(refuses(u, 403) && refuses(u, 401) && refuses(u, 451), "{u}");
         }
         assert!(!refuses("https://api.bmssearch.net/v1/x", 404));
+        // what is no endpoint of a service's own (a link's file, a table's
+        // data): its 403 is that file's, a 429 the service's
+        let file = "https://darksabun.club/table/archive/";
+        assert!(!super::refuses(file, 403, false) && super::refuses(file, 429, false));
     }
 
     /// Answers each request with `answer`, noting the URLs asked.
@@ -476,7 +546,11 @@ mod tests {
     }
 
     fn get(url: &str) -> Effect {
-        Effect::Http(Request::Get(url.into()))
+        Effect::Http(Request::Get(url.into(), Kind::Api))
+    }
+
+    fn get_of(url: &str, kind: Kind) -> Effect {
+        Effect::Http(Request::Get(url.into(), kind))
     }
 
     fn download(url: &str) -> Effect {
@@ -553,6 +627,7 @@ mod tests {
                     None,
                 ))),
                 u if u.contains("widget") => Fed::Http(Ok(TURNSTILE_PAGE.to_vec())),
+                u if u.contains("fine.test/page") => Fed::Http(Ok(b"<html></html>".to_vec())),
                 _ => Fed::Downloaded(Ok(Served::bytes(b"PK\x03\x04".to_vec(), None, None))),
             },
         };
@@ -587,16 +662,20 @@ mod tests {
             Fed::Http(Err(NetError::Refused(_)))
         ));
         assert!(matches!(
+            g.perform(get_of("https://fine.test/page", Kind::Page)),
+            Fed::Http(Ok(_))
+        ));
+        assert!(matches!(
             g.perform(download("https://fine.test/1.zip")),
             Fed::Downloaded(Ok(_))
         ));
         // a page that came with a Turnstile widget (a form) is no refusal
         assert!(matches!(
-            g.perform(get("https://widget.test/p")),
+            g.perform(get_of("https://widget.test/p", Kind::Page)),
             Fed::Http(Ok(_))
         ));
         assert!(matches!(
-            g.perform(get("https://widget.test/q")),
+            g.perform(get_of("https://widget.test/q", Kind::Page)),
             Fed::Http(Ok(_))
         ));
         assert_eq!(
@@ -604,6 +683,7 @@ mod tests {
             [
                 "https://busy.test/1.zip",
                 "https://checked.test/1.zip",
+                "https://fine.test/page",
                 "https://fine.test/1.zip",
                 "https://widget.test/p",
                 "https://widget.test/q",
@@ -618,5 +698,153 @@ mod tests {
         ));
         assert_eq!(*told.borrow(), 2);
         assert_eq!(cx.refused.all().len(), 3);
+    }
+    const CHECK_PAGE: &[u8] = b"<html><head><title>Just a moment...</title></head></html>";
+
+    /// What a link or a table can make a server say refuses no service:
+    /// an address that answers 403, a stored file that reads as a check.
+    #[test]
+    fn what_a_link_names_refuses_no_service() {
+        let stored = |name: Option<&str>, at: &str| {
+            Fed::Downloaded(Ok(Served::bytes(
+                CHECK_PAGE.to_vec(),
+                name.map(String::from),
+                Some(at.into()),
+            )))
+        };
+        let net = Asked {
+            asked: RefCell::default(),
+            answer: &|u| match u {
+                // a folder without an index, a file shared privately
+                u if u.contains("/closed/") && u.ends_with(".zip") => {
+                    Fed::Downloaded(Err(NetError::Status(403).into()))
+                }
+                u if u.contains("/closed/") => Fed::Http(Err(NetError::Status(403))),
+                // a file its uploader made to read as a browser check
+                u if u.contains("drive.usercontent.google.com") => stored(None, u),
+                u if u.contains("raw.githubusercontent.com") => stored(None, u),
+                u if u.contains("sent-as-a-file") => stored(Some("a.html"), u),
+                u if u.ends_with(".json") => Fed::Http(Ok(CHECK_PAGE.to_vec())),
+                _ => Fed::Http(Ok(b"{}".to_vec())),
+            },
+        };
+        let cx = Context::default();
+        let g = Guarded::new(&net, &cx);
+        for effect in [
+            download("https://mirror.test/closed/a.zip"),
+            get_of("https://mirror.test/closed/header.json", Kind::Header),
+            get_of("https://mirror.test/closed/data.json", Kind::TableData),
+            download("https://drive.usercontent.google.com/download?id=1"),
+            download("https://raw.githubusercontent.com/a/b/main/c.zip"),
+            download("https://host.test/sent-as-a-file"),
+            get_of("https://host.test/header.json", Kind::Header),
+            get_of("https://host.test/api.json", Kind::Api),
+        ] {
+            let fed = g.perform(effect.clone());
+            let refused = matches!(
+                &fed,
+                Fed::Http(Err(NetError::Refused(_)))
+                    | Fed::Downloaded(Err(Unserved {
+                        error: NetError::Refused(_),
+                        ..
+                    }))
+            );
+            assert!(!refused, "{effect:?}");
+        }
+        assert!(cx.refused.all().is_empty(), "{:?}", cx.refused.all());
+        // the service's own endpoints still say it: an API's or a page's
+        // 403, a page asked for that came as a check
+        assert!(matches!(
+            g.perform(get_of("https://mirror.test/closed/api", Kind::Api)),
+            Fed::Http(Err(NetError::Refused(_)))
+        ));
+        assert!(matches!(
+            g.perform(get_of("https://page.test/table.json", Kind::Page)),
+            Fed::Http(Err(NetError::Refused(_)))
+        ));
+        let hosts: Vec<String> = cx.refused.all().into_iter().map(|r| r.host).collect();
+        assert_eq!(hosts, ["mirror.test", "page.test"]);
+    }
+
+    /// A refusal is the service's that answered: where a short link's
+    /// redirects ended.
+    #[test]
+    fn the_service_that_answered_is_charged() {
+        let (short, drive) = (
+            "https://bit.ly/x",
+            "https://drive.usercontent.google.com/download?id=1",
+        );
+        // a request's answer, as a driver makes it of where it came from
+        let limited = answer_error(short, drive, 429, None, b"");
+        assert!(matches!(&limited, NetError::Refused(r) if r.host == "drive.google.com"));
+        assert_eq!(
+            answer_error(drive, drive, 429, None, b""),
+            NetError::Status(429)
+        );
+        // a file's 403 behind the short link is nobody's refusal
+        assert_eq!(
+            answer_error(short, drive, 403, None, b""),
+            NetError::Status(403)
+        );
+        let net = Asked {
+            asked: RefCell::default(),
+            answer: &|u| match u {
+                u if u.contains("bit.ly/page") => Fed::Http(Err(limited.clone())),
+                u if u.contains("bit.ly/gone") => Fed::Downloaded(Err(Unserved {
+                    error: NetError::Status(403),
+                    at: Some(drive.into()),
+                })),
+                u if u.contains("bit.ly") => Fed::Downloaded(Err(Unserved {
+                    error: NetError::Status(429),
+                    at: Some(drive.into()),
+                })),
+                _ => Fed::Downloaded(Ok(Served::bytes(b"PK\x03\x04".to_vec(), None, None))),
+            },
+        };
+        for first in [download("https://bit.ly/file"), get("https://bit.ly/page")] {
+            let cx = Context::default();
+            let g = Guarded::new(&net, &cx);
+            g.perform(download("https://bit.ly/gone"));
+            assert!(cx.refused.all().is_empty());
+            g.perform(first);
+            let hosts: Vec<String> = cx.refused.all().into_iter().map(|r| r.host).collect();
+            assert_eq!(hosts, ["drive.google.com"]);
+            // Drive is not asked again; the short links' host is
+            let asked = net.asked.borrow().len();
+            assert!(matches!(
+                g.perform(download(drive)),
+                Fed::Downloaded(Err(u)) if matches!(u.error, NetError::Refused(_))
+            ));
+            assert_eq!(net.asked.borrow().len(), asked);
+            g.perform(download("https://bit.ly/other"));
+            assert_eq!(net.asked.borrow().len(), asked + 1);
+        }
+    }
+
+    /// An address that is no plain web link is not asked, whoever asks.
+    #[test]
+    fn only_web_links_are_asked() {
+        let net = Asked {
+            asked: RefCell::default(),
+            answer: &|_| Fed::Http(Err(NetError::Status(429))),
+        };
+        let cx = Context::default();
+        let g = Guarded::new(&net, &cx);
+        for u in [
+            "https://evil.test\\@www.dropbox.com/s/a/b.zip",
+            "https://user@host.test/a.json",
+            "file:///etc/passwd",
+            "ftp://host.test/a",
+        ] {
+            assert!(
+                matches!(g.perform(get(u)), Fed::Http(Err(NetError::Other(e))) if e == NOT_WEB),
+                "{u}"
+            );
+            assert!(matches!(
+                g.perform(download(u)),
+                Fed::Downloaded(Err(e)) if e.error == NetError::Other(NOT_WEB.into())
+            ));
+        }
+        assert!(net.asked.borrow().is_empty() && cx.refused.all().is_empty());
     }
 }

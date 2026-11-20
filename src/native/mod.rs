@@ -15,13 +15,20 @@ use std::time::Duration;
 
 /// The native transport, as a job's [`Driver`]: requests through one
 /// agent (a host's connection kept), files streamed to their slots through
-/// another (ended by the progress' cancel or
-/// [`STALL_MS`](crate::hosts::STALL_MS) of silence; a MEGA file decrypted
-/// as it comes), waits slept (ended by the cancel). Once the progress is
-/// cancelled, requests are answered [`NetError::Cancelled`]. It keeps to no
-/// refusals itself: run it under [`Guarded`].
+/// another (ended by the progress' cancel,
+/// [`STALL_MS`](crate::hosts::STALL_MS) of silence or coming too slowly; a
+/// MEGA file decrypted as it comes and checked when it is whole), waits
+/// slept (ended by the cancel). Once the progress is cancelled, requests
+/// are answered [`NetError::Cancelled`]. It asks no host of this machine
+/// or its networks unless the settings say so
+/// ([`Config::local_hosts`](crate::config::Config::local_hosts)), and
+/// follows no redirect from https to http. It keeps to no refusals itself
+/// for the address asked: run it under [`Guarded`]; where a redirect
+/// leads is asked here, so there it keeps to the run's.
 pub struct Native {
     user_agent: String,
+    local_hosts: bool,
+    refused: Arc<crate::refusal::Refusals>,
     progress: Option<Arc<Progress>>,
     /// The downloads' agent, made for the first.
     downloads: OnceLock<ureq::Agent>,
@@ -32,6 +39,8 @@ impl Native {
     pub fn new(cx: &Context) -> Native {
         Native {
             user_agent: crate::config::native_user_agent(&cx.config.user_agent),
+            local_hosts: cx.config.local_hosts,
+            refused: cx.refused.clone(),
             progress: cx.progress.clone(),
             downloads: OnceLock::new(),
         }
@@ -44,9 +53,14 @@ impl Native {
 
 impl Driver for Native {
     fn perform(&self, effect: Effect) -> Fed {
+        let rules = http::Rules {
+            user_agent: &self.user_agent,
+            local_hosts: self.local_hosts,
+            refused: &self.refused,
+        };
         match effect {
             Effect::Http(_) if self.cancelled() => Fed::Http(Err(NetError::Cancelled)),
-            Effect::Http(r) => Fed::Http(http::send(&r, &self.user_agent)),
+            Effect::Http(r) => Fed::Http(http::send(&r, &rules)),
             Effect::Sleep(d) => {
                 let end = std::time::Instant::now() + d;
                 while !self.cancelled() {
@@ -61,11 +75,9 @@ impl Driver for Native {
             Effect::Download { target, slot, .. } => {
                 let agent = self
                     .downloads
-                    .get_or_init(|| http::downloads(self.progress.clone()));
+                    .get_or_init(|| http::downloads(self.progress.clone(), self.local_hosts));
                 let p = self.progress.as_deref();
-                Fed::Downloaded(
-                    http::download(agent, &target, &slot, &self.user_agent, p).map_err(Into::into),
-                )
+                Fed::Downloaded(http::download(agent, &target, &slot, &rules, p))
             }
         }
     }

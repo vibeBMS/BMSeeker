@@ -1,11 +1,28 @@
 //! What a web page's drivers share (this crate's page, `bmseeker-web`, and
 //! an app's web build): which requests go through the CORS proxy, and what
-//! an answer that came is. No I/O: each keeps its own transport, kept to
-//! the run's refusals ([`crate::refusal`]).
+//! an answer that came is ([`served`]: no larger than it may be, a MEGA
+//! file the one its key was made for). No I/O: each keeps its own
+//! transport, kept to the run's refusals ([`crate::refusal`]) and to what
+//! an answer may have ([`Request::limit`](crate::net::Request::limit)).
 
 use crate::hosts::{MegaCipher, Target};
 use crate::install::job::Served;
 use crate::net::NetError;
+
+/// How long a request's answer may take to come, whole (ms): a driver's
+/// time limit.
+pub const ANSWER_MS: u32 = 60_000;
+
+/// How long a download may take, whole (ms), where a driver cannot watch
+/// it come (a worker's synchronous request has one time limit and no
+/// progress): a file of [`DOWNLOAD_MAX`] at 600 KB a second. A driver
+/// that sees the bytes come ends one that stalls
+/// ([`STALL_MS`](crate::hosts::STALL_MS)) instead.
+pub const DOWNLOAD_MS: u32 = 30 * 60_000;
+
+/// The largest file a page downloads (it is held in memory, beside what
+/// it unpacks to): what an archive may unpack to there.
+pub const DOWNLOAD_MAX: u64 = crate::unpack::BUDGET;
 
 /// The proxy the web builds reach download hosts and difficulty tables
 /// through (vibeBMS/proxy `worker.js`): it serves the vibebms.github.io
@@ -32,19 +49,29 @@ pub fn proxied(proxy: &str, url: &str) -> String {
     }
 }
 
-/// `target`'s file that came: `body` (a MEGA file's decrypted here), the
-/// name the server gave it, where its redirects ended (the proxy's
-/// `X-Final-Url`).
+/// `target`'s file that came: `body` (a MEGA file's decrypted here, and
+/// the file its key was made for), the name the server gave it, where its
+/// redirects ended (the proxy's `X-Final-Url`); none larger than
+/// [`DOWNLOAD_MAX`].
 pub fn served(
     target: &Target,
     mut body: Vec<u8>,
     name: Option<String>,
     at: Option<String>,
-) -> Served {
-    if let Some(k) = &target.mega_key {
-        MegaCipher::new(k).apply(&mut body);
+) -> Result<Served, NetError> {
+    if body.len() as u64 > DOWNLOAD_MAX {
+        return Err(crate::unpack::Error::TooLarge(DOWNLOAD_MAX)
+            .to_string()
+            .into());
     }
-    Served::bytes(body, name, at)
+    if let Some(k) = &target.mega_key {
+        let mut cipher = MegaCipher::new(k);
+        cipher.apply(&mut body);
+        if !cipher.verified() {
+            return Err(crate::hosts::MEGA_CHANGED.into());
+        }
+    }
+    Ok(Served::bytes(body, name, at))
 }
 
 /// The error of an answer of `status` to `url` that is no success, its
@@ -83,6 +110,32 @@ mod tests {
         assert_eq!(
             proxied("http://localhost:8788/", "http://127.0.0.1:9/s.zip"),
             "http://localhost:8788/?url=http%3A%2F%2F127.0.0.1%3A9%2Fs.zip"
+        );
+    }
+
+    /// A MEGA file a page downloaded is the one its key was made for, or
+    /// no file.
+    #[test]
+    fn a_mega_files_check() {
+        let plain = b"PK\x03\x04 a song's archive".to_vec();
+        let (key, sent) = crate::hosts::mega_file([1; 16], [2; 8], &plain);
+        let target = Target {
+            mega_key: Some(key),
+            ..Target::url("https://gfs.example/dl/x")
+        };
+        let got = served(&target, sent.clone(), None, None).unwrap();
+        assert_eq!(got.head, plain);
+        let mut changed = sent;
+        changed[5] ^= 1;
+        assert_eq!(
+            served(&target, changed, None, None).map(|s| s.head),
+            Err(NetError::Other(crate::hosts::MEGA_CHANGED.into()))
+        );
+        // any other file is as it came
+        let plain = Target::url("https://a.test/a.zip");
+        assert_eq!(
+            served(&plain, b"PK".to_vec(), None, None).unwrap().head,
+            b"PK"
         );
     }
 

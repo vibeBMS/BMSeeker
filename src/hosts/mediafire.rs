@@ -3,7 +3,7 @@
 
 use super::{between, get_then, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
-use crate::net::{BoxTask, Ready};
+use crate::net::{BoxTask, Kind, Ready};
 
 pub(crate) struct MediaFire;
 
@@ -20,7 +20,7 @@ impl Host for MediaFire {
         if link.lower.contains("/folder/") {
             return Ready::boxed(Resolved::Page);
         }
-        get_then(link.url.clone(), |body| {
+        get_then(link.url.clone(), Kind::Page, |body| {
             let page = String::from_utf8_lossy(&body);
             // http or https: older pages link the file over http
             let file = page
