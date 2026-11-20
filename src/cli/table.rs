@@ -11,7 +11,6 @@ use crate::sources::Sources;
 use crate::table::{DifficultyTable, TableEntry, TableLoader};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
@@ -108,32 +107,18 @@ pub(super) fn table(r: &Run, c: Table) -> Result<(), String> {
             links,
         } => {
             let (t, _) = load_filled(r, &url, &links)?;
-            let write = |p: &Path, b: &[u8]| {
-                r.fs.create(p, None)
-                    .and_then(|mut w| w.write_all(b).and_then(|()| w.flush()))
-                    .map_err(|e| format!("{}: {e}", p.display()))
-            };
             match to {
                 ExportTo::Lr2 => {
                     let dir = out.join(install::safe_name(&t.header.name));
-                    // the levels a table no longer has go
-                    for e in r.fs.read_dir(&dir).unwrap_or_default() {
-                        if !e.is_dir && e.path.extension().is_some_and(|x| x == "lr2folder") {
-                            let _ = r.fs.remove(&e.path);
-                        }
-                    }
-                    let folders = export::lr2_folders(&t);
-                    for (name, text) in &folders {
-                        write(&dir.join(name), text)?;
-                    }
+                    let folders = export::write_lr2(&*r.fs, &t, &dir)?;
                     r.out
-                        .record(json!({"folder": dir, "folders": folders.len()}), || {
-                            format!("{}: {} folders", dir.display(), folders.len())
+                        .record(json!({"folder": dir, "folders": folders}), || {
+                            format!("{}: {folders} folders", dir.display())
                         });
                 }
                 ExportTo::Bmt => {
                     let file = out.join(export::bmt_file_name(&t.source_url));
-                    write(&file, &export::beatoraja_bmt(&t))?;
+                    export::write(&*r.fs, &file, &export::beatoraja_bmt(&t))?;
                     r.out
                         .record(json!({"file": file}), || file.display().to_string());
                 }
