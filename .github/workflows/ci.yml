@@ -144,7 +144,8 @@ jobs:
   # vibeBMS's /vibe/)
   pages:
     needs: build
-    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'failure') && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    # (only when every build passed: the site and the nightly then agree)
+    if: ${{ needs.build.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     # GitHub Pages by Actions (Settings > Pages > Source: GitHub Actions):
     # each deploy replaces the whole site
