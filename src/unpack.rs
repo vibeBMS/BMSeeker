@@ -4,8 +4,10 @@
 //! `safe_rel`), within a budget (an archive can claim, or expand to,
 //! anything), with the archive's file times.
 
-use crate::fs::{move_file, ReadSeek, Store};
+use crate::fs::{move_file, safe_part, ReadSeek, Store};
+use crate::progress::{Progress, CANCELLED};
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 
@@ -25,11 +27,46 @@ pub const BUDGET: u64 = if cfg!(target_arch = "wasm32") {
     4 << 30
 };
 
+/// Files an archive may hold. A pack of songs within the budget has a
+/// few tens of thousands; files beyond counting cost a disk its room for
+/// files, whatever their size.
+const MEMBERS: usize = 250_000;
+
+/// Folders a member's path may have (a song's files are a few deep).
+const DEPTH: usize = 32;
+
+/// Whether memory is short (a web page, a phone).
+const SMALL: bool = cfg!(any(
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+));
+
+/// What a 7z's decoder may ask for, in KB: its dictionary or its PPMd
+/// model (7-Zip's own settings go to 1 GiB only when asked; its strongest
+/// preset takes 64 MiB), and a little beside it.
+const SEVENZ_MEMORY_KB: usize = (if SMALL { 256 << 10 } else { 1 << 20 }) + (16 << 10);
+
+/// What reading a 7z's header may take, in KB: its decoder's dictionary
+/// (7-Zip's is 1 MiB, other writers' 8 or 16) and the header itself. It
+/// lists the files (some hundred bytes each), and the reader keeps a
+/// record for as many files as it has bytes before it reads the first: a
+/// hundred times its size.
+const SEVENZ_HEADER_KB: usize = if SMALL { 9 << 10 } else { 17 << 10 };
+
+/// Bytes a tar's long name or PAX records may have (a path is a few
+/// hundred; they are kept in memory).
+const TAR_NAME: u64 = 1 << 20;
+
 /// What unpacking fails with.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Error {
     /// More than the budget (bytes) unpacked.
     TooLarge(u64),
+    /// More files than this.
+    TooMany(usize),
+    /// Stopped by whoever waits for it.
+    Cancelled,
     Other(String),
 }
 
@@ -37,6 +74,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::TooLarge(budget) => write!(f, "larger than {} MB unpacked", budget >> 20),
+            Error::TooMany(n) => write!(f, "more than {n} files"),
+            Error::Cancelled => f.write_str(CANCELLED),
             Error::Other(e) => f.write_str(e),
         }
     }
@@ -45,6 +84,16 @@ impl std::fmt::Display for Error {
 impl From<Error> for String {
     fn from(e: Error) -> String {
         e.to_string()
+    }
+}
+
+/// What reading a 7z failed with, for a person.
+fn sevenz_error(e: sevenz_rust2::Error) -> String {
+    match e {
+        sevenz_rust2::Error::MaxMemLimited { max_kb, .. } => {
+            format!("needs more than {} MB of memory to unpack", max_kb >> 10)
+        }
+        e => e.to_string(),
     }
 }
 
@@ -174,28 +223,55 @@ pub struct Member {
     pub mtime: Option<i64>,
 }
 
-/// `name` from an archive as a relative path that cannot leave its folder.
+/// `name` from an archive as a relative path that cannot leave its folder,
+/// each part a name every file system holds ([`safe_part`]). None: nothing
+/// of it is left, or it is more than [`DEPTH`] folders deep.
 pub(crate) fn safe_rel(name: &str) -> Option<PathBuf> {
-    let rel: PathBuf = name
+    let parts: Vec<String> = name
         .split(['/', '\\'])
         .filter(|c| !c.is_empty() && *c != "." && *c != "..")
         .filter(|c| !c.contains(':'))
+        .filter_map(safe_part)
+        .take(DEPTH + 2)
         .collect();
-    (!rel.as_os_str().is_empty()).then_some(rel)
+    (1..=DEPTH + 1)
+        .contains(&parts.len())
+        .then(|| parts.iter().collect())
+}
+
+/// Why an unpacking was stopped (told apart from the error it ends with,
+/// which the archive's reader may wrap).
+#[derive(Clone, Copy)]
+enum Stopped {
+    TooLarge,
+    TooMany,
+    Cancelled,
+}
+
+/// What an unpacking may still take, and who may stop it.
+struct Left<'a> {
+    bytes: u64,
+    members: usize,
+    stop: Option<&'a Progress>,
 }
 
 /// A writer that fails past `left` bytes (an archive member larger than it
-/// claims), telling `over` (the archive's reader may wrap the error).
+/// claims) or once the unpacking is cancelled, telling `why`.
 struct Capped<'a, W> {
     w: W,
     left: u64,
-    over: &'a Cell<bool>,
+    stop: Option<&'a Progress>,
+    why: &'a Cell<Option<Stopped>>,
 }
 
 impl<W: Write> Write for Capped<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.stop.is_some_and(|p| p.cancelled()) {
+            self.why.set(Some(Stopped::Cancelled));
+            return Err(io::Error::other(CANCELLED));
+        }
         if buf.len() as u64 > self.left {
-            self.over.set(true);
+            self.why.set(Some(Stopped::TooLarge));
             return Err(io::ErrorKind::FileTooLarge.into());
         }
         let n = self.w.write(buf)?;
@@ -337,60 +413,88 @@ fn zip_header(r: &mut dyn ReadSeek, at: u64, central: bool) -> std::io::Result<Z
     })
 }
 
-/// Unpack the archive `r` of `format` into `sink`, with at most `budget`
-/// bytes in all (`limit`: the whole's).
+/// Unpack the archive `r` of `format` into `sink`, with at most what is
+/// `left` in all (`limit`: the whole's bytes).
 fn members(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
     limit: u64,
-    budget: &mut u64,
+    left: &mut Left,
     sink: &mut dyn Sink,
 ) -> Result<(), Error> {
-    let over = Cell::new(false);
-    each_member(r, format, limit, budget, sink, &over).map_err(|e| match over.get() {
-        true => Error::TooLarge(limit),
-        false => Error::Other(e),
+    let why = Cell::new(None);
+    each_member(r, format, limit, left, sink, &why).map_err(|e| match why.get() {
+        Some(Stopped::TooLarge) => Error::TooLarge(limit),
+        Some(Stopped::TooMany) => Error::TooMany(MEMBERS),
+        Some(Stopped::Cancelled) => Error::Cancelled,
+        None => Error::Other(e),
     })
 }
 
-/// [`members`], telling `over` when the budget is what failed.
+/// One member through the cap: written to `sink` as `to` (its path and
+/// time), kept or dropped; with no `to`, passed by (what an archive must
+/// decode to reach the next member counts as what it writes does).
+fn put(
+    left: &mut Left,
+    why: &Cell<Option<Stopped>>,
+    sink: &mut dyn Sink,
+    to: Option<(PathBuf, Option<i64>)>,
+    copy: &mut dyn FnMut(&mut dyn Write) -> Result<u64, String>,
+) -> Result<(), String> {
+    if left.stop.is_some_and(|p| p.cancelled()) {
+        why.set(Some(Stopped::Cancelled));
+        return Err(CANCELLED.into());
+    }
+    let Some((rel, mtime)) = to else {
+        let mut capped = Capped {
+            w: io::sink(),
+            left: left.bytes,
+            stop: left.stop,
+            why,
+        };
+        copy(&mut capped)?;
+        left.bytes = capped.left;
+        return Ok(());
+    };
+    if left.members == 0 {
+        why.set(Some(Stopped::TooMany));
+        return Err(Error::TooMany(MEMBERS).to_string());
+    }
+    left.members -= 1;
+    let r = {
+        let mut w = sink.open(&rel, mtime)?;
+        let mut capped = Capped {
+            w: &mut w,
+            left: left.bytes,
+            stop: left.stop,
+            why,
+        };
+        copy(&mut capped)
+            .and_then(|n| capped.flush().map(|_| n).map_err(|e| e.to_string()))
+            .map(|n| (n, capped.left))
+    };
+    match r {
+        Ok((size, bytes)) => {
+            left.bytes = bytes;
+            sink.close(Member { rel, size, mtime });
+            Ok(())
+        }
+        Err(e) => {
+            sink.drop_partial(&rel);
+            Err(e)
+        }
+    }
+}
+
+/// [`members`], telling `why` when it was stopped.
 fn each_member(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
     limit: u64,
-    budget: &mut u64,
+    left: &mut Left,
     sink: &mut dyn Sink,
-    over: &Cell<bool>,
+    why: &Cell<Option<Stopped>>,
 ) -> Result<(), String> {
-    // one member: written through the cap, kept or dropped
-    let mut put = |sink: &mut dyn Sink,
-                   rel: PathBuf,
-                   mtime: Option<i64>,
-                   copy: &mut dyn FnMut(&mut dyn Write) -> Result<u64, String>|
-     -> Result<(), String> {
-        let r = {
-            let mut w = sink.open(&rel, mtime)?;
-            let mut capped = Capped {
-                w: &mut w,
-                left: *budget,
-                over,
-            };
-            copy(&mut capped)
-                .and_then(|n| capped.flush().map(|_| n).map_err(|e| e.to_string()))
-                .map(|n| (n, capped.left))
-        };
-        match r {
-            Ok((size, left)) => {
-                *budget = left;
-                sink.close(Member { rel, size, mtime });
-                Ok(())
-            }
-            Err(e) => {
-                sink.drop_partial(&rel);
-                Err(e)
-            }
-        }
-    };
     match format {
         Format::Zip => {
             let mut z = zip_checked(r)?;
@@ -405,37 +509,43 @@ fn each_member(
                     continue;
                 };
                 let mtime = zip_time(&e);
-                put(sink, rel, mtime, &mut |w| {
+                put(left, why, sink, Some((rel, mtime)), &mut |w| {
                     std::io::copy(&mut e, w).map_err(|e| e.to_string())
                 })?;
             }
         }
         Format::SevenZ => {
+            let mut r = r;
+            let none = sevenz_rust2::Password::empty();
+            // its header within its own bound first: read with the
+            // decoders' (far larger), it could list files without end
+            sevenz_rust2::Archive::read_with_memory_limit(&mut r, &none, SEVENZ_HEADER_KB)
+                .map_err(sevenz_error)?;
             let mut a =
-                sevenz_rust2::ArchiveReader::new(r, "".into()).map_err(|e| e.to_string())?;
+                sevenz_rust2::ArchiveReader::new_with_memory_limit(r, none, SEVENZ_MEMORY_KB)
+                    .map_err(sevenz_error)?;
             // LZMA2 on several threads buffers whole runs of input and
             // output (a 64 MB 7z of 120 MB: 218 MB at its peak on 4 threads,
             // 18 MB on one, 1.7 times as long): one where memory is short
-            if cfg!(any(
-                target_arch = "wasm32",
-                target_os = "android",
-                target_os = "ios"
-            )) {
+            if SMALL {
                 a.set_thread_count(1);
             }
             let mut err = None;
             a.for_each_entries(|entry, r| {
+                // (stopped: the blocks after this one are not begun)
+                if err.is_some() {
+                    return Ok(false);
+                }
                 if entry.is_directory() {
                     return Ok(true);
                 }
-                let Some(rel) = safe_rel(entry.name()) else {
-                    return Ok(true);
-                };
                 let mtime = entry
                     .has_last_modified_date
                     .then(|| nt_time(entry.last_modified_date().into()))
                     .flatten();
-                match put(sink, rel, mtime, &mut |w| {
+                // (one whose name is not kept is decoded all the same)
+                let to = safe_rel(entry.name()).map(|rel| (rel, mtime));
+                match put(left, why, sink, to, &mut |w| {
                     std::io::copy(r, w).map_err(|e| e.to_string())
                 }) {
                     Ok(()) => Ok(true),
@@ -445,7 +555,7 @@ fn each_member(
                     }
                 }
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(sevenz_error)?;
             if let Some(e) = err {
                 return Err(e);
             }
@@ -461,13 +571,18 @@ fn each_member(
                 }
                 // the name as stored (made safe here, as for the other formats)
                 let name = info.raw_name.clone();
-                let Some(rel) = safe_rel(&name) else { continue };
                 let mtime = info
                     .mtime
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64);
+                // one whose name is not kept: in a solid archive it is
+                // decoded for those after it
+                let to = safe_rel(&name).map(|rel| (rel, mtime));
+                if to.is_none() && !a.is_solid() {
+                    continue;
+                }
                 // capped as it comes (a small archive can expand to anything)
-                put(sink, rel, mtime, &mut |w| {
+                put(left, why, sink, to, &mut |w| {
                     a.by_index(i)
                         .and_then(|e| e.copy_to(w))
                         .map_err(|e| format!("{name}: {e}"))
@@ -485,7 +600,7 @@ fn each_member(
                         if !a.is_decoder_supported() {
                             return Err(format!("{name}: a compression not supported"));
                         }
-                        put(sink, rel, mtime, &mut |w| {
+                        put(left, why, sink, Some((rel, mtime)), &mut |w| {
                             let n = std::io::copy(&mut a, w).map_err(|e| e.to_string())?;
                             a.crc_check().map_err(|e| format!("{name}: {e}"))?;
                             Ok(n)
@@ -498,39 +613,83 @@ fn each_member(
             }
         }
         Format::Tar | Format::TarGz => {
-            let r: Box<dyn std::io::Read> = if format == Format::TarGz {
+            use std::io::Read;
+            let r: Box<dyn Read> = if format == Format::TarGz {
                 // a few bytes can decompress to anything: what is passed by
                 // (links, folders) counts too, up to twice the budget
                 Box::new(Within {
                     // (gzip members one after another are one stream)
                     r: flate2::read::MultiGzDecoder::new(r),
                     left: limit.saturating_mul(2),
-                    over,
+                    why,
                 })
             } else {
                 r
             };
             let mut a = tar::Archive::new(r);
-            for e in a.entries().map_err(|e| e.to_string())? {
+            // The entries as they are: the tar crate would read the entry
+            // that gives the next one's long name (GNU) or records (PAX)
+            // whole, whatever size it claims. Read here, within a bound.
+            let (mut long, mut pax) = (None, None);
+            for e in a.entries().map_err(|e| e.to_string())?.raw(true) {
                 let mut e = e.map_err(|e| e.to_string())?;
                 use tar::EntryType as T;
+                let kind = e.header().entry_type();
+                if matches!(kind, T::GNULongName | T::XHeader) {
+                    let mut b = Vec::new();
+                    let read = (&mut e).take(TAR_NAME + 1).read_to_end(&mut b);
+                    read.map_err(|e| e.to_string())?;
+                    if b.len() as u64 > TAR_NAME {
+                        return Err("a name longer than any file's".into());
+                    }
+                    match kind {
+                        T::GNULongName => long = Some(b),
+                        _ => pax = Some(b),
+                    }
+                    continue;
+                }
+                // (a link's long name goes with its link)
+                if kind == T::GNULongLink {
+                    continue;
+                }
+                let (long, pax) = (long.take(), pax.take());
+                // a file whose holes are left out of the archive is not
+                // read as one here (no chart, sound or image is stored so)
+                if kind == T::GNUSparse {
+                    return Err("a sparse file in a tar is not supported".into());
+                }
                 // files only: a link (symbolic or hard) is not unpacked, as
                 // its target would be its data, nor a folder or a device
-                let kind = e.header().entry_type();
-                if !matches!(kind, T::Regular | T::Continuous | T::GNUSparse) {
+                if !matches!(kind, T::Regular | T::Continuous) {
                     continue;
+                }
+                let records = || tar::PaxExtensions::new(pax.as_deref().unwrap_or_default());
+                let record = |key: &str| {
+                    let found = records()
+                        .flatten()
+                        .find(|x| x.key_bytes() == key.as_bytes());
+                    found.map(|x| x.value_bytes())
+                };
+                // (the size the entry is read by is its header's)
+                let size = e.header().size().map_err(|e| e.to_string())?;
+                if record("size").is_some_and(|s| s != size.to_string().as_bytes()) {
+                    return Err("a file in a tar with two sizes".into());
                 }
                 let mtime = e.header().mtime().ok().map(|t| t as i64);
                 // names are bytes: UTF-8 (a PAX name is), else Shift_JIS or
                 // EUC-KR; an old tar's folder ends in `/`
-                let raw = e.path_bytes();
+                let header = e.path_bytes();
+                let raw: &[u8] = match &long {
+                    Some(l) => l.strip_suffix(b"\0").unwrap_or(l),
+                    None => record("path").unwrap_or(&header),
+                };
                 if raw.ends_with(b"/") {
                     continue;
                 }
-                let Some(rel) = safe_rel(&crate::text::decode_text(&raw)) else {
+                let Some(rel) = safe_rel(&crate::text::decode_text(raw)) else {
                     continue;
                 };
-                put(sink, rel, mtime, &mut |w| {
+                put(left, why, sink, Some((rel, mtime)), &mut |w| {
                     std::io::copy(&mut e, w).map_err(|e| e.to_string())
                 })?;
             }
@@ -539,11 +698,11 @@ fn each_member(
     Ok(())
 }
 
-/// A reader that fails past `left` bytes, telling `over`.
+/// A reader that fails past `left` bytes, telling `why`.
 struct Within<'a, R> {
     r: R,
     left: u64,
-    over: &'a Cell<bool>,
+    why: &'a Cell<Option<Stopped>>,
 }
 
 impl<R: io::Read> io::Read for Within<'_, R> {
@@ -554,7 +713,7 @@ impl<R: io::Read> io::Read for Within<'_, R> {
             if self.r.read(&mut one)? == 0 {
                 return Ok(0);
             }
-            self.over.set(true);
+            self.why.set(Some(Stopped::TooLarge));
             return Err(io::ErrorKind::FileTooLarge.into());
         }
         let max = buf.len().min(self.left.min(usize::MAX as u64) as usize);
@@ -629,7 +788,34 @@ fn reader(blob: Blob, store: &dyn Store) -> Result<(Format, Box<dyn ReadSeek + S
 struct Into<'a> {
     store: &'a dyn Store,
     dest: &'a Path,
-    out: Vec<Member>,
+    /// Those written (None: one a later member replaced).
+    out: Vec<Option<Member>>,
+    /// Where in `out` the member of a path is, and of a path but for its
+    /// case.
+    at: HashMap<PathBuf, usize>,
+    folded: HashMap<String, usize>,
+}
+
+/// A path as a disk that does not tell case apart compares it.
+fn folded(rel: &Path) -> String {
+    rel.to_string_lossy().to_lowercase()
+}
+
+impl<'a> Into<'a> {
+    fn new(store: &'a dyn Store, dest: &'a Path) -> Into<'a> {
+        Into {
+            store,
+            dest,
+            out: Vec::new(),
+            at: HashMap::new(),
+            folded: HashMap::new(),
+        }
+    }
+
+    /// The members written, in order.
+    fn members(self) -> impl Iterator<Item = Member> {
+        self.out.into_iter().flatten()
+    }
 }
 
 impl Sink for Into<'_> {
@@ -639,11 +825,9 @@ impl Sink for Into<'_> {
         // made safe, or but for their case on a disk that does not tell
         // them apart): the later member replaces the earlier
         if self.store.stamp(&p).is_some() {
-            let folded = |r: &Path| r.to_string_lossy().to_lowercase();
-            let at = (self.out.iter().position(|m| m.rel == rel))
-                .or_else(|| self.out.iter().position(|m| folded(&m.rel) == folded(rel)));
-            if let Some(i) = at {
-                self.out.remove(i);
+            let at = (self.at.get(rel)).or_else(|| self.folded.get(&folded(rel)));
+            if let Some(&i) = at {
+                self.out[i] = None;
             }
         }
         self.store
@@ -651,7 +835,9 @@ impl Sink for Into<'_> {
             .map_err(|e| format!("{}: {e}", p.display()))
     }
     fn close(&mut self, m: Member) {
-        self.out.push(m);
+        self.at.insert(m.rel.clone(), self.out.len());
+        self.folded.insert(folded(&m.rel), self.out.len());
+        self.out.push(Some(m));
     }
     fn drop_partial(&mut self, rel: &Path) {
         let _ = self.store.remove(&self.dest.join(rel));
@@ -671,31 +857,45 @@ pub fn unpack(
     dest: &Path,
     budget: u64,
 ) -> Result<Vec<Member>, String> {
-    let (format, r) = reader(blob, store)?;
-    Ok(unpack_from(r, format, store, dest, budget)?)
+    Ok(unpack_watched(blob, store, dest, budget, None)?)
 }
 
-/// [`unpack`] of the archive `r` of `format`.
+/// [`unpack`], given up once `stop` is cancelled.
+pub(crate) fn unpack_watched(
+    blob: Blob,
+    store: &dyn Store,
+    dest: &Path,
+    budget: u64,
+    stop: Option<&Progress>,
+) -> Result<Vec<Member>, Error> {
+    let (format, r) = reader(blob, store).map_err(Error::Other)?;
+    unpack_from(r, format, store, dest, budget, stop)
+}
+
+/// [`unpack_watched`] of the archive `r` of `format`.
 pub(crate) fn unpack_from(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
     store: &dyn Store,
     dest: &Path,
     budget: u64,
+    stop: Option<&Progress>,
 ) -> Result<Vec<Member>, Error> {
-    let mut left = budget;
-    let mut sink = Into {
-        store,
-        dest,
-        out: Vec::new(),
+    let mut left = Left {
+        bytes: budget,
+        members: MEMBERS,
+        stop,
     };
+    let mut sink = Into::new(store, dest);
     members(r, format, budget, &mut left, &mut sink)?;
-    let mut out = sink.out;
+    let mut out: Vec<Member> = sink.members().collect();
     let charts = out.iter().any(|m| crate::placement::is_chart(&m.rel));
     let nested: Vec<usize> = (0..out.len())
         .filter(|&i| !charts && is_archive(&out[i].rel))
         .collect();
     let mut inner = Vec::new();
+    // (those unpacked: taken out once all are, whatever their number)
+    let mut gone = vec![false; out.len()];
     for &i in nested.iter().rev() {
         let at = dest.join(&out[i].rel);
         let rel = &out[i].rel;
@@ -706,37 +906,37 @@ pub(crate) fn unpack_from(
         let sub = dest.join(&into);
         // (a folder of its own, unless the archive has one of that name)
         let fresh = store.read_dir(&sub).is_err() && store.stamp(&sub).is_none();
-        let mut sink = Into {
-            store,
-            dest: &sub,
-            out: Vec::new(),
-        };
-        let was = left;
+        let mut sink = Into::new(store, &sub);
+        let was = (left.bytes, left.members);
         let read = reader(Blob::File(at.clone()), store)
             .map_err(Error::Other)
             .and_then(|(format, r)| members(r, format, budget, &mut left, &mut sink));
         match read {
             Ok(()) => {
                 // (it goes: what it took is free again)
-                left += out.remove(i).size;
+                left.bytes += out[i].size;
+                left.members += 1;
+                gone[i] = true;
                 let _ = store.remove(&at);
-                inner.extend(sink.out.into_iter().map(|n| Member {
+                inner.extend(sink.members().map(|n| Member {
                     rel: into.join(n.rel),
                     ..n
                 }));
             }
-            Err(e @ Error::TooLarge(_)) => return Err(e),
             Err(Error::Other(_)) => {
-                for n in &sink.out {
+                for n in sink.members() {
                     let _ = store.remove(&sub.join(&n.rel));
                 }
                 if fresh {
                     store.remove_dir(&sub);
                 }
-                left = was;
+                (left.bytes, left.members) = was;
             }
+            Err(e) => return Err(e),
         }
     }
+    let mut gone = gone.into_iter();
+    out.retain(|_| !gone.next().unwrap_or(false));
     out.extend(inner);
     Ok(out)
 }
@@ -780,7 +980,11 @@ fn unpack_within(
         put,
         n: 0,
     };
-    let mut left = limit;
+    let mut left = Left {
+        bytes: limit,
+        members: MEMBERS,
+        stop: None,
+    };
     members(
         Box::new(Cursor::new(bytes)),
         format,
@@ -979,6 +1183,161 @@ mod tests {
     fn sorted(mut m: Vec<Member>) -> Vec<Member> {
         m.sort_by(|a, b| a.rel.cmp(&b.rel));
         m
+    }
+
+    /// A solid 7z (LZMA) of `a.bms` ("#TITLE A\n") and `x:y` (a name no
+    /// folder can hold: 64 KiB of zeros), in that order.
+    const PASSED_7Z: [u8; 251] = [
+        55, 122, 188, 175, 39, 28, 0, 4, 23, 84, 47, 179, 187, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 0,
+        0, 0, 0, 128, 219, 196, 249, 0, 17, 149, 5, 37, 103, 49, 254, 148, 176, 156, 80, 37, 154,
+        95, 184, 148, 153, 81, 104, 86, 99, 106, 172, 102, 51, 222, 103, 67, 17, 189, 116, 37, 11,
+        30, 227, 70, 63, 230, 29, 10, 70, 6, 220, 42, 210, 213, 33, 180, 2, 157, 60, 35, 6, 33, 62,
+        144, 248, 242, 249, 183, 142, 12, 221, 46, 221, 44, 117, 177, 102, 11, 69, 69, 112, 221,
+        181, 243, 125, 72, 52, 91, 159, 12, 23, 123, 247, 0, 0, 0, 129, 51, 7, 174, 15, 211, 27,
+        194, 189, 64, 192, 144, 211, 67, 196, 225, 249, 232, 176, 11, 188, 222, 126, 34, 253, 226,
+        100, 101, 216, 162, 99, 12, 120, 204, 32, 30, 138, 54, 181, 123, 115, 207, 47, 101, 214, 0,
+        66, 93, 72, 45, 36, 79, 59, 0, 157, 254, 164, 118, 38, 96, 187, 153, 106, 23, 33, 180, 28,
+        152, 215, 174, 4, 15, 119, 220, 234, 109, 214, 92, 225, 96, 190, 254, 80, 114, 118, 114,
+        236, 219, 213, 166, 56, 109, 49, 227, 192, 0, 0, 0, 23, 6, 87, 1, 9, 100, 0, 7, 11, 1, 0,
+        1, 35, 3, 1, 1, 5, 93, 0, 16, 0, 0, 12, 118, 10, 1, 159, 80, 128, 248, 0, 0,
+    ];
+
+    /// What an archive decodes for a member whose name is not kept counts
+    /// against the budget as what it writes does: a 7z's (its reader
+    /// decodes what is not read), a solid RAR's (each member is decoded
+    /// with those before it; `x:y` is 300 bytes, the charts 27).
+    #[test]
+    fn what_is_passed_by_counts() {
+        let within = |z: &[u8], limit| unpack_within(z.to_vec(), limit, |_, _| {});
+        assert_eq!(within(&PASSED_7Z, 128 << 10), Ok(1));
+        let e = within(&PASSED_7Z, 1 << 10).unwrap_err();
+        assert_eq!(e, Error::TooLarge(1 << 10).to_string());
+        assert_eq!(within(&SOLID, 400), Ok(2));
+        assert_eq!(within(&SOLID, 100), Err(Error::TooLarge(100).to_string()));
+    }
+
+    /// `z` (a 7z) with the bytes `from` of its header as `to`, its
+    /// checksums made right again.
+    fn sevenz_header(z: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+        let mut z = z.to_vec();
+        let at = |z: &[u8], i: usize| u64::from_le_bytes(z[i..i + 8].try_into().unwrap()) as usize;
+        let (start, len) = (32 + at(&z, 12), at(&z, 20));
+        let header = &z[start..start + len];
+        let i = start + header.windows(from.len()).position(|w| w == from).unwrap();
+        z[i..i + to.len()].copy_from_slice(to);
+        let crc = |b: &[u8]| {
+            let mut c = flate2::Crc::new();
+            c.update(b);
+            c.sum().to_le_bytes()
+        };
+        let header = crc(&z[start..start + len]);
+        z[28..32].copy_from_slice(&header);
+        let first = crc(&z[12..32]);
+        z[8..12].copy_from_slice(&first);
+        z
+    }
+
+    /// A 7z whose decoder asks for a dictionary of 1 GiB for a header of
+    /// a few bytes (its LZMA properties: `93`, then the size): refused
+    /// before anything is set aside for it.
+    #[test]
+    fn sevenz_within_its_memory() {
+        let same = sevenz_header(&SEVEN, &[93, 0, 16, 0, 0], &[93, 0, 16, 0, 0]);
+        assert_eq!(names(same).unwrap().len(), 2);
+        let large = sevenz_header(&SEVEN, &[93, 0, 16, 0, 0], &[93, 0, 0, 0, 64]);
+        let e = names(large).unwrap_err();
+        assert!(e.contains("MB of memory"), "{e}");
+    }
+
+    /// Names every file system holds, Windows' too, wherever the archive
+    /// is unpacked; a path of more folders than any song's is not one.
+    #[test]
+    fn names_windows_holds_too() {
+        for (name, safe) in [
+            ("song/a.bms", Some("song/a.bms")),
+            ("song\\a.bms.", Some("song/a.bms")),
+            ("song ./a.bms . ", Some("song/a.bms")),
+            ("song/CON", Some("song/_CON")),
+            ("NUL/com1.wav", Some("_NUL/_com1.wav")),
+            ("a/x?y*.wav", Some("a/x_y_.wav")),
+            ("a/x:y/b.bms", Some("a/b.bms")),
+            ("../../a/./b", Some("a/b")),
+            ("C:\\x\\y.bms", Some("x/y.bms")),
+            ("skin/Theme/parts/a b.png", Some("skin/Theme/parts/a b.png")),
+            ("... /. ", None),
+            ("x:y", None),
+        ] {
+            assert_eq!(safe_rel(name), safe.map(PathBuf::from), "{name:?}");
+        }
+        let deep = |folders: usize| "d/".repeat(folders) + "a.bms";
+        assert!(safe_rel(&deep(DEPTH)).is_some());
+        assert!(safe_rel(&deep(DEPTH + 1)).is_none());
+        assert!(safe_rel(&deep(100_000)).is_none());
+        // a chart is a chart, whatever its name ends with in the archive
+        let z = crate::testkit::zip(&[("Song/a.bms.", "#TITLE A"), ("Song/aux.ogg ", "x")]);
+        let mem = crate::fs::Mem::default();
+        let got = unpack(Blob::Bytes(z), &mem, Path::new("d"), BUDGET).unwrap();
+        let rels: Vec<PathBuf> = sorted(got).into_iter().map(|m| m.rel).collect();
+        assert_eq!(rels, [PathBuf::from("Song/_aux.ogg"), "Song/a.bms".into()]);
+        assert!(crate::placement::is_chart(&rels[1]));
+    }
+
+    /// More files than any pack has: none past them is written, whatever
+    /// their size; a file come twice counts each time it comes, and is one.
+    #[test]
+    fn within_the_number_of_files() {
+        let files: Vec<(String, &str)> = (0..5).map(|i| (format!("{i}.txt"), "")).collect();
+        let files: Vec<(&str, &str)> = files.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        let unpacked = |files_left: usize| {
+            let mut left = Left {
+                bytes: BUDGET,
+                members: files_left,
+                stop: None,
+            };
+            let mem = crate::fs::Mem::default();
+            let mut sink = Into::new(&mem, Path::new("d"));
+            let z = Box::new(Cursor::new(crate::testkit::zip(&files)));
+            let r = members(z, Format::Zip, BUDGET, &mut left, &mut sink);
+            (r, sink.members().count())
+        };
+        assert_eq!(unpacked(5), (Ok(()), 5));
+        assert_eq!(unpacked(4), (Err(Error::TooMany(MEMBERS)), 4));
+        assert_eq!(
+            Error::TooMany(MEMBERS).to_string(),
+            "more than 250000 files"
+        );
+        // 20,000 files, each twice (a tar's file appended again)
+        let names: Vec<String> = (0..20_000).map(|i| format!("Song/{i}.wav")).collect();
+        let twice: Vec<(&str, &str)> = (names.iter().map(|n| (n.as_str(), "old")))
+            .chain(names.iter().map(|n| (n.as_str(), "new")))
+            .collect();
+        let mem = crate::fs::Mem::default();
+        let t = Blob::Bytes(crate::testkit::tar(&twice));
+        let got = unpack(t, &mem, Path::new("d"), BUDGET).unwrap();
+        assert_eq!(got.len(), 20_000);
+        assert_eq!(got[0].rel, PathBuf::from("Song/0.wav"));
+        assert_eq!(mem.get(Path::new("d/Song/7.wav")).unwrap().0, b"new");
+    }
+
+    /// Cancelled: nothing more is unpacked.
+    #[test]
+    fn cancelled_while_unpacking() {
+        let stop = Progress::new();
+        let z = || Blob::Bytes(zip(&[("a.bms", b"#TITLE A"), ("b.bms", b"#TITLE B")]));
+        let mem = crate::fs::Mem::default();
+        let d = Path::new("d");
+        assert_eq!(
+            unpack_watched(z(), &mem, d, BUDGET, Some(&stop))
+                .unwrap()
+                .len(),
+            2
+        );
+        stop.cancel();
+        let mem = crate::fs::Mem::default();
+        let e = unpack_watched(z(), &mem, d, BUDGET, Some(&stop)).unwrap_err();
+        assert_eq!(e, Error::Cancelled);
+        assert_eq!(e.to_string(), CANCELLED);
+        assert!(mem.0.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1180,6 +1539,60 @@ mod tests {
         assert_eq!(got[0].1, b"#TITLE A");
     }
 
+    /// A tar's long name (GNU) or records (PAX) are a path's size: one
+    /// that claims megabytes is not read into memory. A file whose records
+    /// give it another size than its header, or stored with its holes
+    /// left out, is not one this reads.
+    #[test]
+    fn tar_names_within_a_bound() {
+        use tar::{EntryType, Header};
+        let named = |kind: EntryType, name: &[u8]| {
+            let mut t = tar::Builder::new(Vec::new());
+            let mut h = Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_size(name.len() as u64);
+            h.set_path("././@LongLink").unwrap();
+            h.set_cksum();
+            t.append(&h, name).unwrap();
+            let mut h = Header::new_gnu();
+            h.set_size(3);
+            h.set_path("short.wav").unwrap();
+            h.set_cksum();
+            t.append(&h, &b"wav"[..]).unwrap();
+            t.into_inner().unwrap()
+        };
+        let long = format!("song/{}.wav\0", "x".repeat(300));
+        let t = named(EntryType::GNULongName, long.as_bytes());
+        assert_eq!(
+            names(t).unwrap(),
+            [PathBuf::from(long.trim_end_matches('\0'))]
+        );
+        let huge = vec![b'x'; TAR_NAME as usize + 1];
+        for kind in [EntryType::GNULongName, EntryType::XHeader] {
+            let e = names(named(kind, &huge)).unwrap_err();
+            assert!(e.contains("a name longer"), "{e}");
+        }
+        // (a link's long name is passed by, whatever its size)
+        assert_eq!(
+            names(named(EntryType::GNULongLink, &huge)).unwrap().len(),
+            1
+        );
+        let t = named(EntryType::XHeader, b"19 path=song/a.wav\n9 size=3\n");
+        assert_eq!(names(t).unwrap(), [PathBuf::from("song/a.wav")]);
+        let t = named(EntryType::XHeader, b"19 path=song/a.wav\n9 size=4\n");
+        assert!(names(t).unwrap_err().contains("two sizes"));
+        let mut t = tar::Builder::new(Vec::new());
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::GNUSparse);
+        h.set_size(0);
+        h.set_path("holes.bin").unwrap();
+        h.set_cksum();
+        t.append(&h, &b""[..]).unwrap();
+        assert!(names(t.into_inner().unwrap())
+            .unwrap_err()
+            .contains("sparse"));
+    }
+
     #[test]
     fn tar_within_the_budget() {
         use crate::testkit::{gzip, tar, tar_gz};
@@ -1329,14 +1742,23 @@ mod tests {
 
     #[test]
     fn capped_writer() {
-        let over = Cell::new(false);
+        let why = Cell::new(None);
+        let stop = Progress::new();
         let mut w = Capped {
             w: Vec::new(),
             left: 4,
-            over: &over,
+            stop: Some(&stop),
+            why: &why,
         };
-        assert!(w.write_all(b"abcd").is_ok() && !over.get());
-        assert!(w.write_all(b"e").is_err() && over.get());
+        assert!(w.write_all(b"abcd").is_ok() && why.get().is_none());
+        assert!(w.write_all(b"e").is_err());
+        assert!(matches!(why.get(), Some(Stopped::TooLarge)));
+        assert_eq!(w.w, b"abcd");
+        // cancelled: nothing more is written, whatever is left
+        w.left = 4;
+        stop.cancel();
+        assert!(w.write_all(b"e").is_err());
+        assert!(matches!(why.get(), Some(Stopped::Cancelled)));
         assert_eq!(w.w, b"abcd");
         assert_eq!(
             Error::TooLarge(4 << 20).to_string(),

@@ -203,19 +203,9 @@ fn sjis_only(s: &str) -> String {
 fn valid(s: &str) -> String {
     let s: String = s.chars().filter(|c| !invalid(*c)).collect();
     let s = s.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '\u{3000}');
-    let upper = s.to_ascii_uppercase();
-    let stem = upper.split('.').next().unwrap_or("");
-    let reserved = matches!(stem, "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
+    if crate::fs::device_name(s) {
         // (`CON.x` is `x`)
-        return s
-            .split_once('.')
-            .map(|(_, r)| r.trim_start_matches('.'))
-            .unwrap_or("")
-            .into();
+        return valid(s.split_once('.').map_or("", |(_, rest)| rest));
     }
     s.to_string()
 }
@@ -338,6 +328,7 @@ mod tests {
         assert_eq!(valid(" .name. "), "name");
         assert_eq!(valid("CON"), "");
         assert_eq!(valid("com1.txt"), "txt");
+        assert_eq!(valid("CON.nul.x"), "x");
         let parent = Path::new("/").join("x".repeat(240));
         assert_eq!(fit_path(&parent, "abcdefghijkl"), "abcdefgh");
     }

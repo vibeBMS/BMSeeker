@@ -40,6 +40,8 @@ pub struct Library {
     charts: RefCell<Charts>,
     /// A chart's MD5 or SHA-256 (lower case hex): the folders holding it.
     by_hash: Arc<HashMap<String, Vec<PathBuf>>>,
+    /// The folders `by_hash` names.
+    held: Arc<HashSet<PathBuf>>,
     pub(crate) waiting: Waiting,
 }
 
@@ -202,7 +204,7 @@ struct Read {
 impl Read {
     /// The chart `p` (None: it cannot be read).
     fn of(fs: &dyn Fs, p: &Path) -> Option<Read> {
-        let bytes = fs.read(p).ok()?;
+        let bytes = crate::chart::read(fs, p)?;
         Some(Read {
             md5: crate::install::md5_hex(&bytes),
             sha256: sha256_hex(&bytes),
@@ -279,6 +281,7 @@ impl Library {
             songs: OnceCell::new(),
             charts: RefCell::default(),
             by_hash: Arc::default(),
+            held: Arc::default(),
             waiting: Waiting::default(),
         }
     }
@@ -327,7 +330,7 @@ impl Library {
     /// its folder, or one a chart it knows the hash of is in (a player's
     /// records name charts anywhere).
     pub(crate) fn lists(&self, fs: &dyn Fs, dir: &Path) -> bool {
-        self.songs(fs).at.contains_key(dir) || self.by_hash.values().flatten().any(|d| d == dir)
+        self.songs(fs).at.contains_key(dir) || self.held.contains(dir)
     }
 
     /// Whether it holds a chart of the song `want` (the same artist, the
@@ -440,8 +443,13 @@ impl Library {
 
     fn hold(&mut self, hash: String, dir: &Path) {
         let at = Arc::make_mut(&mut self.by_hash).entry(hash).or_default();
-        if !at.iter().any(|d| d == dir) {
+        // (the folder just named again is not named twice; any other time
+        // it is, which changes nothing but the list's length)
+        if at.last().map(PathBuf::as_path) != Some(dir) {
             at.push(dir.to_path_buf());
+        }
+        if !self.held.contains(dir) {
+            Arc::make_mut(&mut self.held).insert(dir.to_path_buf());
         }
     }
 

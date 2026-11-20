@@ -155,7 +155,99 @@ fn staged(m: &Mem, files: &[(&str, &str)]) -> Staged {
             }
         })
         .collect();
-    Staged::read(m, root, members, false)
+    Staged::read(m, root, members, false, None)
+}
+
+/// A download cancelled: nothing of it is planned or comes in, the file
+/// it came as stays, and what it passed through goes.
+#[test]
+fn cancelled_downloads_bring_nothing() {
+    let m = store(&[("bms/Song/song.bms", SONG), ("bms/Song/sound/01.ogg", "x")]);
+    let l = lib(&m);
+    let chart = "#TITLE Song [X]\n#ARTIST alpha\n#WAV01 sound/01.wav\n";
+    let s = staged(&m, &[("Diff/x.bms", chart), ("Song2/y.bms", SONG)]);
+    let stop = crate::progress::Progress::new();
+    let r = Request {
+        progress: Some(stop.clone()),
+        ..req(Role::Any)
+    };
+    assert!(plan(&m, &s, &l, &r)
+        .iter()
+        .all(|i| !matches!(i.outcome, Outcome::Rejected(_))));
+    stop.cancel();
+    let cancelled = |done: &[Done]| matches!(done, [Done::Failed(f)] if f.cancelled());
+    let items = plan(&m, &s, &l, &r);
+    assert!(
+        matches!(&items[..], [Item { outcome: Outcome::Rejected(f), moves }] if f.cancelled() && moves.is_empty()),
+        "{items:?}"
+    );
+    // the whole of it: an archive in the downloads folder, as an import's
+    m.put(
+        Path::new("dl/x.zip"),
+        &zip(&[("Diff/x.bms", chart)], 2019),
+        0,
+    );
+    let done = take(
+        &m,
+        Blob::File("dl/x.zip".into()),
+        &r,
+        Path::new(DL),
+        &mut lib(&m),
+    );
+    assert!(cancelled(&done), "{done:?}");
+    assert!(m.get(Path::new("dl/x.zip")).is_some());
+    assert!(text(&m, "bms/Song/x.bms").is_none());
+    m.0.lock()
+        .unwrap()
+        .retain(|p, _| !p.starts_with("dl/.take-test"));
+    no_stage(&m);
+}
+
+/// A folder of 3,000 charts with 30,000 sounds beside them, for songs the
+/// library has: the folder's files are looked at once, not for each chart.
+#[test]
+fn many_charts_in_one_folder() {
+    let m = store(&[
+        ("bms/Song/song.bms", SONG),
+        ("bms/Song/sound/01.ogg", "x"),
+        (
+            "bms/Other/o.bms",
+            "#TITLE Other\n#ARTIST b\n#WAV01 o1.wav\n",
+        ),
+        ("bms/Other/o1.ogg", "x"),
+    ]);
+    let l = lib(&m);
+    let chart =
+        |i| format!("#TITLE Song [{i}]\n#ARTIST alpha\n#WAV01 sound/01.wav\n#WAV02 k{i}.wav\n");
+    let paths: Vec<(String, String)> = (0..3_000)
+        .map(|i| (format!("Diff/{i}.bms"), chart(i)))
+        .chain((0..30_000).map(|i| (format!("Diff/k{i}.ogg"), "x".into())))
+        .collect();
+    let files: Vec<(&str, &str)> = (paths.iter().map(|(p, b)| (p.as_str(), b.as_str()))).collect();
+    let s = staged(&m, &files);
+    let items = plan(&m, &s, &l, &req(Role::Diff));
+    // all into the song's folder, as the download lays them out
+    assert!(
+        matches!(&items[..], [Item { outcome: Outcome::Into(d), moves }]
+            if d == Path::new("bms/Song") && moves.len() == 33_000),
+        "{:?}",
+        items.iter().map(|i| &i.outcome).collect::<Vec<_>>()
+    );
+    // each on its own (no folder holds them all): the first of the folder's
+    // charts that goes somewhere takes the files beside it
+    let other = "#TITLE Other [X]\n#ARTIST b\n#WAV01 o1.wav\n";
+    let mut files = files;
+    files.push(("Diff/other.bms", other));
+    let s = staged(&m, &files);
+    let items = plan(&m, &s, &l, &req(Role::Diff));
+    assert_eq!(items.len(), 3_001);
+    let moved: usize = items.iter().map(|i| i.moves.len()).sum();
+    assert_eq!(moved, 33_001);
+    let wanted = Request {
+        md5: Some(md5_hex(chart(7).as_bytes())),
+        ..req(Role::Diff)
+    };
+    assert_eq!(plan(&m, &s, &l, &wanted).len(), 3_001);
 }
 
 /// The song's own chart a table names: where a separate chart goes that
