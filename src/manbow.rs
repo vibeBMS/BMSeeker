@@ -11,6 +11,7 @@
 
 use crate::text::pattern::Pattern;
 use crate::text::unescape;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 // an event's works (the command-line tool's)
@@ -130,6 +131,18 @@ fn variant(label: &str) -> String {
         .to_lowercase()
 }
 
+/// What of a work is looked at: a work has a few links, a label is a line
+/// of its download box, and the box a few kilobytes. More is another
+/// party's to make the reading slow with.
+const MAX_LINKS: usize = 256;
+const MAX_LABEL: usize = 256;
+const MAX_CELL: usize = 64 << 10;
+
+/// The first `chars` characters of `s`.
+fn start_of(s: &str, chars: usize) -> &str {
+    s.char_indices().nth(chars).map_or(s, |(i, _)| &s[..i])
+}
+
 /// A cell's text: tags dropped, references decoded, trimmed.
 fn text(s: &str) -> String {
     static TAG: LazyLock<Pattern> = LazyLock::new(|| Pattern::new(r"<[^>]+>"));
@@ -139,13 +152,19 @@ fn text(s: &str) -> String {
 }
 
 /// `[(label, url)]` of a URL list's address cell: a line's own text, or the
-/// last heading lines above it.
+/// last heading lines above it. Its first [`MAX_CELL`] bytes are read, for
+/// [`MAX_LINKS`] links at most, each label's first [`MAX_LABEL`] characters.
 pub(crate) fn links_of(cell: &str) -> Vec<(String, String)> {
+    let cell = &cell[..cell.floor_char_boundary(MAX_CELL)];
     static BR: LazyLock<Pattern> = LazyLock::new(|| re(r"<br\s*/?>"));
     static HREF: LazyLock<Pattern> = LazyLock::new(|| Pattern::new(r#"href="https?://[^"]+""#));
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut heading: Vec<String> = Vec::new();
     for raw in BR.split(cell) {
+        if out.len() == MAX_LINKS {
+            break;
+        }
         // (`href="…"`: what is between the quotes)
         let urls: Vec<&str> = HREF
             .find_iter(raw)
@@ -155,7 +174,7 @@ pub(crate) fn links_of(cell: &str) -> Vec<(String, String)> {
         for u in &urls {
             t = t.replace(&unescape(u), "");
         }
-        let t = t.trim_matches([' ', ':', '：', '-']).to_string();
+        let t = start_of(t.trim_matches([' ', ':', '：', '-']), MAX_LABEL).to_string();
         if urls.is_empty() {
             // headings stack ("[ogg]" then "Google Drive:") until a gap
             if t.is_empty() {
@@ -167,7 +186,7 @@ pub(crate) fn links_of(cell: &str) -> Vec<(String, String)> {
         }
         for u in urls {
             let u = unescape(u);
-            if out.iter().all(|(_, x)| *x != u) {
+            if seen.insert(u.clone()) {
                 let mut parts: Vec<&str> = heading
                     .iter()
                     .skip(heading.len().saturating_sub(2))
@@ -207,7 +226,7 @@ fn bga_versions(links: &[(String, String)]) -> bool {
 }
 
 fn score(label: &str, url: &str, versions: bool) -> i32 {
-    let label = format!("{label} {}", file_part(url));
+    let label = format!("{label} {}", start_of(&file_part(url), MAX_LABEL));
     let mut s: i32 = GOOD
         .iter()
         .chain(BAD.iter())
@@ -256,7 +275,8 @@ fn first_max<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> i32) -> 
 }
 
 /// Which of a work's `(label, URL)` links is its main archive, which are
-/// add-ons, and which mirror them.
+/// add-ons, and which mirror them: of its first [`MAX_LINKS`] links, by
+/// each label's first [`MAX_LABEL`] characters.
 pub(crate) fn pick(links: &[(String, String)]) -> Pick {
     if links.is_empty() {
         return Pick {
@@ -264,6 +284,18 @@ pub(crate) fn pick(links: &[(String, String)]) -> Pick {
             ..Pick::default()
         };
     }
+    let links: Vec<(String, String)> = links
+        .iter()
+        .take(MAX_LINKS)
+        .map(|(l, u)| (start_of(l, MAX_LABEL).to_string(), u.clone()))
+        .collect();
+    let links = &links[..];
+    // (each label's once, however many links are compared by it)
+    let variants: HashMap<&str, String> = links
+        .iter()
+        .map(|(l, _)| (l.as_str(), variant(l)))
+        .collect();
+    let variant = |l: &str| variants[l].as_str();
     let versions = bga_versions(links);
     let addon = |l: &str| {
         if bga_only(l) && !versions || EARLIER.is_match(l) && !AGAIN.is_match(l) {
@@ -289,13 +321,12 @@ pub(crate) fn pick(links: &[(String, String)]) -> Pick {
         rest = all.into_iter().filter(|x| variant(&x.0) == key).collect();
     }
     extra_links.retain(|x| !rest.contains(x));
-    let sc = |u: &str| {
-        // as a dict by URL: the last link with that URL counts
-        rest.iter()
-            .rev()
-            .find(|(_, x)| x == u)
-            .map_or(0, |(l, x)| score(l, x, versions))
-    };
+    // as a dict by URL: the last link with that URL counts
+    let scores: HashMap<&str, i32> = rest
+        .iter()
+        .map(|(l, x)| (x.as_str(), score(l, x, versions)))
+        .collect();
+    let sc = |u: &str| scores.get(u).copied().unwrap_or(0);
     let best = first_max(rest.iter().copied(), |x| sc(&x.1)).expect("rest");
     let best_sc = sc(&best.1);
     let key = variant(&best.0);
@@ -314,7 +345,7 @@ pub(crate) fn pick(links: &[(String, String)]) -> Pick {
         let k = variant(l);
         match extra.iter_mut().find(|g| g.0 == k) {
             Some(g) => g.1.push(u.clone()),
-            None => extra.push((k, vec![u.clone()])),
+            None => extra.push((k.to_string(), vec![u.clone()])),
         }
     }
     let mut why = Vec::new();
@@ -419,5 +450,29 @@ mod tests {
             work_page("https://manbow.nothing.sh/event/event.cgi?action=List_def&event=1"),
             None
         );
+    }
+
+    /// A download box made to be slow to read: read to its first bytes,
+    /// links and labels' starts, in a moment.
+    #[test]
+    fn a_box_made_to_be_slow() {
+        let since = std::time::Instant::now();
+        assert!(links_of(&"<".repeat(2_000_000)).is_empty());
+        assert!(links_of(&"&".repeat(2_000_000)).is_empty());
+        let many: String = (0..100_000)
+            .map(|i| format!(r#"l{i}<br><a href="https://a.test/{i}.zip">x</a><br>"#))
+            .collect();
+        let links = links_of(&many);
+        assert!(links.len() <= MAX_LINKS && links[0].1 == "https://a.test/0.zip");
+        // links given another way (a venue's manifest), beyond counting,
+        // their labels long
+        let label = format!("ogg {}", "(mirror ".repeat(50_000));
+        let given: Vec<(String, String)> = (0..20_000)
+            .map(|i| (format!("{label}{i}"), format!("https://a.test/{i}.zip")))
+            .collect();
+        let p = pick(&given);
+        assert_eq!(p.main[0], "https://a.test/0.zip");
+        assert!(p.main.len() <= MAX_LINKS);
+        assert!(since.elapsed() < std::time::Duration::from_secs(30));
     }
 }
