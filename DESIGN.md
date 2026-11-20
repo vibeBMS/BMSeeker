@@ -44,7 +44,7 @@ The modules in more detail:
 | `table` | bmstable difficulty tables (the HTML's `<meta name="bmstable">` → header → data) |
 | `hosts` | link → archive: direct links, Google Drive files and folders (their `resourcekey` kept), Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a chart's page bmssearch.net/bmses/ID: its work's links; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
 | `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh / .tar / .tar.gz (.tgz) into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder; each name one that Windows holds too, wherever it is unpacked: no device's name, no dot or space at its end; at most 4 GiB unpacked natively, 1 GiB in a web page, what an archive decodes for members passed by counted too; at most 250,000 files, in paths of 32 folders; a 7z's decoder within 1 GiB of memory, 256 MiB in a web page and on phones, its header within 17 MiB, 9 there; a tar's long names within 1 MiB; the archive's file times kept; archives inside one holding no chart unpacked too; 7z on one thread in a web page and on phones; given up when its download is cancelled). `import` takes a file brought in by hand, and places the separate charts that waited for what came in. A chart is read up to 32 MiB (a larger one is a chart that cannot be read). What a download passes through in the downloads folder (`.job-…`, `.take-…`, `.in-…`) is made anew under a name that cannot be guessed, and what a run that died left of them goes after a day |
-| `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not; where file times mean nothing, as in a web page's storage, the one there stays) |
+| `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not, nor one of a time still to come; where file times mean nothing, as in a web page's storage, the one there stays) |
 | `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists (by artist, as compared), and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan_cached`), folder by folder when first needed (`new`), or given by a player's own records (`from_catalog`); what comes in is added to it (`add`, `add_folder`) |
 | `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
 | `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart); what arrives goes through `take` (on any `fs::Store`): unpacked into a folder of its own, planned without touching a file (`plan`), carried out (`apply`) |
@@ -315,6 +315,19 @@ then places the separate charts that waited for what came in.
   go into that folder as they are laid out (its `sound/` folder there
   too). What a song's link brings is a folder of its own unless where it
   goes is sure.
+- **What may be replaced.** A download is the song of a library's folder
+  only when it holds a chart whose MD5 or SHA-256 the library has in that
+  folder (`Library::holding`), and the folder's charts' titles and artists
+  are not unlike that chart's in both (`titles::Relation::Unrelated`: an
+  MD5 can be made to match; such a chart is not the library's, and its
+  package is kept apart). Only then do its newer files replace those of
+  their paths there (a chart never). A folder found by its charts'
+  titles and artists, its name, its sounds or a table's `org_md5` takes
+  only the files it lacks (a chart of a name there beside it, `name_.bms`),
+  unless brought in again (`--reinstall`: newer files replace those
+  there; a song's folder of its name has them all replaced). A file's
+  time still to come (an archive gives its files any) is newer than
+  none.
 - **Which song's folder**, in this order:
   1. the package's own charts the library has (each votes for its folder;
      two folders with as many votes, as when the library holds a chart
@@ -398,7 +411,7 @@ JSON file over the defaults (`--config`, `$BMSEEKER_CONFIG`,
 | `tables` | difficulty tables |
 | `downloads` | the folder in a library where downloads wait |
 | `min_coverage` | the share of a chart's sounds a song's folder must hold |
-| `reinstall` | newer files over those there too (`--reinstall`) |
+| `reinstall` | newer files over those there too (`--reinstall`); a song's folder found by name alone has its files replaced |
 | `folder_naming`, `folder_name_format`, `sjis_only` | Folder naming, above (`--name-folders`) |
 | `local_hosts` | hosts of this machine and its own networks are asked natively (a mirror on a LAN); off by default |
 

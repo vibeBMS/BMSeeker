@@ -178,7 +178,7 @@ fn cancelled_downloads_bring_nothing() {
     let cancelled = |done: &[Done]| matches!(done, [Done::Failed(f)] if f.cancelled());
     let items = plan(&m, &s, &l, &r);
     assert!(
-        matches!(&items[..], [Item { outcome: Outcome::Rejected(f), moves }] if f.cancelled() && moves.is_empty()),
+        matches!(&items[..], [Item { outcome: Outcome::Rejected(f), moves, .. }] if f.cancelled() && moves.is_empty()),
         "{items:?}"
     );
     // the whole of it: an archive in the downloads folder, as an import's
@@ -228,7 +228,7 @@ fn many_charts_in_one_folder() {
     let items = plan(&m, &s, &l, &req(Role::Diff));
     // all into the song's folder, as the download lays them out
     assert!(
-        matches!(&items[..], [Item { outcome: Outcome::Into(d), moves }]
+        matches!(&items[..], [Item { outcome: Outcome::Into(d), moves, .. }]
             if d == Path::new("bms/Song") && moves.len() == 33_000),
         "{:?}",
         items.iter().map(|i| &i.outcome).collect::<Vec<_>>()
@@ -585,6 +585,7 @@ fn a_failed_move_keeps_the_song() {
         let item = Item {
             outcome: Outcome::New("bms/Song".into()),
             moves: moves.to_vec(),
+            over: Over::All,
         };
         let mut lib = Library::scan(&fs, Path::new("bms"));
         let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
@@ -611,6 +612,7 @@ fn a_failed_overwrite_keeps_the_file() {
     let item = Item {
         outcome: Outcome::Into("bms/Song".into()),
         moves: vec![("dl/s/01.ogg".into(), "bms/Song/01.ogg".into())],
+        over: Over::Newer,
     };
     let mut lib = Library::scan(&fs, Path::new("bms"));
     let done = apply(&fs, vec![item.clone()], Path::new(DL), &mut lib);
@@ -718,6 +720,7 @@ fn a_copy_failing_midway_leaves_nothing() {
         let item = Item {
             outcome: Outcome::New("bms/Song".into()),
             moves: moves.to_vec(),
+            over: Over::All,
         };
         let mut lib = Library::scan(&fs, Path::new("bms"));
         let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
@@ -745,6 +748,7 @@ fn a_long_name_moves_in() {
         let item = Item {
             outcome: Outcome::New(song.clone()),
             moves: vec![(from.clone(), song.join(&name))],
+            over: Over::All,
         };
         let done = apply(&Disk, vec![item], &d.join("dl"), &mut lib);
         assert!(matches!(&done[..], [Done::Added(_, 1)]), "{done:?}");
@@ -907,10 +911,140 @@ fn moves_keep_to_the_library() {
         let item = Item {
             outcome,
             moves: vec![("dl/s/a.ogg".into(), to.into())],
+            over: Over::Keep,
         };
         let done = apply(&m, vec![item], Path::new(DL), &mut l);
         assert!(matches!(&done[..], [Done::Failed(_)]), "{to}: {done:?}");
     }
     let left: Vec<PathBuf> = m.0.lock().unwrap().keys().cloned().collect();
     assert_eq!(left, [Path::new("dl/s/a.ogg")]);
+}
+
+/// A download whose charts only say they are a song the library has (its
+/// title and artist, a folder of its name) replaces none of its files:
+/// only those it lacks come in, a chart of a name there beside it;
+/// reinstalled, the files are replaced.
+#[test]
+fn a_song_by_its_name_alone_replaces_nothing() {
+    let m = store(&[("bms/Song/song.bms", SONG), ("bms/Song/01.ogg", "old")]);
+    let other = format!("{SONG}#PLAYLEVEL 12\n");
+    let files = [
+        ("song.bms", other.as_str()),
+        ("01.ogg", "new"),
+        ("02.ogg", "new"),
+    ];
+    let r = Request {
+        naming: Naming::Named("Song".into()),
+        ..req(Role::Song)
+    };
+    let done = take_zip(&m, &files, &r, &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Added(d, _)] if d == Path::new("bms/Song")),
+        "{done:?}"
+    );
+    assert_eq!(text(&m, "bms/Song/song.bms").as_deref(), Some(SONG));
+    assert_eq!(text(&m, "bms/Song/song_.bms"), Some(other.clone()));
+    assert_eq!(text(&m, "bms/Song/01.ogg").as_deref(), Some("old"));
+    assert_eq!(text(&m, "bms/Song/02.ogg").as_deref(), Some("new"));
+    assert!(text(&m, "bms/Song (2)/song.bms").is_none());
+    no_stage(&m);
+    // by its charts' titles and artists, the folder's name another's
+    let m = store(&[
+        ("bms/Old Name/song.bms", SONG),
+        ("bms/Old Name/01.ogg", "old"),
+    ]);
+    let r = Request {
+        naming: Naming::Charts {
+            format: crate::naming::DEFAULT_FORMAT.into(),
+            sjis_only: false,
+        },
+        ..req(Role::Song)
+    };
+    let done = take_zip(&m, &files, &r, &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Added(d, _)] if d == Path::new("bms/Old Name")),
+        "{done:?}"
+    );
+    assert_eq!(text(&m, "bms/Old Name/song.bms").as_deref(), Some(SONG));
+    assert_eq!(text(&m, "bms/Old Name/01.ogg").as_deref(), Some("old"));
+    // brought in again: replaced
+    let m = store(&[("bms/Song/song.bms", SONG), ("bms/Song/01.ogg", "old")]);
+    let again = Request {
+        naming: Naming::Named("Song".into()),
+        reinstall: true,
+        ..req(Role::Song)
+    };
+    take_zip(&m, &files, &again, &mut lib(&m));
+    assert_eq!(text(&m, "bms/Song/song.bms"), Some(other));
+    assert_eq!(text(&m, "bms/Song/01.ogg").as_deref(), Some("new"));
+}
+
+/// A 差分 placed by its sounds and its title (no chart of the library in
+/// it) brings no file over one there, however new; one whose package holds
+/// a chart of the folder does, by the overwrite rule.
+#[test]
+fn a_diff_by_its_sounds_replaces_nothing() {
+    let m = store(&[
+        ("bms/Song/song.bms", SONG),
+        ("bms/Song/sound/01.ogg", "old"),
+        ("bms/Song/sound/02.ogg", "old"),
+    ]);
+    let chart = "#TITLE Song [X]\n#ARTIST alpha\n#WAV01 sound/01.wav\n#WAV02 sound/02.wav\n";
+    let files = [("x.bms", chart), ("sound/01.ogg", "new")];
+    let done = take_zip(&m, &files, &req(Role::Diff), &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/Song/x.bms")),
+        "{done:?}"
+    );
+    assert_eq!(text(&m, "bms/Song/sound/01.ogg").as_deref(), Some("old"));
+    let chart = chart.replace("[X]", "[Y]");
+    let files = [
+        ("song.bms", SONG),
+        ("y.bms", chart.as_str()),
+        ("sound/01.ogg", "new"),
+    ];
+    let done = take_zip(&m, &files, &req(Role::Diff), &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/Song/y.bms")),
+        "{done:?}"
+    );
+    assert_eq!(text(&m, "bms/Song/sound/01.ogg").as_deref(), Some("new"));
+}
+
+/// A chart of the library's hash in a folder whose charts are of another
+/// title and artist altogether (an MD5 made to match) does not make the
+/// download that song: it is a song of its own.
+#[test]
+fn a_hash_unlike_its_folder_is_not_the_song() {
+    use crate::library::Owned;
+    let m = store(&[("bms/Song/song.bms", SONG), ("bms/Song/01.ogg", "old")]);
+    let other = "#TITLE Zzz\n#ARTIST q\n#WAV01 01.wav\n";
+    let files = [("Zzz/z.bms", other), ("Zzz/01.ogg", "new")];
+    let s = staged(&m, &files);
+    let catalog = |title: &str| Owned {
+        path: "bms/Song/song.bms".into(),
+        md5: s.charts[0].md5.clone(),
+        title: title.into(),
+        artist: "alpha".into(),
+        ..Default::default()
+    };
+    let lib = Library::from_catalog(Path::new("bms"), [catalog("Song")]);
+    let items = plan(&m, &s, &lib, &req(Role::Song));
+    assert!(
+        matches!(
+            &items[..],
+            [Item {
+                outcome: Outcome::New(_),
+                ..
+            }]
+        ),
+        "{items:?}"
+    );
+    // a title the folder's: the library's song
+    let lib = Library::from_catalog(Path::new("bms"), [catalog("Zzz")]);
+    let items = plan(&m, &s, &lib, &req(Role::Song));
+    assert!(
+        matches!(&items[..], [Item { outcome: Outcome::Owned(d), .. }] if d == Path::new("bms/Song")),
+        "{items:?}"
+    );
 }

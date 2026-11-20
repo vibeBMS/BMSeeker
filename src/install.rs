@@ -139,7 +139,7 @@ pub fn safe_name(name: &str) -> String {
 }
 
 /// Seconds since 1970.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

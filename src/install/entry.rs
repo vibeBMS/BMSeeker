@@ -789,7 +789,11 @@ mod tests {
         ];
         let mut lib = Library::scan(&Disk, &library);
         let mut batch = Batch::new(entries.iter().map(|e| e.md5.clone()));
-        let cx = Context::default();
+        // (the files are on this machine's own server)
+        let cx = Context::new(crate::config::Config {
+            local_hosts: true,
+            ..Default::default()
+        });
         let native = crate::native::Native::new(&cx);
         for e in &entries {
             let dl = downloads.clone();
@@ -856,6 +860,7 @@ mod tests {
             sources: vec!["ginger".into(), "konmai".into()],
             ginger: format!("{}/ginger/", api.url),
             konmai: format!("{}/konmai?md5=", api.url),
+            local_hosts: true,
             ..Config::default()
         });
         let sources = Sources::from_config(&cx.config, Vec::new());

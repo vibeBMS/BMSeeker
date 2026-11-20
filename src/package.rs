@@ -106,10 +106,15 @@ impl Staged {
         self.chart_rel(c).parent().unwrap_or(Path::new(""))
     }
 
-    /// Whether the library has the chart `c`.
-    pub(crate) fn owned(&self, c: usize, lib: &Library) -> bool {
+    /// The library's folders holding the chart `c` ([`Library::holding`]).
+    pub(crate) fn held(&self, fs: &dyn Fs, c: usize, lib: &Library) -> Vec<PathBuf> {
         let c = &self.charts[c];
-        lib.owns(&c.md5) || lib.owns(&c.sha256)
+        lib.holding(fs, &c.md5, &c.sha256, c.info.as_ref())
+    }
+
+    /// Whether the library has the chart `c` ([`Staged::held`]).
+    pub(crate) fn owned(&self, fs: &dyn Fs, c: usize, lib: &Library) -> bool {
+        !self.held(fs, c, lib).is_empty()
     }
 }
 
@@ -359,13 +364,14 @@ pub(crate) enum PackageKind {
 /// [`PackageKind::Song`] when it holds any sound. Anything else: a song when it
 /// holds its charts' sounds (`rules`), else a 差分.
 pub(crate) fn classify(
+    fs: &dyn Fs,
     p: &Package,
     s: &Staged,
     lib: &Library,
     role: Role,
     rules: Rules,
 ) -> PackageKind {
-    let owned = p.charts.iter().filter(|&&c| s.owned(c, lib)).count();
+    let owned = p.charts.iter().filter(|&&c| s.owned(fs, c, lib)).count();
     if !p.charts.is_empty() && owned == p.charts.len() {
         return PackageKind::Owned;
     }
@@ -598,22 +604,38 @@ mod tests {
         let s = staged(&[("Song/a.bms", SONG), ("Song/01.ogg", "x")]);
         let p = &split(&s)[0];
         let rules = Rules::default();
+        let mem = crate::fs::Mem::default();
         let lib = Library::new(Path::new("bms"));
-        assert_eq!(classify(p, &s, &lib, Role::Song, rules), PackageKind::Song);
-        assert_eq!(classify(p, &s, &lib, Role::Any, rules), PackageKind::Song);
+        assert_eq!(
+            classify(&mem, p, &s, &lib, Role::Song, rules),
+            PackageKind::Song
+        );
+        assert_eq!(
+            classify(&mem, p, &s, &lib, Role::Any, rules),
+            PackageKind::Song
+        );
         // a separate chart's link: a 差分, whatever it holds
-        assert_eq!(classify(p, &s, &lib, Role::Diff, rules), PackageKind::Diff);
+        assert_eq!(
+            classify(&mem, p, &s, &lib, Role::Diff, rules),
+            PackageKind::Diff
+        );
         // charts only: a 差分 unless a song's link brought it
         let d = staged(&[("x.bms", SONG)]);
         let q = &split(&d)[0];
-        assert_eq!(classify(q, &d, &lib, Role::Any, rules), PackageKind::Diff);
+        assert_eq!(
+            classify(&mem, q, &d, &lib, Role::Any, rules),
+            PackageKind::Diff
+        );
         let d2 = staged(&[("x.bms", SONG), ("y.ogg", "x")]);
         let q2 = &split(&d2)[0];
         assert_eq!(
-            classify(q2, &d2, &lib, Role::Song, rules),
+            classify(&mem, q2, &d2, &lib, Role::Song, rules),
             PackageKind::Song
         );
-        assert_eq!(classify(q2, &d2, &lib, Role::Any, rules), PackageKind::Diff);
+        assert_eq!(
+            classify(&mem, q2, &d2, &lib, Role::Any, rules),
+            PackageKind::Diff
+        );
         // in the library: owned
         let owned = |md5: &str| Owned {
             path: "bms/Song/a.bms".into(),
@@ -621,7 +643,10 @@ mod tests {
             ..Default::default()
         };
         let lib = Library::from_catalog(Path::new("bms"), [owned(&s.charts[0].md5)]);
-        assert_eq!(classify(p, &s, &lib, Role::Song, rules), PackageKind::Owned);
+        assert_eq!(
+            classify(&mem, p, &s, &lib, Role::Song, rules),
+            PackageKind::Owned
+        );
         // some of its charts: what is new goes into the song's folder
         let more = staged(&[
             ("Song/a.bms", SONG),
@@ -630,7 +655,7 @@ mod tests {
         ]);
         let m = &split(&more)[0];
         assert_eq!(
-            classify(m, &more, &lib, Role::Song, rules),
+            classify(&mem, m, &more, &lib, Role::Song, rules),
             PackageKind::Diff
         );
     }

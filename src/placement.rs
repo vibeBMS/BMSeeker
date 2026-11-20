@@ -694,8 +694,9 @@ pub(crate) enum Clash {
 /// [`Clash`] for a file (`new`: its time and size; `old`: the one there):
 /// a chart never replaces another; the same size within 2 seconds is the
 /// same file; else a newer one replaces the one there, an older one does
-/// not. Without file times to go by (`times` false: a web page's storage),
-/// the one there stays.
+/// not, nor one of a time still to come (an archive gives its files the
+/// times it likes). Without file times to go by (`times` false: a web
+/// page's storage), the one there stays.
 pub(crate) fn clash(
     new: (i64, u64),
     old: Option<(i64, u64)>,
@@ -711,7 +712,8 @@ pub(crate) fn clash(
     if !times || (new.1 == old.1 && (new.0 - old.0).abs() <= 2) {
         return Clash::Keep;
     }
-    if new.0 > old.0 {
+    let now = i64::try_from(crate::install::now()).unwrap_or(i64::MAX);
+    if new.0 > old.0 && new.0 <= now {
         Clash::Overwrite
     } else {
         Clash::Keep
@@ -725,6 +727,17 @@ pub(crate) fn clash(
 /// set aside until it is in: a failure leaves it). Moved, else (another
 /// disk) copied. Returns where it is now (None: it was not needed).
 pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    bring_in(fs, file, dir, true)
+}
+
+/// [`bring`]; without `replace`, a file of the same name there stays
+/// whatever its time (`file` goes).
+pub(crate) fn bring_in(
+    fs: &dyn Store,
+    file: &Path,
+    dir: &Path,
+    replace: bool,
+) -> std::io::Result<Option<PathBuf>> {
     let name = file_name(file);
     let mut to = dir.join(&name);
     let chart = is_chart(file);
@@ -739,7 +752,7 @@ pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<
     let new = fs.stamp(file).unwrap_or_default();
     match clash(new, fs.stamp(&to), chart, fs.keeps_times()) {
         Clash::Move => move_file(fs, file, &to)?,
-        Clash::Overwrite => {
+        Clash::Overwrite if replace => {
             let old = dir.join(format!(".{name}.old"));
             // (one an earlier failure left goes)
             let _ = fs.remove(&old);
@@ -750,7 +763,7 @@ pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<
             // (one that cannot be removed stays beside it, hidden)
             let _ = fs.remove(&old);
         }
-        Clash::Keep => {
+        Clash::Keep | Clash::Overwrite => {
             fs.remove(file)?;
             return Ok(None);
         }
@@ -1298,6 +1311,18 @@ mod tests {
         // no times to go by: what is there stays
         assert_eq!(clash((t + 100, 6), Some((t, 5)), false, false), Clash::Keep);
         assert_eq!(clash((t, 5), None, false, false), Clash::Move);
+    }
+
+    /// A file of a time still to come (an archive gives its files any)
+    /// is newer than none.
+    #[test]
+    fn a_time_to_come_wins_nothing() {
+        let now = crate::install::now() as i64;
+        let later = now + 24 * 60 * 60;
+        assert_eq!(clash((later, 6), Some((now, 5)), false, true), Clash::Keep);
+        assert_eq!(clash((later, 6), Some((0, 5)), false, true), Clash::Keep);
+        assert_eq!(clash((now, 6), Some((0, 5)), false, true), Clash::Overwrite);
+        assert_eq!(clash((later, 6), None, false, true), Clash::Move);
     }
 
     /// The audit's defect 4: a 差分 package's sounds, unpacked with their
