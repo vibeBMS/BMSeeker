@@ -11,6 +11,9 @@ const pagesHint = "These links give a page, not a file: open one (a new tab), do
 
 // openPage opens p's link in a tab of its own.
 func (a *app) openPage(p page) {
+	if !a.browsable(p) {
+		return
+	}
 	if err := mygo.Shell.OpenExternal(p.Link); err != nil {
 		a.log = append(a.log, err.Error())
 	}
@@ -38,7 +41,7 @@ func (a *app) importButton(c *ui.Context) {
 		a.update(func() {
 			a.job("Importing", func() error {
 				got := false
-				err := a.cli([]string{"library", "import", "{file}", "-L", lib}, func(r Record) {
+				err := a.cli([]string{"library", "import", "--library=" + lib, "--", "{file}"}, func(r Record) {
 					got = true
 					a.say("%s: %s %s", name.String(), r.S("state"), r.S("path"))
 				})

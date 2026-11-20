@@ -113,6 +113,11 @@ func (a *app) job(name string, f func() error) {
 // cli runs a command, noting what it says in the log. A host that refuses
 // BMSeeker (a `refused` record) is noted and skipped for the rest of the
 // session; its record does not go to onRecord.
+//
+// What a table, a server or a file's name says goes into args only as an
+// option's value attached to it ("--title="+title) or after "--" (links,
+// files): the CLI then reads none of it as an option, whatever it starts
+// with.
 func (a *app) cli(args []string, onRecord func(Record)) error {
 	var pre []string
 	if a.settings.ThirdParty {
@@ -120,7 +125,7 @@ func (a *app) cli(args []string, onRecord func(Record)) error {
 	}
 	a.mu.Lock()
 	for _, h := range a.refused {
-		pre = append(pre, "--skip-host", h)
+		pre = append(pre, "--skip-host="+h)
 	}
 	a.mu.Unlock()
 	args = append(pre, args...)
@@ -252,7 +257,7 @@ func (a *app) loadMissing() {
 	url, lib := a.table, a.settings.Library
 	a.job("Reading the table", func() error {
 		var got []missing
-		err := a.cli([]string{"table", "missing", url, "-L", lib}, func(r Record) {
+		err := a.cli([]string{"table", "missing", "--library=" + lib, "--", url}, func(r Record) {
 			got = append(got, missing{
 				Label: r.S("label"), Level: r.S("level"), Title: r.S("title"), Artist: r.S("artist"),
 				MD5: r.S("md5"), URL: r.S("url"), URLDiff: r.S("url_diff"),
@@ -273,14 +278,13 @@ func (a *app) download(ms []missing) {
 	a.job("Downloading", func() error {
 		for i, m := range ms {
 			a.say("(%d/%d) %s", i+1, len(ms), m.Title)
-			args := []string{"library", "install", "-L", lib, "--title", m.Title, "--artist", m.Artist, "--md5", m.MD5}
+			var own []string
 			if m.URL != "" {
-				args = append(args, m.URL)
+				own = []string{m.URL}
 			}
-			got := a.install(m.Title, args)
+			got := a.install(m.Title, installArgs(lib, m.Title, m.Artist, m.MD5, nil, own...))
 			if m.URLDiff != "" {
-				a.install(m.Title, []string{"library", "install", "-L", lib, "--diff", "--md5", m.MD5,
-					"--title", m.Title, "--artist", m.Artist, m.URLDiff})
+				a.install(m.Title, installArgs(lib, m.Title, m.Artist, m.MD5, []string{"--diff"}, m.URLDiff))
 			}
 			if got {
 				done := m
@@ -289,6 +293,15 @@ func (a *app) download(ms []missing) {
 		}
 		return nil
 	})
+}
+
+// installArgs is a `library install` of a song (its title, artist and
+// chart's MD5) from links, with flags.
+func installArgs(lib, title, artist, md5 string, flags []string, links ...string) []string {
+	args := []string{"library", "install", "--library=" + lib, "--title=" + title, "--artist=" + artist, "--md5=" + md5}
+	args = append(args, flags...)
+	args = append(args, "--")
+	return append(args, links...)
 }
 
 // install runs one `library install`; links that need a browser go to the
@@ -335,7 +348,7 @@ func (a *app) linkView(c *ui.Context) {
 			name = link
 		}
 		a.job("Downloading", func() error {
-			a.install(name, []string{"library", "install", "-L", lib, "--title", title, "--artist", artist, "--own-links", link})
+			a.install(name, installArgs(lib, title, artist, "", []string{"--own-links"}, link))
 			return nil
 		})
 	}
@@ -349,7 +362,7 @@ func (a *app) waitingView(c *ui.Context) {
 			lib := a.settings.Library
 			a.job("Looking at waiting charts", func() error {
 				var got []waiting
-				err := a.cli([]string{"library", "pending", "-L", lib}, func(r Record) {
+				err := a.cli([]string{"library", "pending", "--library=" + lib}, func(r Record) {
 					best := ""
 					if b, ok := r["best"].(map[string]any); ok {
 						best = fmt.Sprintf("%.0f%% %v", toF(b["coverage"])*100, b["label"])

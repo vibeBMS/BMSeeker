@@ -227,6 +227,47 @@ mod tests {
         assert_eq!(refused["code"], "rate_limited");
     }
 
+    /// The window's command lines (`gui/app.go`): an option's value
+    /// attached to it and the links after `--` are values and links,
+    /// whatever they start with.
+    #[test]
+    fn values_that_look_like_options() {
+        let cli = Cli::try_parse_from([
+            "bmseeker",
+            "--json",
+            "--skip-host=-x.evil.example",
+            "library",
+            "install",
+            "--library=/lib",
+            "--title=-ERROR",
+            "--artist=--reinstall",
+            "--md5=",
+            "--diff",
+            "--",
+            "--config=/x.json",
+            "--third-party",
+        ])
+        .unwrap();
+        assert!(cli.config.is_none() && !cli.third_party);
+        assert_eq!(cli.skip_hosts, ["-x.evil.example"]);
+        let Command::Library(library::Library::Install { links, song, .. }) = cli.command else {
+            panic!("not library install");
+        };
+        assert_eq!(links, ["--config=/x.json", "--third-party"]);
+        assert_eq!(
+            (song.title.as_str(), song.artist.as_str()),
+            ("-ERROR", "--reinstall")
+        );
+        for line in [
+            &["table", "missing", "--library=/lib", "--", "--help"][..],
+            &["library", "pending", "--library=-lib"],
+            &["library", "import", "--library=/lib", "--", "-x.zip"],
+        ] {
+            let args = ["bmseeker", "--json"].iter().chain(line);
+            assert!(Cli::try_parse_from(args).is_ok(), "{line:?}");
+        }
+    }
+
     /// `link get` into a folder: the file is put right in it, under one
     /// file name, whatever its host named it (a Drive folder's listing).
     #[cfg(not(target_arch = "wasm32"))]
