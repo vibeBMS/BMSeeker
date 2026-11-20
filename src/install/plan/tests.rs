@@ -348,15 +348,15 @@ fn votes() {
         tally(vec![set(&["b", "a"])]),
         Vote::Tie(vec!["a".into(), "b".into()])
     );
-    assert_eq!(
-        up(Path::new("bms/Song/Sub"), Path::new("sub")),
-        Some("bms/Song".into())
-    );
-    assert_eq!(up(Path::new("bms/Song/x"), Path::new("sub")), None);
-    assert_eq!(
-        up(Path::new("bms/Song"), Path::new("")),
-        Some("bms/Song".into())
-    );
+    let m = store(&[("bms/Song/Sub/a.bms", SONG)]);
+    let l = lib(&m);
+    let up = |folder: &str, sub: &str| up(&m, &l, Path::new(folder), Path::new(sub));
+    assert_eq!(up("bms/Song/Sub", "sub"), Some("bms/Song".into()));
+    assert_eq!(up("bms/Song/x", "sub"), None);
+    assert_eq!(up("bms/Song", ""), Some("bms/Song".into()));
+    // not the library's own folder (no song's folder), nor above it
+    assert_eq!(up("bms/Song", "song"), None);
+    assert_eq!(up("bms/Song", "bms/song"), None);
 }
 
 /// Folders named after their charts (opt-in): `[artist] title`, the folder
@@ -659,4 +659,166 @@ fn a_long_name_moves_in() {
         assert_eq!(std::fs::read(song.join(&name)).unwrap(), body.as_bytes());
         assert_eq!(std::fs::read_dir(&song).unwrap().count(), 1);
     }
+}
+
+/// An archive whose chart's path ends like the path of the library folder
+/// that holds the chart (a song's link, a file brought by hand): its other
+/// files do not go above the library.
+#[test]
+fn nothing_lands_above_the_library() {
+    let m = store(&[
+        ("root/bms/Some Song/known.bms", SONG),
+        ("root/bms/Some Song/sound/01.ogg", "x"),
+    ]);
+    let mut l = Library::scan(&m, Path::new("root/bms"));
+    let files = [
+        ("bms/Some Song/known.bms", SONG),
+        ("x.png", "img"),
+        ("evil.dll", "payload"),
+        ("config/config.toml", "hostile"),
+    ];
+    for role in [Role::Song, Role::Any] {
+        let _ = take(
+            &m,
+            Blob::Bytes(zip(&files, 2019)),
+            &req(role),
+            Path::new("root/bms/dl"),
+            &mut l,
+        );
+    }
+    let keys: Vec<PathBuf> = m.0.lock().unwrap().keys().cloned().collect();
+    let outside: Vec<&PathBuf> = keys.iter().filter(|p| !p.starts_with("root/bms")).collect();
+    assert!(
+        outside.is_empty(),
+        "written outside the library: {outside:?}"
+    );
+}
+
+/// The same through a table: its `org_md5` names a chart the library has,
+/// its `url_diff` an archive whose new chart's path ends like that chart's
+/// folder. What it brings stays in the song's folder: nothing above the
+/// library, nothing in the library's own folder, no file elsewhere
+/// replaced.
+#[test]
+fn a_tables_hint_keeps_to_the_songs_folder() {
+    let m = store(&[
+        ("root/bms/Some Song/known.bms", SONG),
+        ("root/bms/Some Song/sound/01.ogg", "x"),
+        ("root/config/config.toml", "mine"),
+        ("root/bms/config/config.toml", "mine"),
+    ]);
+    let mut l = Library::scan(&m, Path::new("root/bms"));
+    let r = Request {
+        org_md5: vec![md5_hex(SONG.as_bytes())],
+        ..req(Role::Diff)
+    };
+    for at in ["bms/Some Song", "Some Song"] {
+        let (chart, body) = (format!("{at}/new.bms"), format!("#TITLE New {at}\n"));
+        let files = [
+            (chart.as_str(), body.as_str()),
+            ("x.png", "img"),
+            ("evil.dll", "payload"),
+            ("config/config.toml", "hostile"),
+        ];
+        let blob = Blob::Bytes(zip(&files, 2019));
+        let done = take(&m, blob, &r, Path::new("root/dl"), &mut l);
+        assert!(
+            matches!(&done[..], [Done::Placed(p)] if p.starts_with("root/bms/Some Song")),
+            "{at}: {done:?}"
+        );
+    }
+    for p in ["root/config/config.toml", "root/bms/config/config.toml"] {
+        assert_eq!(text(&m, p).as_deref(), Some("mine"), "{p}");
+    }
+    let keys: Vec<PathBuf> = m.0.lock().unwrap().keys().cloned().collect();
+    let outside: Vec<&PathBuf> = keys
+        .iter()
+        .filter(|p| !p.starts_with("root/bms/Some Song") && !p.ends_with("config/config.toml"))
+        .collect();
+    assert!(outside.is_empty(), "outside the song's folder: {outside:?}");
+}
+
+/// A player's library may hold a song outside the folder downloads go to
+/// (its records name its charts): what is for that song goes into its
+/// folder there, and nothing above it.
+#[test]
+fn a_song_kept_elsewhere() {
+    let m = store(&[
+        ("music/Song/song.bms", SONG),
+        ("music/Song/sound/01.ogg", "x"),
+    ]);
+    let md5 = md5_hex(SONG.as_bytes());
+    let owned = crate::library::Owned {
+        path: "music/Song/song.bms".into(),
+        md5: md5.clone(),
+        ..Default::default()
+    };
+    let mut l = Library::from_catalog(Path::new("bms"), [owned]);
+    // the song again: the file its folder lacks
+    let files = [("Song/song.bms", SONG), ("Song/bg.png", "img")];
+    let done = take_zip(&m, &files, &req(Role::Song), &mut l);
+    assert!(
+        matches!(&done[..], [Done::Owned(d)] if d == Path::new("music/Song")),
+        "{done:?}"
+    );
+    assert_eq!(text(&m, "music/Song/bg.png").as_deref(), Some("img"));
+    // a chart a table says is that song's
+    let r = Request {
+        org_md5: vec![md5],
+        ..req(Role::Diff)
+    };
+    let done = take_zip(&m, &[("r.bms", "#TITLE Remix [X]\n")], &r, &mut l);
+    assert!(
+        matches!(&done[..], [Done::Placed(p)] if p == Path::new("music/Song/r.bms")),
+        "{done:?}"
+    );
+    // paths ending like the folder's: nothing above it
+    let known = [
+        ("music/Song/song.bms", SONG),
+        ("x.png", "img"),
+        ("evil.dll", "payload"),
+    ];
+    take_zip(&m, &known, &req(Role::Song), &mut l);
+    let new = [
+        ("music/Song/new.bms", "#TITLE New\n"),
+        ("x.png", "img"),
+        ("evil.dll", "payload"),
+    ];
+    take_zip(&m, &new, &r, &mut l);
+    let keys: Vec<PathBuf> = m.0.lock().unwrap().keys().cloned().collect();
+    let outside: Vec<&PathBuf> = keys
+        .iter()
+        .filter(|p| !p.starts_with("music/Song"))
+        .collect();
+    assert!(outside.is_empty(), "outside the song's folder: {outside:?}");
+}
+
+/// A plan whose files would go outside the library (a chart that waits:
+/// outside the downloads) is not carried out.
+#[test]
+fn moves_keep_to_the_library() {
+    let m = store(&[("dl/s/a.ogg", "new")]);
+    let mut l = lib(&m);
+    let into = || Outcome::Into("bms/Song".into());
+    let plans = [
+        (into(), "bms/Song/../../a.ogg"),
+        (into(), "elsewhere/a.ogg"),
+        (into(), "/bms/Song/a.ogg"),
+        (Outcome::Into("elsewhere".into()), "elsewhere/a.ogg"),
+        (Outcome::Into("bms".into()), "bms/a.ogg"),
+        (Outcome::Owned("bms/Song".into()), "bms"),
+        (Outcome::New("other".into()), "other/a.ogg"),
+        (Outcome::Waiting, "../a.ogg"),
+        (Outcome::Waiting, "/tmp/a.ogg"),
+    ];
+    for (outcome, to) in plans {
+        let item = Item {
+            outcome,
+            moves: vec![("dl/s/a.ogg".into(), to.into())],
+        };
+        let done = apply(&m, vec![item], Path::new(DL), &mut l);
+        assert!(matches!(&done[..], [Done::Failed(_)]), "{to}: {done:?}");
+    }
+    let left: Vec<PathBuf> = m.0.lock().unwrap().keys().cloned().collect();
+    assert_eq!(left, [Path::new("dl/s/a.ogg")]);
 }
