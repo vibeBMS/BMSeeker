@@ -17,6 +17,11 @@ pub(super) enum Library {
         file: PathBuf,
         #[arg(short = 'L', long)]
         library: PathBuf,
+        /// The name it was published under, when the file's own is not it
+        /// (a browser's download kept under another): what it is (an
+        /// archive, a chart) and what a song's folder is named after.
+        #[arg(long)]
+        name: Option<String>,
         #[command(flatten)]
         again: Reinstall,
     },
@@ -85,11 +90,13 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
         Library::Import {
             file,
             library,
+            name,
             again,
         } => {
             let req = crate::install::Request {
                 reinstall: again.reinstall || r.config().reinstall,
                 naming: install::Naming::of(r.config(), Default::default()),
+                file: name,
                 ..Default::default()
             };
             let lib = &mut scan(r, &library);

@@ -132,13 +132,19 @@ fn check(
         _ => Vec::new(),
     };
     let sources = crate::sources::Sources::from_config(r.config(), Vec::new());
+    // files pass through a folder of this run's own: the temp folder is
+    // everyone's, and one made ready under a name known beforehand would
+    // be where they are written
+    let tmp = std::env::temp_dir().join(format!("bmseeker-check-{}", crate::install::unique()));
+    crate::fs::Store::create_new_dir(&crate::fs::Disk, &tmp)
+        .map_err(|e| format!("{}: {e}", tmp.display()))?;
     let mut c = Checks {
         r,
         known: &known,
         days,
         minutes,
         start: now(),
-        tmp: std::env::temp_dir().join(format!("bmseeker-check-{}", std::process::id())),
+        tmp: tmp.join("link"),
         seen: Vec::new(),
         checked: 0,
         kept: 0,
@@ -196,7 +202,7 @@ fn check(
             r.out.json(&Value::Object(k.clone()));
         }
     }
-    let _ = std::fs::remove_dir_all(&c.tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
     r.out.note(format!(
         "{} checked, {} kept{}",
         c.checked,

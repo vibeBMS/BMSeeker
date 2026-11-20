@@ -262,10 +262,48 @@ mod tests {
             &["table", "missing", "--library=/lib", "--", "--help"][..],
             &["library", "pending", "--library=-lib"],
             &["library", "import", "--library=/lib", "--", "-x.zip"],
+            &[
+                "library",
+                "import",
+                "--library=/lib",
+                "--name=--reinstall",
+                "--",
+                "x",
+            ],
         ] {
             let args = ["bmseeker", "--json"].iter().chain(line);
             assert!(Cli::try_parse_from(args).is_ok(), "{line:?}");
         }
+    }
+
+    /// `link page-script`: the script a window showing a link's page
+    /// runs is the library's (the window has none of its own).
+    #[test]
+    fn the_page_script_is_the_librarys() {
+        struct Offline;
+        impl Driver for Offline {
+            fn perform(&self, effect: Effect) -> Fed {
+                panic!("{effect:?}: nothing is asked for");
+            }
+        }
+        let lines: Rc<RefCell<Vec<serde_json::Value>>> = Rc::default();
+        let sink = lines.clone();
+        let run = Run {
+            out: Out::new(true, move |l| {
+                if let Line::Record(r) = l {
+                    sink.borrow_mut().push(serde_json::from_str(r).unwrap());
+                }
+            }),
+            cx: Context::default(),
+            fs: Arc::new(crate::fs::Mem::default()),
+            net: &Offline,
+        };
+        let cli = Cli::try_parse_from(["bmseeker", "--json", "link", "page-script"]).unwrap();
+        cli.run(&run).unwrap();
+        let lines = lines.borrow();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["script"], crate::hosts::PRESS_DOWNLOAD_JS);
+        assert!(crate::hosts::PRESS_DOWNLOAD_JS.contains("location.hostname"));
     }
 
     /// `link get` into a folder: the file is put right in it, under one
