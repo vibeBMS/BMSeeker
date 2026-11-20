@@ -6,7 +6,7 @@
 
 use super::{get_then, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, Next, Request, Task};
+use crate::net::{Answer, BoxTask, Kind, Next, Request, Task};
 
 /// A work on manbow (`event.cgi?action=More_def&num=N&event=E`).
 pub(crate) struct Manbow;
@@ -17,7 +17,12 @@ impl Host for Manbow {
     }
 
     fn accepts(&self, link: &Link) -> bool {
-        link.host == "manbow.nothing.sh" && link.lower.contains("action=more_def") && link.hops < 2
+        // (its works' own page: no other address of the venue is asked
+        // as one, whatever a link's query says)
+        link.host == "manbow.nothing.sh"
+            && link.lower.contains("manbow.nothing.sh/event/event.cgi?")
+            && link.lower.contains("action=more_def")
+            && link.hops < 2
     }
 
     fn open(&self, link: &Link, _: Option<&Want>, config: &Config) -> BoxTask<Resolved> {
@@ -62,7 +67,7 @@ impl ManbowWork {
     /// The work's page: its own links.
     fn venue(&mut self) -> Next<Resolved> {
         self.state = State::Venue;
-        Next::Ask(Request::Get(self.link.clone()))
+        Next::Ask(Request::Get(self.link.clone(), Kind::Page))
     }
 }
 
@@ -71,66 +76,44 @@ impl Task for ManbowWork {
 
     fn start(&mut self) -> Next<Resolved> {
         match self.state {
-            State::Catalog { .. } => Next::Ask(Request::Get(self.catalog.clone())),
+            State::Catalog { .. } => Next::Ask(Request::Get(self.catalog.clone(), Kind::Api)),
             _ => self.venue(),
         }
     }
 
     fn feed(&mut self, answer: Answer) -> Next<Resolved> {
-        let json = |a: &Answer| -> Option<serde_json::Value> {
-            serde_json::from_slice(a.as_ref().ok()?).ok()
-        };
+        let body = answer.as_deref().unwrap_or_default();
         match std::mem::replace(&mut self.state, State::Done) {
             State::Catalog { event, num } => {
-                let v = json(&answer);
-                let index = v
-                    .as_ref()
-                    .and_then(|v| v.as_array())
+                let events: Vec<Event> = crate::json::objects_of(body);
+                let index = events
                     .into_iter()
-                    .flatten()
-                    .find_map(|e| {
-                        (e.get("venue").and_then(|n| n.as_u64()) == Some(event))
-                            .then(|| e.get("index")?.as_str())
-                            .flatten()
-                            .map(str::to_string)
-                    });
+                    .find(|e| e.venue == Some(event) && !e.index.is_empty());
                 match index {
-                    Some(index) => {
+                    Some(e) => {
                         self.state = State::Index { num };
-                        Next::Ask(Request::Get(index))
+                        Next::Ask(Request::Get(e.index, Kind::Api))
                     }
                     None => self.venue(),
                 }
             }
             State::Index { num } => {
-                let v = json(&answer);
-                let work = v
-                    .as_ref()
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flatten()
-                    .find(|w| w.get("num").and_then(|n| n.as_u64()) == Some(num));
+                let works: Vec<Work> = crate::json::objects_of(body);
+                let work = works.into_iter().find(|w| w.num == Some(num));
+                let Some(work) = work else {
+                    return self.venue();
+                };
                 // the main archive: "042.zip" (an add-on is "042+1.rar")
                 let main = work
-                    .and_then(|w| w.get("files")?.as_array())
+                    .files
                     .into_iter()
-                    .flatten()
-                    .find(|f| {
-                        f.get("name")
-                            .and_then(|n| n.as_str())
-                            .is_some_and(|n| !n.contains('+'))
-                    });
-                let s = |k: &str| main.and_then(|f| f.get(k)?.as_str()).map(str::to_string);
-                if let Some(url) = s("url") {
-                    return Next::Done(Resolved::File(Target::named(url, s("original"))));
+                    .find(|f| !f.name.is_empty() && !f.name.contains('+'));
+                if let Some(f) = main.filter(|f| !f.url.is_empty()) {
+                    let original = Some(f.original).filter(|o| !o.is_empty());
+                    return Next::Done(Resolved::File(Target::named(f.url, original)));
                 }
                 // not mirrored: its links as checked, the work's page last
-                let mut links: Vec<String> = work
-                    .and_then(|w| w.get("links")?.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|l| l.as_str().map(str::to_string))
-                    .collect();
+                let mut links = work.links;
                 if links.is_empty() {
                     return self.venue();
                 }
@@ -152,6 +135,58 @@ impl Task for ManbowWork {
     }
 }
 
+/// An event of the mirror's list.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Event {
+    #[serde(deserialize_with = "crate::json::number")]
+    venue: Option<u64>,
+    #[serde(deserialize_with = "crate::json::text")]
+    index: String,
+}
+
+/// A work of an event's index: its mirrored files, its links as checked.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Work {
+    #[serde(deserialize_with = "crate::json::number")]
+    num: Option<u64>,
+    #[serde(deserialize_with = "crate::json::objects")]
+    files: Vec<File>,
+    #[serde(deserialize_with = "crate::json::texts")]
+    links: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct File {
+    #[serde(deserialize_with = "crate::json::text")]
+    name: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    url: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    original: String,
+}
+
+/// A venue work's manifest: its resources (links).
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Manifest {
+    #[serde(deserialize_with = "crate::json::objects")]
+    resources: Vec<Resource>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Resource {
+    #[serde(rename = "type", deserialize_with = "crate::json::text")]
+    kind: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    name: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    url: String,
+}
+
 /// A work on a BMS SEARCH event venue (`venue.bmssearch.net/<event>/<work>`):
 /// its manifest lists the links.
 pub(crate) struct BmsSearchVenue;
@@ -167,19 +202,13 @@ impl Host for BmsSearchVenue {
 
     fn open(&self, link: &Link, _: Option<&Want>, _: &Config) -> BoxTask<Resolved> {
         let path = work_path(&link.url).unwrap_or_default();
-        get_then(format!("{path}/manifest"), |body| {
-            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-            let s = |r: &serde_json::Value, k: &str| {
-                r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-            };
-            let links: Vec<(String, String)> = v
-                .get("resources")
-                .and_then(|r| r.as_array())
+        get_then(format!("{path}/manifest"), Kind::Api, |body| {
+            let manifest: Manifest = crate::json::object_of(&body);
+            let links: Vec<(String, String)> = manifest
+                .resources
                 .into_iter()
-                .flatten()
-                .filter(|r| s(r, "type") != "additional")
-                .map(|r| (s(r, "name"), s(r, "url")))
-                .filter(|(_, u)| u.starts_with("http"))
+                .filter(|r| r.kind != "additional" && r.url.starts_with("http"))
+                .map(|r| (r.name, r.url))
                 .collect();
             match pick(&links) {
                 links if links.is_empty() => Resolved::Page,
@@ -205,13 +234,14 @@ impl Host for BmsSearchPage {
     fn open(&self, link: &Link, _: Option<&Want>, config: &Config) -> BoxTask<Resolved> {
         let id = bms_id(link).unwrap_or_default();
         let api = config.bmssearch_api.trim_end_matches('/');
-        get_then(format!("{api}/bmses/{id}"), |body| {
-            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-            match crate::bmssearch::work_links(&v) {
+        get_then(
+            format!("{api}/bmses/{id}"),
+            Kind::Api,
+            |body| match crate::json::object_of::<crate::bmssearch::Work>(&body).links() {
                 links if links.is_empty() => Resolved::Page,
                 links => Resolved::Follow(links),
-            }
-        })
+            },
+        )
     }
 }
 

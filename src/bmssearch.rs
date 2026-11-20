@@ -8,13 +8,13 @@
 //! web page asks it itself) that ends with the links.
 
 use crate::hosts::Want;
-use crate::net::{Answer, Next, Request, Task};
-use serde_json::Value;
+use crate::net::{Answer, Kind, Next, Request, Task};
+use serde::Deserialize;
 
 type Step = Next<Vec<String>>;
 
 fn get(url: String) -> Step {
-    Next::Ask(Request::Get(url))
+    Next::Ask(Request::Get(url, Kind::Api))
 }
 
 pub(crate) struct Lookup {
@@ -35,26 +35,79 @@ enum Wait {
 /// them); other related links (a video, an author's profile) are left out.
 const VENUES: &[&str] = &["manbow.nothing.sh", "venue.bmssearch.net"];
 
-/// A work's links: its downloads, then its venue pages.
-pub(crate) fn work_links(bms: &Value) -> Vec<String> {
-    let urls = |k: &str| -> Vec<String> {
-        bms.get(k)
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|d| d.get("url").and_then(|u| u.as_str()))
-            .map(|u| u.trim().to_string())
-            .filter(|u| u.starts_with("http"))
-            .collect()
-    };
-    let mut out = urls("downloads");
-    for u in urls("relatedLinks") {
-        let host = u.split('/').nth(2).unwrap_or("").to_ascii_lowercase();
-        if VENUES.contains(&host.as_str()) && !out.contains(&u) {
-            out.push(u);
+/// A BMS work as the API gives it: what is looked at.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct Work {
+    #[serde(deserialize_with = "crate::json::text")]
+    title: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    artist: String,
+    #[serde(deserialize_with = "crate::json::objects")]
+    downloads: Vec<Link>,
+    #[serde(rename = "relatedLinks", deserialize_with = "crate::json::objects")]
+    related_links: Vec<Link>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Link {
+    #[serde(deserialize_with = "crate::json::text")]
+    url: String,
+}
+
+/// A chart (`/patterns/<md5>`) as the API gives it: the work it belongs
+/// to, its own title and artist.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct Pattern {
+    #[serde(deserialize_with = "crate::json::object")]
+    pub(crate) bms: Bms,
+    #[serde(deserialize_with = "crate::json::text")]
+    pub(crate) title: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    pub(crate) artist: String,
+    #[serde(deserialize_with = "crate::json::object")]
+    pub(crate) file: File,
+}
+
+/// A chart's work.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct Bms {
+    #[serde(deserialize_with = "crate::json::text")]
+    pub(crate) id: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    pub(crate) title: String,
+}
+
+/// A chart's file.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct File {
+    #[serde(deserialize_with = "crate::json::text")]
+    pub(crate) name: String,
+}
+
+impl Work {
+    /// Its links: its downloads, then its venue pages.
+    pub(crate) fn links(&self) -> Vec<String> {
+        let urls = |links: &[Link]| -> Vec<String> {
+            links
+                .iter()
+                .map(|d| d.url.trim().to_string())
+                .filter(|u| u.starts_with("http"))
+                .collect()
+        };
+        let mut out = urls(&self.downloads);
+        for u in urls(&self.related_links) {
+            let host = u.split('/').nth(2).unwrap_or("").to_ascii_lowercase();
+            if VENUES.contains(&host.as_str()) && !out.contains(&u) {
+                out.push(u);
+            }
         }
+        out
     }
-    out
 }
 
 /// The title to search for: the table's without its chart's name
@@ -116,51 +169,38 @@ impl Task for Lookup {
     }
 
     fn feed(&mut self, answer: Answer) -> Step {
-        let v: Option<Value> = answer.ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let body = answer.unwrap_or_default();
         match std::mem::replace(&mut self.wait, Wait::Bms) {
             Wait::Pattern => {
-                let id = v
-                    .as_ref()
-                    .and_then(|p| p.get("bms"))
-                    .and_then(|b| b.get("id"))
-                    .and_then(|i| i.as_str());
-                if let Some(id) = id {
+                let p: Pattern = crate::json::object_of(&body);
+                if !p.bms.id.is_empty() {
                     self.wait = Wait::Bms;
-                    return get(format!("{}/bmses/{}", self.api, url_encode(id)));
+                    return get(format!("{}/bmses/{}", self.api, url_encode(&p.bms.id)));
                 }
                 // not tied to a work: search by its title (BMS SEARCH's, as
                 // the chart has it, else the table's)
-                let s = |k: &str| {
-                    v.as_ref()
-                        .and_then(|p| p.get(k))
-                        .and_then(|x| x.as_str())
-                        .filter(|x| !x.is_empty())
-                        .map(str::to_string)
+                let or = |own: String, wanted: &str| match own.is_empty() {
+                    true => wanted.to_string(),
+                    false => own,
                 };
-                let title = s("title").unwrap_or_else(|| self.want.title.clone());
-                let artist = s("artist").unwrap_or_else(|| self.want.artist.clone());
+                let title = or(p.title, &self.want.title);
+                let artist = or(p.artist, &self.want.artist);
                 self.search(&title, &artist)
             }
-            Wait::Bms => Next::Done(v.as_ref().map(work_links).unwrap_or_default()),
+            Wait::Bms => Next::Done(crate::json::object_of::<Work>(&body).links()),
             Wait::Search(title, artist) => {
-                let works: Vec<Value> = match v {
-                    Some(Value::Array(a)) => a,
-                    _ => Vec::new(),
-                };
-                let s = |w: &Value, k: &str| {
-                    w.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-                };
-                let same: Vec<&Value> = works
+                let works: Vec<Work> = crate::json::objects_of(&body);
+                let same: Vec<&Work> = works
                     .iter()
-                    .filter(|w| crate::titles::same_title(&s(w, "title"), &title))
+                    .filter(|w| crate::titles::same_title(&w.title, &title))
                     .collect();
-                let by: Vec<&Value> = same
+                let by: Vec<&Work> = same
                     .iter()
                     .copied()
-                    .filter(|w| crate::hosts::pack_artist(&s(w, "artist"), &artist))
+                    .filter(|w| crate::hosts::pack_artist(&w.artist, &artist))
                     .collect();
                 // by its artist; else the one work of that title
-                let pick: Vec<&Value> = if !by.is_empty() {
+                let pick: Vec<&Work> = if !by.is_empty() {
                     by
                 } else if same.len() == 1 && title.chars().count() >= 6 {
                     same
@@ -169,7 +209,7 @@ impl Task for Lookup {
                 };
                 let mut out: Vec<String> = Vec::new();
                 for w in pick {
-                    for u in work_links(w) {
+                    for u in w.links() {
                         if !out.contains(&u) {
                             out.push(u);
                         }

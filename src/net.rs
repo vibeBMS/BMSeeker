@@ -4,14 +4,48 @@
 //! (`native::Native`), in a web page (through a CORS proxy,
 //! asynchronously) and in tests (canned answers).
 
+/// What a request fetches: how large its answer may be ([`Kind::limit`]).
+/// The limits are some ten times the largest of each kind measured (a
+/// table's page 5 KB, its header 13 KB, its data 3.4 MB; a venue's work
+/// list 1.7 MB; an event's index 0.2 MB; the Stella list 2.5 MB), so a
+/// small answer that decodes to a huge one is cut off where it is read,
+/// not after it was parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// An HTML page: a table's, a venue's, a host's.
+    Page,
+    /// A difficulty table's header.
+    Header,
+    /// A difficulty table's data.
+    TableData,
+    /// An API's answer, or a JSON file of its size (an event's index).
+    Api,
+    /// A folder's listing (Google Drive's, MEGA's) or a list of links.
+    Listing,
+}
+
+impl Kind {
+    /// The bytes its answer may have, decoded.
+    pub const fn limit(self) -> usize {
+        match self {
+            Kind::Header => 1 << 20,
+            Kind::Api => 2 << 20,
+            Kind::Page => 8 << 20,
+            Kind::Listing => 16 << 20,
+            Kind::TableData => 32 << 20,
+        }
+    }
+}
+
 /// A request a task needs answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    Get(String),
+    Get(String, Kind),
     /// A POST of a JSON body (the MEGA API).
     Post {
         url: String,
         body: Vec<u8>,
+        kind: Kind,
     },
 }
 
@@ -19,9 +53,30 @@ impl Request {
     /// Where it goes.
     pub fn url(&self) -> &str {
         match self {
-            Request::Get(u) | Request::Post { url: u, .. } => u,
+            Request::Get(u, _) | Request::Post { url: u, .. } => u,
         }
     }
+
+    /// What it fetches.
+    pub fn kind(&self) -> Kind {
+        match self {
+            Request::Get(_, k) | Request::Post { kind: k, .. } => *k,
+        }
+    }
+
+    /// The bytes its answer may have: a driver reads no more, and a larger
+    /// answer is [`too_large`].
+    pub fn limit(&self) -> usize {
+        self.kind().limit()
+    }
+}
+
+/// The failure of an answer larger than its request's `limit`.
+pub fn too_large(limit: usize) -> NetError {
+    NetError::Other(format!(
+        "the answer is larger than {} MiB: not read",
+        limit >> 20
+    ))
 }
 
 /// The body of a successful answer, or why there is none.
@@ -166,20 +221,31 @@ impl<T: Send> Task for Ready<T> {
     }
 }
 
-/// One GET, then what `then` makes of its answer.
+/// One GET of an API's answer ([`Kind::Api`]), then what `then` makes of
+/// it.
 pub(crate) fn get_then<T, F>(url: String, then: F) -> BoxTask<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Answer) -> T + Send + 'static,
+{
+    get_as(url, Kind::Api, then)
+}
+
+/// One GET of `kind`, then what `then` makes of its answer.
+pub(crate) fn get_as<T, F>(url: String, kind: Kind, then: F) -> BoxTask<T>
 where
     T: Send + 'static,
     F: FnOnce(Answer) -> T + Send + 'static,
 {
     struct Then<F> {
         url: String,
+        kind: Kind,
         then: Option<F>,
     }
     impl<T, F: FnOnce(Answer) -> T + Send> Task for Then<F> {
         type Output = T;
         fn start(&mut self) -> Next<T> {
-            Next::Ask(Request::Get(self.url.clone()))
+            Next::Ask(Request::Get(self.url.clone(), self.kind))
         }
         fn feed(&mut self, answer: Answer) -> Next<T> {
             match self.then.take() {
@@ -191,6 +257,7 @@ where
     }
     Box::new(Then {
         url,
+        kind,
         then: Some(then),
     })
 }
@@ -247,7 +314,7 @@ struct Memoed<T> {
 impl<T: Task> Memoed<T> {
     /// `next`, the GETs the memo has answered.
     fn answered(&mut self, mut next: Next<T::Output>) -> Next<T::Output> {
-        while let Next::Ask(Request::Get(url)) = &next {
+        while let Next::Ask(Request::Get(url, _)) = &next {
             match self.memo.get(url) {
                 Some(a) => next = self.task.feed(a),
                 None => {
@@ -342,6 +409,68 @@ pub(crate) fn host(url: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
+/// Whether `url` is written as every URL parser reads it: no backslash
+/// (a browser's parser takes one for `/`, so what is before it is the
+/// host there and a user's name here), no control character (dropped by a
+/// browser's), no user name or password before the host. A link is
+/// checked before any rule looks at its host ([`host`]), so the host the
+/// rules see is the one the request goes to.
+pub(crate) fn plainly_written(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !url.contains(|c: char| c == '\\' || c.is_control()) && !authority.contains('@')
+}
+
+/// Whether the host name `host` (an IPv6 address with or without its
+/// brackets) is this machine or one of a network of its own: the name
+/// `localhost` (and those under it), an address that is unspecified,
+/// loopback, private, link-local, shared (100.64/10) or unique-local, or
+/// a number that is no plain IPv4 address (`2130706433`, `0x7f.1`, which
+/// a resolver reads as one); no name at all too.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn local_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    if let Ok(ip) = bare.unwrap_or(&host).parse() {
+        return local_address(ip);
+    }
+    // (a name's last label has a letter; a number's is an address)
+    let last = host.rsplit('.').next().unwrap_or("");
+    let hex = last.strip_prefix("0x");
+    last.is_empty()
+        || last.bytes().all(|b| b.is_ascii_digit())
+        || hex.is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Whether `ip` is this machine's or a network of its own's
+/// ([`local_host`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn local_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => {
+            let [x, y, ..] = a.octets();
+            x == 0
+                || a.is_loopback()
+                || a.is_private()
+                || a.is_link_local()
+                || a.is_broadcast()
+                || (x == 100 && y & 0xc0 == 64)
+        }
+        std::net::IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(v4) => local_address(std::net::IpAddr::V4(v4)),
+            None => {
+                a.is_unspecified()
+                    || a.is_loopback()
+                    || a.segments()[0] & 0xfe00 == 0xfc00
+                    || a.segments()[0] & 0xffc0 == 0xfe80
+            }
+        },
+    }
+}
+
 /// Whether `host` is `domain` or a name under it, in any case.
 pub(crate) fn under(host: &str, domain: &str) -> bool {
     let (h, d) = (host.as_bytes(), domain.as_bytes());
@@ -427,14 +556,16 @@ mod tests {
                 "https://a.test/gone",
                 "https://a.test/busy",
             ] {
-                let got = run(&mut memo.wrap(get_then(u.to_string(), |a| a)), &http);
-                assert_eq!(got, http.0.send(&Request::Get(u.into())));
+                let asked = get_then(u.to_string(), |a| a);
+                let got = run(&mut memo.wrap(asked), &http);
+                assert_eq!(got, http.0.send(&Request::Get(u.into(), Kind::Api)));
             }
         }
         assert_eq!(http.times("https://a.test/ok"), 1);
         assert_eq!(http.times("https://a.test/gone"), 1);
         assert_eq!(http.times("https://a.test/busy"), 2);
-        let _ = run(&mut get_then("https://a.test/ok".into(), |a| a), &http);
+        let again = get_then("https://a.test/ok".into(), |a| a);
+        let _ = run(&mut { again }, &http);
         assert_eq!(http.times("https://a.test/ok"), 2);
     }
 
@@ -462,12 +593,12 @@ mod tests {
     impl Task for Two {
         type Output = Vec<usize>;
         fn start(&mut self) -> Next<Vec<usize>> {
-            Next::Ask(Request::Get("a".into()))
+            Next::Ask(Request::Get("a".into(), Kind::Page))
         }
         fn feed(&mut self, a: Answer) -> Next<Vec<usize>> {
             self.0.push(a.map_or(0, |b| b.len()));
             if self.0.len() == 1 {
-                Next::Ask(Request::Get("b".into()))
+                Next::Ask(Request::Get("b".into(), Kind::Page))
             } else {
                 Next::Done(std::mem::take(&mut self.0))
             }
@@ -493,6 +624,109 @@ mod tests {
         assert!(under("dl.Dropbox.com", "dropbox.com") && under("dropbox.com", "dropbox.com"));
         assert!(!under("notdropbox.com", "dropbox.com") && !under("com", "dropbox.com"));
         assert_eq!(percent_decode("%E6%9B%B2%2"), "曲%2");
+    }
+
+    /// A link is taken as written only where every parser reads its host
+    /// alike.
+    #[test]
+    fn links_plainly_written() {
+        for u in [
+            "https://www.dropbox.com/s/a/b.zip?dl=0",
+            "http://example.com:8080/a b/@c\u{66f2}.zip#x@y",
+            "https://[2001:db8::1]/a",
+        ] {
+            assert!(plainly_written(u), "{u}");
+        }
+        for u in [
+            // (a browser's host: evil.tld; here: www.dropbox.com)
+            "https://evil.tld\\@www.dropbox.com/x",
+            "https://evil.tld/\\..\\x",
+            "https://user@example.com/a",
+            "https://user:pw@example.com/a",
+            "https://exa\tmple.com/a",
+            "https://example.com/a\nb",
+            "https://example.com/\u{7f}",
+        ] {
+            assert!(!plainly_written(u), "{u:?}");
+        }
+    }
+
+    /// The hosts that are this machine or a network of its own, by name
+    /// and by address, however the address is written.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn local_hosts() {
+        for h in [
+            "localhost",
+            "LocalHost.",
+            "a.localhost",
+            "127.0.0.1",
+            "127.8.9.1",
+            "0.0.0.0",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "100.127.255.255",
+            "255.255.255.255",
+            "[::1]",
+            "::1",
+            "[::]",
+            "[fe80::1]",
+            "[fd00::1]",
+            "[fc00::1]",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:192.168.0.1]",
+            // what a resolver reads as an address
+            "2130706433",
+            "0x7f000001",
+            "127.1",
+            "0x7f.0.0.1",
+            "",
+        ] {
+            assert!(local_host(h), "{h}");
+        }
+        for h in [
+            "example.com",
+            "localhost.example.com",
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.128.0.1",
+            "192.169.1.1",
+            "[2001:db8::1]",
+            "[::ffff:8.8.8.8]",
+            "1drv.ms",
+            "a.0x.dev",
+        ] {
+            assert!(!local_host(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn limits() {
+        // the kinds in the order of their sizes: a header, an API's answer,
+        // a page, a listing, a table's data
+        let kinds = [
+            Kind::Header,
+            Kind::Api,
+            Kind::Page,
+            Kind::Listing,
+            Kind::TableData,
+        ];
+        assert!(kinds.windows(2).all(|k| k[0].limit() < k[1].limit()));
+        let post = Request::Post {
+            url: "https://a.test/".into(),
+            body: Vec::new(),
+            kind: Kind::Listing,
+        };
+        assert_eq!(post.limit(), 16 << 20);
+        assert_eq!(Request::Get("u".into(), Kind::Header).limit(), 1 << 20);
+        assert_eq!(
+            too_large(2 << 20).to_string(),
+            "the answer is larger than 2 MiB: not read"
+        );
     }
 
     #[test]

@@ -60,7 +60,7 @@ The modules in more detail:
 | `config` | every place read from, and the user agent (Config, below) |
 | `progress` | how far a song's download has got, shared with whoever shows it |
 | `fs` | file access (`Disk`, or wherever a player keeps its library): `Fs` reads and moves, a `Store` also writes |
-| `native` | the network natively: `Native` drives the jobs (one HTTP agent for every request, so a host's connection is kept; a download streamed to disk on the calling thread, ended by a cancel or a minute without data; a MEGA file decrypted as it comes); `fetch`, `fetch_files` |
+| `native` | the network natively: `Native` drives the jobs (one HTTP agent for every request, so a host's connection is kept; a download streamed to disk on the calling thread, ended by a cancel, a minute without data or coming too slowly; a MEGA file decrypted as it comes and checked when whole; redirects followed one at a time, each kept to the rules below); `fetch`, `fetch_files` |
 
 ### Tasks, jobs and drivers
 
@@ -100,25 +100,97 @@ process-wide `ureq` agent, so a host's connection is kept for the next
 request. Its downloads have an agent of their own (a host's connection
 kept for the next file) whose connections watch its progress while they
 wait for data: a cancel or a minute of silence ends one on the calling
-thread (no helper thread, no queue); a MEGA file is decrypted as it comes,
-and the file's head kept as it is written. Waits are slept, ended by a
-cancel. A server has 15 seconds to take the connection and 20 (a page, an
-API) or 30 (a download) to begin its answer.
+thread (no helper thread, no queue), and so does a minute that brought
+under 240 KiB (4 KiB a second: a server that sends a byte now and then
+holds a run no longer than the file's size at that speed); a MEGA file is
+decrypted as it comes, and the file's head kept as it is written. Waits are
+slept, ended by a cancel. A server has 15 seconds to take the connection
+and 20 (a page, an API) or 30 (a download) to begin its answer.
+
+What another party's answer may cost is bounded where it is read:
+
+- A request says what it fetches (`net::Kind`), and its answer is read no
+  further than that may be long, after decoding (a gzip answer of a few
+  kilobytes can be gigabytes): a table's header 1 MiB, an API's answer or
+  an event's index 2 MiB, a page 8 MiB, a folder's listing or a list of
+  links 16 MiB, a table's data 32 MiB (`Kind::limit`: some ten times the
+  largest of each measured). A web page's driver, which gets a body whole,
+  drops a larger one before it is copied in (`Request::limit`).
+- JSON is read into the fields looked at, the rest passed by as it is read
+  (`json`, `table::parse_data`), never into a tree of every value: a
+  table's data keeps the entries with a hash (200 000 at most), a MEGA
+  folder its nodes with a handle (100 000 at most).
+- The patterns a venue's labels and a folder's names are read with
+  (`text::pattern`) take a number of steps in proportion to the text;
+  `text::unescape` looks no further than a reference can be long; a
+  work's download box is read to its first 64 KiB, 256 links and each
+  label's first 256 characters, a chart's links to 64.
+
+Where a request goes is the link's to say only so far:
+
+- A link (and a file's address a page or an API gives) is taken only as
+  every URL parser reads it (`hosts::Link::parse`, the one place a host's
+  name is taken from): http(s), no backslash, no control character, no
+  user name before the host. `refusal::Refusals::before` asks nothing
+  else, whoever asks.
+- Natively no host of this machine or its networks is asked (`localhost`,
+  loopback, private, link-local, shared and unique-local addresses, by
+  name, by the address as written, or by what a name resolves to: the
+  agent's resolver), unless `"local_hosts": true` (a mirror on a LAN). A
+  proxy set for the requests is the user's own; it resolves the hosts
+  asked through it.
+- Redirects are followed by `native::http::ask`, ten at most, each
+  address kept to the same rules: no local host, none from https to http,
+  none to a service that refused in this run. In a web page the proxy (or
+  the browser) follows them; where they ended is known only afterwards
+  (`X-Final-Url`).
+- A MEGA file's bytes are asked over https only, and the file is the one
+  its link's key was made for (`hosts::MegaCipher`: the chunks' CBC-MACs
+  folded as the key's last 8 bytes say) or no file: natively checked as
+  the last bytes come and the file removed, in a page before it is handed
+  on (`web::served`).
+- A download's file is made anew for it, the user's only (`create_new`,
+  0600): what is at its place is removed, never written through.
 
 ### Refusals
 
-A service that answers 429, 401, 403 or 451, or with a browser check
-(`cf-mitigated: challenge`; a page with "Just a moment...", `_cf_chl_opt`
-or Google's "unusual traffic" CAPTCHA, `/sorry/`, whatever the status; a
-Turnstile widget, `challenges.cloudflare.com`, only in an answer that
-failed), or whose API says it limits us (MEGA's -4), has refused BMSeeker.
-This holds for an API or a page BMSeeker reads (BMS SEARCH, Stella, manbow
-and the venues, Ginger, Konmai, tables, mirrors). A file host's (Google
-Drive's, MEGA's, Dropbox's, MediaFire's, pixeldrain's) 401, 403 or 451 is
-one file's or link's failure (`refusal::refuses`), as its 404 is: Drive
-answers 403 for a file's quota or sharing. The drivers read a failed
-answer's start to tell (`refusal::answer_error`, natively and through
-`web::unserved`; Drive's quota said as such).
+A service that answers 429, or with a browser check (`cf-mitigated:
+challenge`; in an answer that failed, a page with "Just a moment...",
+`_cf_chl_opt`, Google's "unusual traffic" CAPTCHA, `/sorry/`, or a
+Turnstile widget, `challenges.cloudflare.com`), or whose API says it limits
+us (MEGA's -4), has refused BMSeeker. So has one that answers 401, 403 or
+451 where BMSeeker asks a service's own endpoint: an API, a page, a listing
+(BMS SEARCH, Stella, manbow and the venues, Ginger, Konmai, a table's
+page).
+
+What a link or a table can make a server say refuses no service
+(`refusal::refuses`, `Refusals::after`):
+
+- A 401, 403 or 451 for a file a link leads to, or for a table's header or
+  data (they are where the table says), is that file's failure, as its 404
+  is: any server has an address that answers so. It is one strike for the
+  host that answered. Three strikes in a run (`refusal::STRIKES`), for
+  three different addresses of the host, with no answer of that host's
+  that came between them, are the host's refusal of its files
+  (`Why::Files`, the code `files`, with the last status): it is not asked
+  for the rest of a table's files one by one. The same address asked
+  again is no new strike, and an answer of the host's that came (a file,
+  a page) clears its strikes. So one link, or two, to an address that
+  answers 403 refuses nothing.
+- A file host (Google Drive, MEGA, Dropbox, MediaFire, pixeldrain, GitHub's
+  raw files) gets no strikes and is never refused by 401, 403 or 451,
+  whatever was asked and however many files answer so: Drive answers 403
+  for each file's quota or sharing.
+- An answer that came (a success) is a browser check only by the title a
+  challenge page begins with, and only where a page was asked for, or
+  where a download was sent as no file (no name) by a host that is no file
+  host. What a page shows of others' words, and a file a host stores, make
+  no check.
+- The service charged is the one that answered: where a download's
+  redirects ended (`Unserved::at`, natively too), and for a request a 429
+  of another service than the one asked (`refusal::answer_error`, natively
+  and through `web::unserved`; Drive's quota said as such).
+- A work's page on manbow is asked only at its `event.cgi`.
 
 `refusal::Refusals` keeps it for the run, by its host
 (`refusal::service`: `www.` and the port left out; the hosts of Google
@@ -134,9 +206,10 @@ failure, so nothing retries it, and no page (not even with
 `failures_are_pages`). A source fed it finds nothing and the next is
 asked; a host's link fails and its page's other links are tried.
 
-A transport keeps to no refusals itself (`native::Native`, the web
-page's): `Guarded` is the one guard, and hands each new refusal to a
-callback. The CLI's `Cli::run` wraps its driver so, writing a `refused`
+A transport keeps to no refusals itself for the address asked
+(`native::Native`, the web page's): `Guarded` is the one guard, and hands
+each new refusal to a callback. Where a redirect leads is asked by the
+native transport itself, so there it looks at the run's refusals. The CLI's `Cli::run` wraps its driver so, writing a `refused`
 record (also for one a task kept from the run's last answer, MEGA's -4),
 and the guard tells the progress (`Progress::refusals`). A download that
 its host refused fails with the code `refused`. A run is one CLI process;
@@ -166,6 +239,11 @@ next link (at most a few hops). Adding a host is adding it to the registry.
 
 - A short link (`db.tt`, `bit.ly`) whose redirects end at a host bmseeker
   knows (Dropbox, Google Drive, ...) is opened from there.
+- A Google Drive file is asked with `confirm=t`, which passes Drive's
+  "can't scan this file for viruses" notice as a browser's "Download
+  anyway" does. It is a notice, not an access control (a file's sharing
+  and quota still answer 403), and what is downloaded is treated as
+  untrusted either way.
 - Google Drive's "Quota exceeded" (a file downloaded too often lately) is
   reported as such: it passes within a day.
 - **Dead uploaders.** A dead uploader's link (a table's too, tried after
@@ -322,6 +400,7 @@ JSON file over the defaults (`--config`, `$BMSEEKER_CONFIG`,
 | `min_coverage` | the share of a chart's sounds a song's folder must hold |
 | `reinstall` | newer files over those there too (`--reinstall`) |
 | `folder_naming`, `folder_name_format`, `sjis_only` | Folder naming, above (`--name-folders`) |
+| `local_hosts` | hosts of this machine and its own networks are asked natively (a mirror on a LAN); off by default |
 
 The `User-Agent` natively is the HTTP library's own name as it sends it
 (`config::HTTP_CLIENT`, kept first whatever the setting says), then
@@ -398,7 +477,7 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
 link   {"link","state":"file|page|gone|error","host","url"?,"code"?,"error"?}
 got    {"file","name","format","link","errors":[...]}
 done   {"title","state":"added|owned|placed|waiting|page|failed","path"?,"link"?,"code"?,"error"?}
-refused {"refused": host,"code":"status|challenge|rate_limited|earlier","status"?,"error"}
+refused {"refused": host,"code":"status|files|challenge|rate_limited|earlier","status"?,"error"}
 ```
 
 `"error"` is for a person; `"code"` for a program: `status`, `stalled`,

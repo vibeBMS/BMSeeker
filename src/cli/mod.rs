@@ -177,9 +177,10 @@ impl Run<'_> {
         run_job(&mut TaskJob::new(task), self.net)
     }
 
-    /// `url`'s body.
+    /// `url`'s body (a list of links, a venue's list of works).
     fn get(&self, url: &str) -> crate::net::Answer {
-        self.task(&mut crate::net::get_then(url.to_string(), |a| a))
+        let kind = crate::net::Kind::Listing;
+        self.task(&mut crate::net::get_as(url.to_string(), kind, |a| a))
     }
 }
 

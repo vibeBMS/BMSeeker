@@ -90,7 +90,8 @@ fn unescape_with(s: &str, legacy: bool) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let end = rest.find(';').filter(|e| *e <= 10);
+        // (a reference is ten bytes at most: no further is looked)
+        let end = rest.bytes().take(11).position(|b| b == b';');
         let decoded = end.and_then(|e| {
             let name = &rest[1..e];
             let c = if let Some(n) = name.strip_prefix('#') {
@@ -137,19 +138,11 @@ fn unescape_with(s: &str, legacy: bool) -> String {
     out
 }
 
-/// `n` as one file name: no path, nothing a file system refuses; None
-/// when nothing is left.
+/// `n` as one file name: no path, no dot before it, nothing a file
+/// system refuses, Windows' too ([`safe_part`](crate::fs::safe_part): no
+/// dot or space at its end, no device's name); None when nothing is left.
 pub(crate) fn safe_file_name(n: &str) -> Option<String> {
-    let n: String = n
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let n = n.trim().trim_matches('.').to_string();
-    (!n.is_empty()).then_some(n)
+    crate::fs::safe_part(n.trim().trim_start_matches('.'))
 }
 
 #[cfg(test)]
@@ -163,6 +156,32 @@ mod tests {
         assert_eq!(unescape_attr("?a=1&copy=2&amp;b=&#x2F;"), "?a=1&copy=2&b=/");
         assert_eq!(safe_file_name(" ..a/b?. "), Some("a_b_".into()));
         assert_eq!(safe_file_name("..."), None);
+        // Windows' names too: a device's, a dot or a space at the end
+        assert_eq!(safe_file_name("NUL"), Some("_NUL".into()));
+        assert_eq!(safe_file_name("com1.zip"), Some("_com1.zip".into()));
+        assert_eq!(safe_file_name("a.zip. ."), Some("a.zip".into()));
+        assert_eq!(
+            crate::net::disposition_name("attachment; filename=\"aux.bms.\"").as_deref(),
+            Some("_aux.bms")
+        );
+        assert_eq!(
+            crate::hosts::url_file_name("https://h.example/d/CON").as_deref(),
+            Some("_CON")
+        );
+    }
+
+    /// A text of nothing but `&` costs its length, not its square.
+    #[test]
+    fn many_references() {
+        let n = 2_000_000;
+        let t = std::time::Instant::now();
+        assert_eq!(unescape(&"&".repeat(n)).len(), n);
+        assert_eq!(unescape(&"&amp".repeat(n / 4)).len(), n / 4);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        // a reference is looked for no further than it can be long
+        assert_eq!(unescape("&#x10FFFF;"), "\u{10ffff}");
+        assert_eq!(unescape("&#65;&#00000000065;x"), "A&#00000000065;x");
+        assert_eq!(unescape("&thetasym;&nbsp;"), "\u{3d1}\u{a0}");
     }
 
     #[test]

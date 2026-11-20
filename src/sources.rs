@@ -15,7 +15,7 @@
 use crate::config::Config;
 use crate::hosts::Want;
 use crate::links::Links;
-use crate::net::{Answer, BoxTask, Memo, Next, Ready, Task};
+use crate::net::{Answer, BoxTask, Kind, Memo, Next, Ready, Request, Task};
 use std::sync::Arc;
 
 /// What is looked for: a chart (by its MD5, if known) of the song `want`;
@@ -140,13 +140,12 @@ impl Source for ChartMirrors {
             return Ready::boxed(Vec::new());
         };
         let folders = self.folders.clone();
-        let find = crate::net::get_then(format!("{}/patterns/{md5}", self.api), move |answer| {
+        let url = format!("{}/patterns/{md5}", self.api);
+        let find = crate::net::get_then(url, move |answer| {
             // (nothing when it fails)
-            let Ok(body) = answer else {
-                return Vec::new();
-            };
-            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-            let name = v["file"]["name"].as_str().unwrap_or("");
+            let chart: crate::bmssearch::Pattern =
+                crate::json::object_of(&answer.unwrap_or_default());
+            let name = chart.file.name.as_str();
             // a file name, nothing of a path
             if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
                 return Vec::new();
@@ -178,7 +177,27 @@ pub(crate) struct ByMd5 {
     name: &'static str,
     /// The lookup's URL, the MD5 after it.
     api: String,
-    url: fn(&serde_json::Value) -> Option<&str>,
+    url: fn(&Package) -> Option<&str>,
+}
+
+/// A lookup's answer: Ginger's `downloadURL`, Konmai's `result` and
+/// `data.song_url`.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Package {
+    #[serde(rename = "downloadURL", deserialize_with = "crate::json::text")]
+    download_url: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    result: String,
+    #[serde(deserialize_with = "crate::json::object")]
+    data: PackageData,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct PackageData {
+    #[serde(deserialize_with = "crate::json::text")]
+    song_url: String,
 }
 
 impl ByMd5 {
@@ -186,7 +205,7 @@ impl ByMd5 {
         ByMd5 {
             name: "ginger",
             api: config.ginger.clone(),
-            url: |v| v["downloadURL"].as_str(),
+            url: |p| Some(p.download_url.as_str()),
         }
     }
 
@@ -194,9 +213,9 @@ impl ByMd5 {
         ByMd5 {
             name: "konmai",
             api: config.konmai.clone(),
-            url: |v| {
-                let ok = v["result"].as_str()?.eq_ignore_ascii_case("success");
-                v["data"]["song_url"].as_str().filter(|_| ok)
+            url: |p| {
+                let ok = p.result.eq_ignore_ascii_case("success");
+                ok.then_some(p.data.song_url.as_str())
             },
         }
     }
@@ -227,11 +246,8 @@ impl Source for ByMd5 {
         let url = self.url;
         crate::net::get_then(format!("{}{md5}", self.api), move |answer| {
             // (nothing when it fails: not found is a 404)
-            let v: serde_json::Value = answer
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default();
-            url(&v)
+            let package: Package = crate::json::object_of(&answer.unwrap_or_default());
+            url(&package)
                 .map(str::trim)
                 .filter(|u| file_link(u))
                 .map(String::from)
@@ -374,9 +390,8 @@ impl ArchiveSearch {
             return Next::Done(Vec::new());
         }
         self.wait = Wait::Root;
-        Next::Ask(crate::net::Request::Get(crate::hosts::drive::listing_url(
-            &self.root,
-        )))
+        let root = crate::hosts::drive::listing_url(&self.root);
+        Next::Ask(Request::Get(root, Kind::Listing))
     }
 }
 
@@ -388,7 +403,7 @@ impl Task for ArchiveSearch {
         match self.pattern.clone() {
             Some(url) => {
                 self.wait = Wait::Pattern;
-                Next::Ask(crate::net::Request::Get(url))
+                Next::Ask(Request::Get(url, Kind::Api))
             }
             None => self.root(),
         }
@@ -398,15 +413,13 @@ impl Task for ArchiveSearch {
         match self.wait {
             Wait::Pattern => {
                 // the song's title, the first to look for
-                let v: serde_json::Value = answer
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default();
-                if let Some(t) = v["bms"]["title"].as_str().filter(|t| !t.trim().is_empty()) {
-                    self.titles.insert(0, t.trim().to_string());
+                let chart: crate::bmssearch::Pattern =
+                    crate::json::object_of(&answer.unwrap_or_default());
+                if !chart.bms.title.trim().is_empty() {
+                    self.titles.insert(0, chart.bms.title.trim().to_string());
                 }
                 if self.artist.is_empty() {
-                    self.artist = v["artist"].as_str().unwrap_or("").to_string();
+                    self.artist = chart.artist;
                 }
                 self.root()
             }
@@ -420,9 +433,8 @@ impl Task for ArchiveSearch {
                 match entries.iter().find(|e| e.folder && e.name == letter) {
                     Some(e) => {
                         self.wait = Wait::Letter;
-                        Next::Ask(crate::net::Request::Get(crate::hosts::drive::listing_url(
-                            &e.id,
-                        )))
+                        let letter = crate::hosts::drive::listing_url(&e.id);
+                        Next::Ask(Request::Get(letter, Kind::Listing))
                     }
                     None => Next::Done(Vec::new()),
                 }

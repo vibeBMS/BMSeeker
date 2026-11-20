@@ -81,12 +81,21 @@ How BMSeeker behaves towards these sites:
   (`ureq/<version> BMSeeker/<version> (+https://github.com/vibeBMS/BMSeeker)`: the HTTP library's name, then
   BMSeeker's), never a browser's. In a web page the browser's
   `User-Agent` is sent (to hosts reached through the CORS proxy, the proxy's).
-- It honours refusals and rate limits: a service that answers 429, 401/403/451 (but a file host's for one file), or
-  with a browser check (a Cloudflare challenge, Turnstile, Google's CAPTCHA), is not asked again for the rest of the run, and the refusal is reported
-  (see [DESIGN.md, Refusals](DESIGN.md#refusals)). It does not retry with other queries, other addresses or other headers.
+- It honours refusals and rate limits: a service that answers 429, or 401/403/451 where its own page, API or listing
+  is asked, or with a browser check (a Cloudflare challenge, Turnstile, Google's CAPTCHA), is not asked again for the
+  rest of the run, not through a redirect either (natively), and the refusal is reported (see
+  [DESIGN.md, Refusals](DESIGN.md#refusals)). A 401/403/451 for a file a link leads to is that file's failure; a host
+  that answers so for three different files one after another, with no answer of its own that came between them, is
+  not asked again either (but a file host, where each is one file's quota or sharing). It does not retry with other
+  queries, other addresses or other headers.
+- It asks only the web: natively a table, a link or a redirect cannot make it ask this machine or its own network
+  (`localhost`, private and link-local addresses; the setting `"local_hosts": true` allows them, for a mirror on a
+  LAN), and a redirect from https to http is not followed.
 - It does not bypass access controls: no solving or evading of challenges, CAPTCHAs, logins or download limits.
   A link that needs a browser is shown to the user in one (the window's web view presses a OneDrive share page's
   Download button once, as a person would; the web page opens it in a tab).
+  Google Drive's "can't scan this file for viruses" notice is passed (`confirm=t`), as a browser's "Download anyway"
+  does: it is a notice, not an access control, and what is downloaded is treated as untrusted either way.
 
 BMSeeker hosts no songs or charts, and is not affiliated with, endorsed by or operated by any of the services above.
 Users are responsible for complying with each site's terms of use and with the rights of the copyright holders of what

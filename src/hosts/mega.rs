@@ -5,7 +5,7 @@
 
 use super::{pick_file, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
-use crate::net::{Answer, BoxTask, NetError, Next, Ready, Request, Task};
+use crate::net::{Answer, BoxTask, Kind, NetError, Next, Ready, Request, Task};
 use crate::unpack::is_archive;
 use std::path::Path;
 
@@ -77,10 +77,12 @@ impl Task for MegaTask {
             State::File { handle, .. } => Next::Ask(Request::Post {
                 url: self.api.clone(),
                 body: mega_request(handle),
+                kind: Kind::Api,
             }),
             State::Folder { handle, .. } => Next::Ask(Request::Post {
                 url: format!("{}&n={handle}", self.api),
                 body: br#"[{"a":"f","c":1,"r":1,"ca":1}]"#.to_vec(),
+                kind: Kind::Listing,
             }),
             _ => Next::Done(Resolved::Failed("MEGA: started twice".into())),
         }
@@ -93,11 +95,11 @@ impl Task for MegaTask {
         };
         match std::mem::replace(&mut self.state, State::Done) {
             State::File { key, .. } => Next::Done(match mega_answer(&body) {
-                Ok(url) => {
-                    let named = Target::named(url, mega_file_name(&body, &key));
+                Ok((url, at)) => {
+                    let name = b64url(&at).and_then(|at| mega_attr_name(&at, &key));
                     Resolved::File(Target {
                         mega_key: Some(key),
-                        ..named
+                        ..Target::named(url, name)
                     })
                 }
                 Err(e) => Resolved::Failed(e),
@@ -123,10 +125,11 @@ impl Task for MegaTask {
                 Next::Ask(Request::Post {
                     url: format!("{}&n={handle}", self.api),
                     body: format!(r#"[{{"a":"g","g":1,"ssl":1,"n":"{}"}}]"#, f.handle).into_bytes(),
+                    kind: Kind::Api,
                 })
             }
             State::Picked { key, name } => Next::Done(match mega_answer(&body) {
-                Ok(url) => Resolved::File(Target {
+                Ok((url, _)) => Resolved::File(Target {
                     mega_key: Some(key),
                     ..Target::named(url, Some(name))
                 }),
@@ -137,11 +140,29 @@ impl Task for MegaTask {
     }
 }
 
-/// MEGA's AES-128-CTR with the 32-byte key of a file link.
+/// MEGA's AES-128-CTR with the 32-byte key of a file link, and the check
+/// the key carries of what the file is: the file in chunks (128 KiB, then
+/// each 128 KiB longer up to 1 MiB), each chunk's CBC-MAC, those MACs'
+/// CBC-MAC, folded to the key's last 8 bytes. Without it, whoever serves
+/// or carries the bytes can change the file (CTR hides it, no more).
 pub struct MegaCipher {
     aes: aes::Aes128,
     ctr: u128,
+    /// The key's nonce twice: where a chunk's MAC starts.
+    start: [u8; 16],
+    /// The key's check.
+    check: [u8; 8],
+    /// The chunk being read: its MAC so far, the bytes of it read, its
+    /// size.
+    chunk: ([u8; 16], usize, usize),
+    /// The MAC of the chunks' MACs so far.
+    mac: [u8; 16],
 }
+
+/// A chunk's size at first, and by how much the next is longer (until it
+/// is [`CHUNK_MAX`]).
+const CHUNK: usize = 128 << 10;
+const CHUNK_MAX: usize = 1 << 20;
 
 impl MegaCipher {
     pub fn new(k: &[u8]) -> MegaCipher {
@@ -153,26 +174,74 @@ impl MegaCipher {
         // the counter starts at the key's nonce (bytes 16..24), then 0
         let mut nonce = [0u8; 16];
         nonce[..8].copy_from_slice(&k[16..24]);
+        let mut start = [0u8; 16];
+        start[..8].copy_from_slice(&k[16..24]);
+        start[8..].copy_from_slice(&k[16..24]);
+        let mut check = [0u8; 8];
+        check.copy_from_slice(&k[24..32]);
         MegaCipher {
             aes: aes::Aes128::new(&key.into()),
             ctr: u128::from_be_bytes(nonce),
+            start,
+            check,
+            chunk: (start, 0, CHUNK),
+            mac: [0; 16],
         }
     }
 
     /// Decrypt the next part of the file (whole 16-byte blocks but at the
-    /// end).
+    /// end), taking it into the check.
     pub fn apply(&mut self, data: &mut [u8]) {
         use aes::cipher::BlockCipherEncrypt;
-        for chunk in data.chunks_mut(16) {
+        for part in data.chunks_mut(16) {
             let mut block = self.ctr.to_be_bytes().into();
             self.aes.encrypt_block(&mut block);
-            for (b, s) in chunk.iter_mut().zip(block.iter()) {
+            for (b, s) in part.iter_mut().zip(block.iter()) {
                 *b ^= s;
             }
             self.ctr = self.ctr.wrapping_add(1);
+            // (the last block as if zeros followed)
+            let (mac, read, size) = &mut self.chunk;
+            mix(&self.aes, mac, part);
+            *read += part.len();
+            if *read == *size {
+                let next = (*size + CHUNK).min(CHUNK_MAX);
+                mix(&self.aes, &mut self.mac, &self.chunk.0);
+                self.chunk = (self.start, 0, next);
+            }
         }
     }
+
+    /// Whether what was decrypted, now whole, is the file the key was
+    /// made for.
+    pub fn verified(mut self) -> bool {
+        if self.chunk.1 > 0 {
+            mix(&self.aes, &mut self.mac, &self.chunk.0);
+        }
+        let m = self.mac;
+        let folded: Vec<u8> = (0..4)
+            .map(|i| m[i] ^ m[i + 4])
+            .chain((8..12).map(|i| m[i] ^ m[i + 4]))
+            .collect();
+        folded == self.check
+    }
 }
+
+/// A CBC-MAC's next step: `mac` with `block` (16 bytes at most) mixed in.
+fn mix(aes: &aes::Aes128, mac: &mut [u8; 16], block: &[u8]) {
+    use aes::cipher::BlockCipherEncrypt;
+    for (m, b) in mac.iter_mut().zip(block) {
+        *m ^= b;
+    }
+    let mut out = (*mac).into();
+    aes.encrypt_block(&mut out);
+    mac.copy_from_slice(&out);
+}
+
+/// What a MEGA file that failed its check ([`MegaCipher::verified`]) comes
+/// to.
+pub(crate) const MEGA_CHANGED: &str =
+    "MEGA: the file is not the one its link was made for (its check failed)";
 
 /// A MEGA file link (`mega.nz/file/H#K`, `mega.nz/#!H!K`): (handle,
 /// 32-byte key).
@@ -229,13 +298,164 @@ struct MegaFile {
     key: Vec<u8>,
 }
 
+/// The nodes a folder's listing may have (a pack of a table's songs has a
+/// few thousand).
+const MAX_NODES: usize = 100_000;
+
+/// A node of a folder's listing as the API sends it (one without a handle
+/// is none).
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Node {
+    #[serde(deserialize_with = "crate::json::text")]
+    h: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    p: String,
+    #[serde(deserialize_with = "crate::json::number")]
+    t: Option<u64>,
+    #[serde(deserialize_with = "crate::json::text")]
+    a: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    k: String,
+}
+
+/// A listing's nodes, those without a handle dropped as they are read;
+/// more than [`MAX_NODES`] is an error.
+fn nodes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<Node>>, D::Error> {
+    use serde::de::{Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<Vec<Node>>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("nodes")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(n) = s.next_element::<crate::json::Object<Node>>()? {
+                let Some(n) = n.0.filter(|n| !n.h.is_empty()) else {
+                    continue;
+                };
+                if out.len() == MAX_NODES {
+                    return Err(A::Error::custom(format_args!(
+                        "more than {MAX_NODES} files and folders"
+                    )));
+                }
+                out.push(n);
+            }
+            Ok(Some(out))
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
+            while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+    d.deserialize_any(V)
+}
+
+/// The API's answer to one command: an error's number (alone, or in a
+/// list), or the first of a list's objects.
+enum Reply {
+    Code(i64),
+    Got(Got),
+    Other,
+}
+
+/// What a command's answer holds of what is looked at: a file's download
+/// URL and its attributes, a folder's nodes.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Got {
+    #[serde(deserialize_with = "crate::json::text")]
+    g: String,
+    #[serde(deserialize_with = "crate::json::text")]
+    at: String,
+    #[serde(deserialize_with = "nodes")]
+    f: Option<Vec<Node>>,
+}
+
+impl<'de> serde::Deserialize<'de> for Reply {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Reply, D::Error> {
+        use serde::de::value::MapAccessDeserializer;
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Reply;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("MEGA's answer")
+            }
+            fn visit_i64<E>(self, n: i64) -> Result<Reply, E> {
+                Ok(Reply::Code(n))
+            }
+            fn visit_u64<E>(self, n: u64) -> Result<Reply, E> {
+                Ok(Reply::Code(n as i64))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Reply, A::Error> {
+                let first = s.next_element::<Reply>()?;
+                while s.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(first.unwrap_or(Reply::Other))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<Reply, A::Error> {
+                serde::Deserialize::deserialize(MapAccessDeserializer::new(m)).map(Reply::Got)
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Reply, E> {
+                Ok(Reply::Other)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<Reply, E> {
+                Ok(Reply::Other)
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<Reply, E> {
+                Ok(Reply::Other)
+            }
+            fn visit_unit<E>(self) -> Result<Reply, E> {
+                Ok(Reply::Other)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// What the API answered `body` with: what it holds ([`Got`]), or the
+/// failure its error is ([`refused`]).
+fn reply(body: &[u8]) -> Result<Got, NetError> {
+    match serde_json::from_slice(body).map_err(|e| format!("MEGA: {e}"))? {
+        Reply::Got(g) => Ok(g),
+        Reply::Code(n) => Err(refused(n)),
+        Reply::Other => Err(unexpected(body)),
+    }
+}
+
+/// The failure of an answer that holds neither what was asked for nor an
+/// error's number: its first characters, not all an API may send.
+fn unexpected(body: &[u8]) -> NetError {
+    let text = String::from_utf8_lossy(&body[..body.len().min(320)]);
+    let start: String = text.chars().take(80).collect();
+    NetError::Other(format!("MEGA refused ({start})"))
+}
+
 /// The files of a MEGA folder (the API's `"a":"f"` answer), their keys
 /// and names decrypted with the folder's `key`.
 fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, NetError> {
     use aes::cipher::{BlockCipherDecrypt, KeyInit};
-    let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("MEGA: {e}"))?;
-    let Some(nodes) = v.get(0).and_then(|f| f.get("f")).and_then(|f| f.as_array()) else {
-        return Err(refused(&v.to_string().chars().take(80).collect::<String>()));
+    let Some(nodes) = reply(body)?.f else {
+        return Err(unexpected(body));
     };
     let ecb = |k: &[u8], data: &mut [u8]| {
         let Ok(aes) = aes::Aes128::new_from_slice(k) else {
@@ -247,31 +467,25 @@ fn mega_nodes(body: &[u8], key: &[u8]) -> Result<Vec<MegaFile>, NetError> {
             b.copy_from_slice(&block);
         }
     };
-    let field = |n: &serde_json::Value, f: &str| {
-        n.get(f).and_then(|x| x.as_str()).unwrap_or("").to_string()
-    };
-    let parent: std::collections::HashMap<String, String> = nodes
-        .iter()
-        .map(|n| (field(n, "h"), field(n, "p")))
-        .collect();
+    let parent: std::collections::HashMap<&str, &str> =
+        nodes.iter().map(|n| (&*n.h, &*n.p)).collect();
     let mut out = Vec::new();
-    for n in nodes {
-        let s = |f: &str| n.get(f).and_then(|x| x.as_str()).unwrap_or("");
-        if n.get("t").and_then(|t| t.as_u64()) != Some(0) {
+    for n in &nodes {
+        if n.t != Some(0) {
             continue; // a folder
         }
-        let Some(attr) = b64url(s("a")) else { continue };
+        let Some(attr) = b64url(&n.a) else { continue };
         // "owner:key" for each who shares it; the folder's is the one that
         // opens the attributes
-        let found = s("k").split('/').find_map(|part| {
+        let found = n.k.split('/').find_map(|part| {
             let mut k = b64url(part.split_once(':')?.1).filter(|k| k.len() == 32)?;
             ecb(key, &mut k);
             let name = mega_attr_name(&attr, &k)?;
             Some((k, name))
         });
-        if let (Some((key, name)), Some(handle)) = (found, handle(s("h"))) {
+        if let (Some((key, name)), Some(handle)) = (found, handle(&n.h)) {
             let mut under = Vec::new();
-            let mut at = s("p");
+            let mut at = &*n.p;
             while let Some(p) = parent.get(at).filter(|_| under.len() < 64) {
                 under.push(at.to_string());
                 at = p;
@@ -403,30 +617,31 @@ pub(crate) fn mega_request(handle: &str) -> Vec<u8> {
     format!(r#"[{{"a":"g","g":1,"ssl":1,"p":"{handle}"}}]"#).into_bytes()
 }
 
-/// The download URL in the MEGA API's answer.
-pub(crate) fn mega_answer(body: &[u8]) -> Result<String, NetError> {
-    let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("MEGA: {e}"))?;
-    v.get(0)
-        .and_then(|f| f.get("g"))
-        .and_then(|g| g.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| refused(&v.to_string()))
+/// The download URL in the MEGA API's answer (an https one: the file's
+/// bytes are asked of whatever it names), and the file's attributes.
+pub(crate) fn mega_answer(body: &[u8]) -> Result<(String, String), NetError> {
+    let got = reply(body)?;
+    if got.g.is_empty() {
+        return Err(unexpected(body));
+    }
+    if !got.g.starts_with("https://") {
+        return Err("MEGA: the file's address is not an https one".into());
+    }
+    Ok((got.g, got.at))
 }
 
-/// The API's refusal, `answer` its words: -9 (no such file) and -2 (a
+/// The API's refusal by its error's number: -9 (no such file) and -2 (a
 /// handle that is no more) say the file is gone; -4 that it limits
 /// BMSeeker's requests (MEGA is not asked again in the run).
-fn refused(answer: &str) -> NetError {
-    let e = format!("MEGA refused ({answer})");
-    if answer.contains("[-4]") || answer == "-4" {
-        NetError::Refused(crate::refusal::Refusal::of(
+fn refused(code: i64) -> NetError {
+    let e = format!("MEGA refused ([{code}])");
+    match code {
+        -4 => NetError::Refused(crate::refusal::Refusal::of(
             "mega.nz",
             crate::refusal::Why::RateLimited,
-        ))
-    } else if ["[-9]", "[-2]"].iter().any(|c| answer.contains(c)) {
-        NetError::Gone(e)
-    } else {
-        NetError::Other(e)
+        )),
+        -9 | -2 => NetError::Gone(e),
+        _ => NetError::Other(e),
     }
 }
 
@@ -450,15 +665,12 @@ fn mega_attr_name(attr: &[u8], k: &[u8]) -> Option<String> {
     }
     let json = a.strip_prefix(b"MEGA")?;
     let end = json.iter().rposition(|&b| b == b'}')? + 1;
-    let v: serde_json::Value = serde_json::from_slice(&json[..end]).ok()?;
-    Some(v.get("n")?.as_str()?.to_string())
-}
-
-/// The file's name in a MEGA `"a":"g"` answer (its `at` attributes).
-fn mega_file_name(body: &[u8], key: &[u8]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let at = b64url(v.get(0)?.get("at")?.as_str()?)?;
-    (key.len() == 32).then(|| mega_attr_name(&at, key))?
+    #[derive(serde::Deserialize)]
+    struct Attributes {
+        n: String,
+    }
+    let attributes = serde_json::from_slice::<crate::json::Object<Attributes>>(&json[..end]);
+    Some(attributes.ok()?.0?.n)
 }
 
 fn b64url(s: &str) -> Option<Vec<u8>> {
@@ -486,7 +698,7 @@ fn b64url(s: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::hosts::tests::resolve;
 
@@ -504,6 +716,121 @@ mod tests {
         assert!(gone.gone());
         let other = mega_answer(b"[-3]").unwrap_err();
         assert_eq!(other, NetError::Other("MEGA refused ([-3])".into()));
+        // alone, as the API sends an error of the whole request
+        assert!(matches!(mega_answer(b"-4"), Err(NetError::Refused(_))));
+        assert!(mega_answer(b"-9").unwrap_err().gone());
+        // what is neither an error's number nor what was asked for: its
+        // start, not all an API may send
+        let long = format!(r#"[{{"x":"{}"}}]"#, "y".repeat(100_000));
+        let NetError::Other(said) = mega_answer(long.as_bytes()).unwrap_err() else {
+            panic!("no failure")
+        };
+        assert!(
+            said.starts_with(r#"MEGA refused ([{"x":"yyy"#) && said.len() < 100,
+            "{said}"
+        );
+        assert!(mega_nodes(br#"[{"g":"x"}]"#, &[0; 16]).is_err());
+    }
+
+    /// A file's bytes are asked over https only.
+    #[test]
+    fn the_files_address_is_https() {
+        let ok = br#"[{"s":3,"g":"https://gfs.example/dl/x","at":"AA"}]"#;
+        assert_eq!(
+            mega_answer(ok).unwrap(),
+            ("https://gfs.example/dl/x".to_string(), "AA".to_string())
+        );
+        for g in ["http://gfs.example/dl/x", "ftp://x/y", "//gfs.example/x"] {
+            let answer = format!(r#"[{{"s":3,"g":"{g}"}}]"#);
+            let e = mega_answer(answer.as_bytes()).unwrap_err();
+            assert!(e.to_string().contains("not an https"), "{g}: {e}");
+        }
+    }
+
+    /// The key's check of a file, as MEGA makes it (AES-CBC-MAC of each
+    /// chunk from the nonce twice, of the chunks' from zero, folded).
+    pub(crate) fn mega_check(aes_key: [u8; 16], nonce: [u8; 8], plain: &[u8]) -> [u8; 8] {
+        use aes::cipher::{BlockCipherEncrypt, KeyInit};
+        let aes = aes::Aes128::new(&aes_key.into());
+        let cbc = |mac: &mut [u8; 16], data: &[u8]| {
+            for block in data.chunks(16) {
+                block.iter().zip(mac.iter_mut()).for_each(|(b, m)| *m ^= b);
+                let mut out = (*mac).into();
+                aes.encrypt_block(&mut out);
+                *mac = out.into();
+            }
+        };
+        let mut all = [0u8; 16];
+        let (mut at, mut size) = (0, 0x20000);
+        while at < plain.len() {
+            let end = (at + size).min(plain.len());
+            let mut mac = [nonce, nonce].concat().try_into().unwrap();
+            cbc(&mut mac, &plain[at..end]);
+            cbc(&mut all, &mac);
+            at = end;
+            size = (size + 0x20000).min(0x100000);
+        }
+        let mut check = [0u8; 8];
+        for i in 0..4 {
+            check[i] = all[i] ^ all[i + 4];
+            check[i + 4] = all[i + 8] ^ all[i + 12];
+        }
+        check
+    }
+
+    /// A file link's key for `plain` under `aes_key` and `nonce`, and the
+    /// bytes MEGA would send for it.
+    pub(crate) fn mega_file(aes_key: [u8; 16], nonce: [u8; 8], plain: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let check = mega_check(aes_key, nonce, plain);
+        let mut key = [aes_key.to_vec(), nonce.to_vec(), check.to_vec()].concat();
+        for i in 0..16 {
+            key[i] ^= key[i + 16];
+        }
+        // (CTR: to decrypt is to encrypt)
+        let mut sent = plain.to_vec();
+        MegaCipher::new(&key).apply(&mut sent);
+        (key, sent)
+    }
+
+    /// A file decrypted in parts of any size is the file its key was made
+    /// for; a byte changed on the way, or a part left out, is not.
+    #[test]
+    fn a_files_check() {
+        let (aes_key, nonce) = ([7u8; 16], [9u8; 8]);
+        // (sizes around the chunks' ends: 128 KiB, then 256 KiB more)
+        for len in [
+            0,
+            1,
+            16,
+            17,
+            0x20000 - 1,
+            0x20000,
+            0x20001,
+            0x60000,
+            0x60010,
+            2_500_000,
+        ] {
+            let plain: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+            let (key, mut sent) = mega_file(aes_key, nonce, &plain);
+            for part in [16, 1 << 16, usize::MAX] {
+                let mut c = MegaCipher::new(&key);
+                let mut got = sent.clone();
+                got.chunks_mut(part).for_each(|p| c.apply(p));
+                assert_eq!(got, plain);
+                assert!(c.verified(), "{len} bytes in parts of {part}");
+            }
+            if len == 0 {
+                continue;
+            }
+            let mut changed = sent.clone();
+            changed[len / 2] ^= 1;
+            let mut c = MegaCipher::new(&key);
+            c.apply(&mut changed);
+            assert!(!c.verified(), "{len} bytes, one changed");
+            let mut c = MegaCipher::new(&key);
+            c.apply(&mut sent[..len - 1]);
+            assert!(!c.verified(), "{len} bytes, the last left out");
+        }
     }
 
     #[test]
@@ -552,6 +879,7 @@ mod tests {
                 let req = crate::net::Request::Post {
                     url: format!("{}&n={h}", Config::default().mega_api),
                     body: br#"[{"a":"f","c":1,"r":1,"ca":1}]"#.to_vec(),
+                    kind: Kind::Listing,
                 };
                 let native = crate::native::Native::new(&Default::default());
                 let Fed::Http(got) = native.perform(Effect::Http(req)) else {

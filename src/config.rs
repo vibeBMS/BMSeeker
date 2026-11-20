@@ -77,6 +77,12 @@ pub struct Config {
     /// Such a folder's name has only characters Shift_JIS has (LR2 on
     /// Windows).
     pub sjis_only: bool,
+    /// Whether hosts of this machine and its own networks are asked
+    /// natively (`localhost`, loopback, private, link-local, shared and
+    /// unique-local addresses, by name or by what a name resolves to): for
+    /// a mirror kept on a LAN, or a test's server. Else a table, a link or
+    /// a redirect that names one is not asked.
+    pub local_hosts: bool,
 }
 
 /// The HTTP library BMSeeker's native requests go through, as it names
@@ -252,6 +258,10 @@ impl Default for Config {
             folder_naming: false,
             folder_name_format: crate::naming::DEFAULT_FORMAT.into(),
             sjis_only: false,
+            // (off; on in this crate's own tests while those of
+            // `install::entry` that ask a server on this machine do not
+            // set it themselves)
+            local_hosts: cfg!(test),
         }
     }
 }

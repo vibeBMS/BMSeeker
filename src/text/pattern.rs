@@ -5,6 +5,11 @@
 //! groups with `|`, `? * + {m,n} {m,}`, `^ $`, and `(?i)` at the start.
 //! `\s`, `\d` and `\w` are Unicode's, as far as Latin and Japanese text
 //! go (marks and numbers of other scripts aside).
+//!
+//! It matches by trying and going back, so a text made for it (`<<<<…`
+//! for `<[^>]+>`) would cost the square of its length: a search takes a
+//! number of steps in proportion to the text and the pattern at most
+//! ([`STEPS`]), and one that needs more finds nothing (more).
 
 use std::ops::Range;
 
@@ -13,6 +18,33 @@ pub(crate) struct Pattern {
     nodes: Vec<Node>,
     /// `(?i)`: letters compared in lower case.
     fold: bool,
+    /// How many nodes it has, those in groups and repeats too.
+    size: usize,
+}
+
+/// The steps a search may take for each node of the pattern and each byte
+/// of the text: a text of the pages and names read needs one or two (a
+/// title of sixty brackets, each opening a run to its end, four).
+const STEPS: usize = 16;
+
+/// One search of a text (a match, or all of them one after another): the
+/// steps it may still take.
+struct Search<'a> {
+    p: &'a Pattern,
+    s: &'a str,
+    left: std::cell::Cell<usize>,
+}
+
+/// How many nodes `nodes` are, with those in them.
+fn size(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|n| match n {
+            Node::Group(alts) => 1 + alts.iter().map(|a| size(a)).sum::<usize>(),
+            Node::Repeat(n, ..) => 1 + size(std::slice::from_ref(n)),
+            _ => 1,
+        })
+        .sum()
 }
 
 enum Node {
@@ -210,24 +242,24 @@ impl Pattern {
             1 => alts.pop().expect("one"),
             _ => vec![Node::Group(alts)],
         };
-        Pattern { nodes, fold }
+        Pattern {
+            size: size(&nodes),
+            nodes,
+            fold,
+        }
+    }
+
+    fn search<'a>(&'a self, s: &'a str) -> Search<'a> {
+        Search {
+            p: self,
+            s,
+            left: std::cell::Cell::new(STEPS * self.size * (s.len() + 1)),
+        }
     }
 
     /// Where the leftmost match is.
     pub(crate) fn find(&self, s: &str) -> Option<Range<usize>> {
-        self.find_at(s, 0)
-    }
-
-    fn find_at(&self, s: &str, from: usize) -> Option<Range<usize>> {
-        let starts = s[from..].char_indices().map(|(i, _)| from + i);
-        starts.chain([s.len()]).find_map(|start| {
-            let mut end = None;
-            self.seq(&self.nodes, s, start, &mut |e| {
-                end = Some(e);
-                true
-            });
-            end.map(|end| start..end)
-        })
+        self.search(s).find_at(0)
     }
 
     pub(crate) fn is_match(&self, s: &str) -> bool {
@@ -236,9 +268,10 @@ impl Pattern {
 
     /// The matches, one after another (none overlapping).
     pub(crate) fn find_iter<'a>(&'a self, s: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
+        let search = self.search(s);
         let mut at = Some(0);
         std::iter::from_fn(move || {
-            let m = self.find_at(s, at?)?;
+            let m = search.find_at(at?)?;
             // (after an empty match, from the next character)
             at = match m.is_empty() {
                 true => s[m.end..].chars().next().map(|c| m.end + c.len_utf8()),
@@ -289,57 +322,90 @@ impl Pattern {
             Some(part)
         })
     }
+}
 
-    fn seq(&self, nodes: &[Node], s: &str, i: usize, then: Then) -> bool {
+impl Search<'_> {
+    /// One step taken, if there is one left.
+    fn step(&self) -> bool {
+        let left = self.left.get();
+        self.left.set(left.saturating_sub(1));
+        left > 0
+    }
+
+    /// The leftmost match from `from` on (none once the steps are spent).
+    fn find_at(&self, from: usize) -> Option<Range<usize>> {
+        let s = self.s;
+        let starts = s[from..].char_indices().map(|(i, _)| from + i);
+        for start in starts.chain([s.len()]) {
+            let mut end = None;
+            self.seq(&self.p.nodes, start, &mut |e| {
+                end = Some(e);
+                true
+            });
+            if self.left.get() == 0 {
+                return None;
+            }
+            if let Some(end) = end {
+                return Some(start..end);
+            }
+        }
+        None
+    }
+
+    fn seq(&self, nodes: &[Node], i: usize, then: Then) -> bool {
         match nodes.split_first() {
             None => then(i),
-            Some((n, rest)) => self.one(n, s, i, &mut |j| self.seq(rest, s, j, then)),
+            Some((n, rest)) => self.one(n, i, &mut |j| self.seq(rest, j, then)),
         }
     }
 
     /// Where a node of one character matching at `i` ends (None: another
     /// node, or no match).
-    fn char_at(&self, n: &Node, s: &str, i: usize) -> Option<usize> {
-        let c = s[i..].chars().next()?;
+    fn char_at(&self, n: &Node, i: usize) -> Option<usize> {
+        let fold = self.p.fold;
+        let c = self.s[i..].chars().next()?;
         let ok = match n {
-            Node::Char(x) if self.fold => lower(c) == lower(*x),
+            Node::Char(x) if fold => lower(c) == lower(*x),
             Node::Char(x) => c == *x,
-            Node::Class(items, not) => items.iter().any(|it| it.has(c, self.fold)) != *not,
+            Node::Class(items, not) => items.iter().any(|it| it.has(c, fold)) != *not,
             Node::Any => c != '\n',
             _ => false,
         };
         ok.then(|| i + c.len_utf8())
     }
 
-    fn one(&self, n: &Node, s: &str, i: usize, then: Then) -> bool {
+    fn one(&self, n: &Node, i: usize, then: Then) -> bool {
+        if !self.step() {
+            return false;
+        }
+        let s = self.s;
         match n {
-            Node::Char(_) | Node::Class(..) | Node::Any => self.char_at(n, s, i).is_some_and(then),
+            Node::Char(_) | Node::Class(..) | Node::Any => self.char_at(n, i).is_some_and(then),
             Node::Start => i == 0 && then(i),
             Node::End => i == s.len() && then(i),
             Node::Boundary => {
                 let before = s[..i].chars().next_back().is_some_and(word);
                 before != s[i..].chars().next().is_some_and(word) && then(i)
             }
-            Node::Group(alts) => alts.iter().any(|a| self.seq(a, s, i, then)),
-            Node::Repeat(n, min, max) => self.repeat(n, *min, *max, s, i, then),
+            Node::Group(alts) => alts.iter().any(|a| self.seq(a, i, then)),
+            Node::Repeat(n, min, max) => self.repeat(n, *min, *max, i, then),
         }
     }
 
     /// `n` `min` to `max` times, as many as can be.
-    fn repeat(&self, n: &Node, min: u32, max: u32, s: &str, i: usize, then: Then) -> bool {
+    fn repeat(&self, n: &Node, min: u32, max: u32, i: usize, then: Then) -> bool {
         if let Node::Group(_) = n {
             let more = max > 0
-                && self.one(n, s, i, &mut |j| {
+                && self.one(n, i, &mut |j| {
                     // (an empty match is not repeated)
-                    (j != i || min > 0)
-                        && self.repeat(n, min.saturating_sub(1), max - 1, s, j, then)
+                    (j != i || min > 0) && self.repeat(n, min.saturating_sub(1), max - 1, j, then)
                 });
             return more || min == 0 && then(i);
         }
         // (one character at a time: no recursion for each)
         let mut ends = vec![i];
-        while ends.len() <= max as usize {
-            match self.char_at(n, s, ends[ends.len() - 1]) {
+        while ends.len() <= max as usize && self.step() {
+            match self.char_at(n, ends[ends.len() - 1]) {
                 Some(j) => ends.push(j),
                 None => break,
             }
@@ -347,7 +413,7 @@ impl Pattern {
         ends.iter()
             .enumerate()
             .rev()
-            .any(|(count, &e)| count >= min as usize && then(e))
+            .any(|(count, &e)| count >= min as usize && self.left.get() > 0 && then(e))
     }
 }
 
@@ -379,5 +445,26 @@ mod tests {
         let parts: Vec<&str> = br.split("a<BR>b<br />").collect();
         assert_eq!(parts, ["a", "b", ""]);
         assert_eq!(Pattern::new("[ab]").remove_first("cab"), "cb");
+    }
+
+    /// A text made for a pattern (each place a run to the text's end, then
+    /// back) costs the text's length, not its square: the search finds
+    /// nothing, as there is nothing; what a text of a page's kind holds is
+    /// found as before.
+    #[test]
+    fn a_search_takes_its_texts_length() {
+        let n = 300_000;
+        let since = std::time::Instant::now();
+        let tag = Pattern::new(r"<[^>]+>");
+        assert_eq!(tag.find(&"<".repeat(n)), None);
+        assert_eq!(tag.replace_all(&"<".repeat(n), |_| String::new()).len(), n);
+        let brackets = Pattern::new(r"\s*([\(].*[\)]|[\[].*[\]])$");
+        assert_eq!(brackets.find(&"(".repeat(n)), None);
+        assert!(since.elapsed() < std::time::Duration::from_secs(20));
+        // a long text of a page's kind: every match, in its length's time
+        let page = "<p class=x>text</p> ".repeat(n / 20);
+        assert_eq!(tag.find_iter(&page).count(), 2 * (n / 20));
+        let title = format!("{} (a) [b] -c- (d)", "song ".repeat(40));
+        assert_eq!(brackets.find(&title).map(|m| m.end), Some(title.len()));
     }
 }

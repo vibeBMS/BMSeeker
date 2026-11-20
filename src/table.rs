@@ -10,9 +10,8 @@
 //!    `level_order` and `course`,
 //! 3. a data JSON: an array of entries with `md5` / `sha256` and `level`.
 
-use crate::net::{Answer, Next, Request, Task};
+use crate::net::{Answer, Kind, Next, Request, Task};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use url::Url;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -94,23 +93,6 @@ pub const DEFAULT_TABLES: &[(&str, &str)] = &[
     ("Stella (st)", "https://stellabms.xyz/st/table.html"),
 ];
 
-fn s(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
-}
-
-fn str_list(v: &Value) -> Vec<String> {
-    match v {
-        Value::Array(a) => a.iter().map(s).filter(|x| !x.is_empty()).collect(),
-        Value::Null => Vec::new(),
-        other => vec![s(other)],
-    }
-}
-
 /// Find `<meta name="bmstable" content="...">` in an HTML page.
 pub(crate) fn find_bmstable_meta(html: &str) -> Option<String> {
     let b = html.as_bytes();
@@ -166,60 +148,36 @@ fn attr(tag: &str, ltag: &str, name: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn parse_header(v: &Value) -> Result<TableHeader, TableError> {
-    let o = v
-        .as_object()
-        .ok_or_else(|| TableError::Format("header is not an object".into()))?;
-    let get = |k: &str| o.get(k).map(s).unwrap_or_default();
-    let mut courses = Vec::new();
-    if let Some(c) = o.get("course") {
-        let mut flat = Vec::new();
-        match c {
-            Value::Array(a) => {
-                for x in a {
-                    match x {
-                        Value::Array(inner) => flat.extend(inner.iter().cloned()),
-                        other => flat.push(other.clone()),
-                    }
-                }
-            }
-            Value::Object(_) => flat.push(c.clone()),
-            _ => {}
-        }
-        for c in flat {
-            let Some(co) = c.as_object() else { continue };
-            courses.push(Course {
-                name: co.get("name").map(s).unwrap_or_default(),
-                md5: co.get("md5").map(str_list).unwrap_or_default(),
-                sha256: co.get("sha256").map(str_list).unwrap_or_default(),
-                constraint: co.get("constraint").map(str_list).unwrap_or_default(),
-                trophy: co
-                    .get("trophy")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(Value::as_object)
-                            .map(|t| CourseTrophy {
-                                name: t.get("name").map(s).unwrap_or_default(),
-                                missrate: t.get("missrate").and_then(Value::as_f64).unwrap_or(0.0),
-                                scorerate: t
-                                    .get("scorerate")
-                                    .and_then(Value::as_f64)
-                                    .unwrap_or(0.0),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
-        }
+/// A header JSON read straight from its text: a value of any JSON type
+/// where text is expected (a symbol as a number), `course` a list of
+/// courses, or of lists of them, or one course.
+pub(crate) fn parse_header(text: &str) -> Result<TableHeader, TableError> {
+    #[derive(Deserialize)]
+    struct Header {
+        #[serde(default)]
+        name: Text,
+        #[serde(default)]
+        symbol: Text,
+        #[serde(default)]
+        tag: Text,
+        #[serde(default)]
+        data_url: Text,
+        #[serde(default)]
+        level_order: Texts,
+        #[serde(default)]
+        course: Courses,
     }
+    let h = serde_json::from_str::<crate::json::Object<Header>>(text)
+        .map_err(|e| TableError::Format(format!("header: {e}")))?
+        .0
+        .ok_or_else(|| TableError::Format("header is not an object".into()))?;
     let header = TableHeader {
-        name: get("name"),
-        symbol: get("symbol"),
-        tag: get("tag"),
-        data_url: get("data_url"),
-        level_order: o.get("level_order").map(str_list).unwrap_or_default(),
-        courses,
+        name: h.name.0,
+        symbol: h.symbol.0,
+        tag: h.tag.0,
+        data_url: h.data_url.0,
+        level_order: h.level_order.0,
+        courses: h.course.0,
     };
     if header.data_url.is_empty() {
         return Err(TableError::Format("header has no data_url".into()));
@@ -238,25 +196,55 @@ fn hash(v: &str, len: usize) -> String {
     }
 }
 
+/// The entries a table may have: some eighty times the largest tables'.
+const MAX_ENTRIES: usize = 200_000;
+
 /// A data JSON's entries (those with a hash), read straight from its
 /// text: a value of any JSON type where text is expected (a level as a
-/// number), anything but an object in the list passed by.
+/// number), anything but an object in the list passed by, and what has no
+/// hash dropped as it is read (a list of millions of empty entries costs
+/// nothing); more than [`MAX_ENTRIES`] is no table.
 pub(crate) fn parse_data(text: &str) -> Result<Vec<TableEntry>, TableError> {
-    let rows: Vec<Row> =
-        serde_json::from_str(text).map_err(|e| TableError::Format(format!("data: {e}")))?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| r.0)
-        .filter(|e| !e.md5.is_empty() || !e.sha256.is_empty())
-        .collect())
+    struct Entries(Vec<TableEntry>);
+    impl<'de> Deserialize<'de> for Entries {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Entries, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Entries;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a list of entries")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Entries, A::Error> {
+                    let mut out = Vec::new();
+                    while let Some(Row(row)) = s.next_element()? {
+                        let Some(e) = row.filter(|e| !e.md5.is_empty() || !e.sha256.is_empty())
+                        else {
+                            continue;
+                        };
+                        if out.len() == MAX_ENTRIES {
+                            return Err(serde::de::Error::custom(format_args!(
+                                "more than {MAX_ENTRIES} entries"
+                            )));
+                        }
+                        out.push(e);
+                    }
+                    Ok(Entries(out))
+                }
+            }
+            d.deserialize_seq(V)
+        }
+    }
+    serde_json::from_str::<Entries>(text)
+        .map(|e| e.0)
+        .map_err(|e| TableError::Format(format!("data: {e}")))
 }
 
+use serde::de::value::MapAccessDeserializer;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-/// A visitor's methods for the JSON values it takes as `$v` (a string, a
-/// number, a boolean as text; null, a list as nothing), the list read
-/// through.
-macro_rules! scalars {
+/// A visitor's methods for the JSON values that are text, taken as `$v`:
+/// a string, a number, a boolean.
+macro_rules! one {
     ($t:ty, $v:expr) => {
         fn visit_str<E>(self, v: &str) -> Result<$t, E> {
             Ok($v(v.to_string()))
@@ -277,6 +265,13 @@ macro_rules! scalars {
             let n = serde_json::Number::from_f64(v).map(|n| n.to_string());
             Ok($v(n.unwrap_or_default()))
         }
+    };
+}
+
+/// [`one`], and null and a list (read through) as no text.
+macro_rules! scalars {
+    ($t:ty, $v:expr) => {
+        one!($t, $v);
         fn visit_unit<E>(self) -> Result<$t, E> {
             Ok($v(String::new()))
         }
@@ -287,8 +282,8 @@ macro_rules! scalars {
     };
 }
 
-/// A JSON value as text ([`s`]: a string, a number, a boolean; else
-/// nothing).
+/// A JSON value as text (a string, a number, a boolean; else nothing).
+#[derive(Default)]
 struct Text(String);
 
 impl<'de> Deserialize<'de> for Text {
@@ -307,6 +302,168 @@ impl<'de> Deserialize<'de> for Text {
         }
         d.deserialize_any(V)
     }
+}
+
+/// A JSON value as a list of texts: a list's values that are text (the
+/// others, and empty ones, passed by), null as none, any other value as
+/// the one text it is.
+#[derive(Default)]
+struct Texts(Vec<String>);
+
+impl<'de> Deserialize<'de> for Texts {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Texts, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Texts;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("texts")
+            }
+            fn visit_unit<E>(self) -> Result<Texts, E> {
+                Ok(Texts(Vec::new()))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Texts, A::Error> {
+                let mut out = Vec::new();
+                while let Some(Text(t)) = s.next_element()? {
+                    if !t.is_empty() {
+                        out.push(t);
+                    }
+                }
+                Ok(Texts(out))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Texts, A::Error> {
+                while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Texts(vec![String::new()]))
+            }
+            one!(Texts, |t| Texts(vec![t]));
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A course of a header's `course`.
+#[derive(Deserialize)]
+struct CourseRow {
+    #[serde(default)]
+    name: Text,
+    #[serde(default)]
+    md5: Texts,
+    #[serde(default)]
+    sha256: Texts,
+    #[serde(default)]
+    constraint: Texts,
+    #[serde(default, deserialize_with = "crate::json::objects")]
+    trophy: Vec<TrophyRow>,
+}
+
+#[derive(Deserialize)]
+struct TrophyRow {
+    #[serde(default)]
+    name: Text,
+    #[serde(default, deserialize_with = "rate")]
+    missrate: f64,
+    #[serde(default, deserialize_with = "rate")]
+    scorerate: f64,
+}
+
+impl From<CourseRow> for Course {
+    fn from(c: CourseRow) -> Course {
+        let trophy = |t: TrophyRow| CourseTrophy {
+            name: t.name.0,
+            missrate: t.missrate,
+            scorerate: t.scorerate,
+        };
+        Course {
+            name: c.name.0,
+            md5: c.md5.0,
+            sha256: c.sha256.0,
+            constraint: c.constraint.0,
+            trophy: c.trophy.into_iter().map(trophy).collect(),
+        }
+    }
+}
+
+/// A visitor's methods for a header's `course`, or for a list in it:
+/// one course (an object) alone, null and other values as none; a list's
+/// elements are `$inner`s.
+macro_rules! courses {
+    ($t:ident, $inner:ty) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<$t, D::Error> {
+                struct V;
+                impl<'de> Visitor<'de> for V {
+                    type Value = $t;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("courses")
+                    }
+                    one!($t, |_| $t(Vec::new()));
+                    fn visit_unit<E>(self) -> Result<$t, E> {
+                        Ok($t(Vec::new()))
+                    }
+                    fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<$t, A::Error> {
+                        let mut out = Vec::new();
+                        while let Some(inner) = s.next_element::<$inner>()? {
+                            out.extend(inner.0.into_iter().map(Course::from));
+                        }
+                        Ok($t(out))
+                    }
+                    fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<$t, A::Error> {
+                        let c = CourseRow::deserialize(MapAccessDeserializer::new(m))?;
+                        Ok($t(vec![c.into()]))
+                    }
+                }
+                d.deserialize_any(V)
+            }
+        }
+    };
+}
+
+/// A header's `course`: its courses (objects) in a list, or in lists in
+/// the list ([`CourseList`]), or one alone; anything else passed by.
+#[derive(Default)]
+struct Courses(Vec<Course>);
+courses!(Courses, CourseList);
+
+/// A list of courses in a header's `course`, or a course in it (what is
+/// in a list in such a list is none).
+struct CourseList(Vec<Course>);
+courses!(CourseList, crate::json::Object<CourseRow>);
+
+/// A trophy's rate: a number (else 0).
+fn rate<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = f64;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a number")
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<f64, E> {
+            Ok(v as f64)
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<f64, E> {
+            Ok(v as f64)
+        }
+        fn visit_f64<E>(self, v: f64) -> Result<f64, E> {
+            Ok(v)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<f64, E> {
+            Ok(0.0)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<f64, E> {
+            Ok(0.0)
+        }
+        fn visit_unit<E>(self) -> Result<f64, E> {
+            Ok(0.0)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<f64, A::Error> {
+            while s.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(0.0)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<f64, A::Error> {
+            while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(0.0)
+        }
+    }
+    d.deserialize_any(V)
 }
 
 /// An entry of a data JSON (None: not an object).
@@ -335,7 +492,7 @@ impl<'de> Deserialize<'de> for Row {
                         "comment" => &mut e.comment,
                         // a string or a list each, lower case, each once
                         "org_md5" | "org_md5s" => {
-                            for md5 in str_list(&m.next_value::<Value>()?) {
+                            for md5 in m.next_value::<Texts>()?.0 {
                                 let md5 = md5.trim().to_ascii_lowercase();
                                 if !md5.is_empty() && !e.org_md5.contains(&md5) {
                                     e.org_md5.push(md5);
@@ -379,11 +536,6 @@ pub(crate) fn decode_body(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The largest table page, and header or data JSON, read (as the original
-/// BeMusicSeeker reads them).
-const PAGE_CAP: usize = 10 << 20;
-pub(crate) const JSON_CAP: usize = 100 << 20;
-
 /// The 発狂 / 通常 tables (ribbit.xyz's, kept by darksabun.club).
 pub const INSANE: &str = "https://darksabun.club/table/archive/insane1/";
 pub(crate) const NORMAL: &str = "https://darksabun.club/table/archive/normal1/";
@@ -398,7 +550,7 @@ pub const MOVED: &[(&str, &str)] = &[
 /// Next action of a [`TableLoader`].
 #[derive(Debug)]
 enum Step {
-    Get(String),
+    Get(String, Kind),
     Done(Box<DifficultyTable>),
 }
 
@@ -439,7 +591,7 @@ impl TableLoader {
                     log::info!("{} failed ({e}); trying mirror {mirror}", self.source);
                     self.mirror_used = true;
                     self.stage = Stage::Page(mirror.to_string());
-                    Ok(Step::Get(mirror.to_string()))
+                    Ok(Step::Get(mirror.to_string(), Kind::Page))
                 }
                 None => Err(e),
             },
@@ -448,16 +600,17 @@ impl TableLoader {
 
     fn advance(&mut self, body: Answer) -> Result<Step, TableError> {
         let body = body.map_err(|e| TableError::Http(e.to_string()))?;
-        let cap = match self.stage {
-            Stage::Page(_) => PAGE_CAP,
-            _ => JSON_CAP,
-        };
-        if body.len() > cap {
-            let mib = body.len() >> 20;
-            return Err(TableError::Format(format!("{mib} MiB: too large")));
+        // (a driver reads no more; one that did is not parsed)
+        let limit = match self.stage {
+            Stage::Page(_) => Kind::Page,
+            Stage::Header(_) => Kind::Header,
+            Stage::Data(_) => Kind::TableData,
+        }
+        .limit();
+        if body.len() > limit {
+            return Err(TableError::Http(crate::net::too_large(limit).to_string()));
         }
         let text = decode_body(&body);
-        let json = |t: &str| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}'));
         match std::mem::replace(&mut self.stage, Stage::Page(String::new())) {
             Stage::Page(url) => {
                 if text.trim_start().starts_with('{') {
@@ -469,15 +622,13 @@ impl TableLoader {
                 })?;
                 let hu = join(&url, &meta)?;
                 self.stage = Stage::Header(hu.clone());
-                Ok(Step::Get(hu))
+                Ok(Step::Get(hu, Kind::Header))
             }
             Stage::Header(url) => {
-                let header = parse_header(
-                    &json(&text).map_err(|e| TableError::Format(format!("header: {e}")))?,
-                )?;
+                let header = parse_header(text.trim_start_matches('\u{feff}'))?;
                 let du = join(&url, &header.data_url)?;
                 self.stage = Stage::Data(header);
-                Ok(Step::Get(du))
+                Ok(Step::Get(du, Kind::TableData))
             }
             Stage::Data(header) => {
                 let entries = parse_data(text.trim_start_matches('\u{feff}'))?;
@@ -502,12 +653,12 @@ impl Task for TableLoader {
     fn start(&mut self) -> Next<Self::Output> {
         self.stage = Stage::Page(self.source.clone());
         self.mirror_used = false;
-        Next::Ask(Request::Get(self.source.clone()))
+        Next::Ask(Request::Get(self.source.clone(), Kind::Page))
     }
 
     fn feed(&mut self, answer: Answer) -> Next<Self::Output> {
         match self.step(answer) {
-            Ok(Step::Get(u)) => Next::Ask(Request::Get(u)),
+            Ok(Step::Get(u, kind)) => Next::Ask(Request::Get(u, kind)),
             Ok(Step::Done(t)) => Next::Done(Ok(*t)),
             Err(e) => Next::Done(Err(e)),
         }
@@ -529,17 +680,19 @@ fn level_key(l: &str) -> (u8, f64, String) {
 impl DifficultyTable {
     /// Levels in display order (`level_order` if given, else natural order).
     pub fn levels(&self) -> Vec<String> {
+        // (a table sets how many of each there are)
+        let mut known = std::collections::HashSet::new();
         let mut seen: Vec<String> = Vec::new();
         for l in &self.header.level_order {
-            if !seen.contains(l) {
+            if known.insert(l.as_str()) {
                 seen.push(l.clone());
             }
         }
         let mut rest: Vec<String> = self
             .entries
             .iter()
+            .filter(|e| !known.contains(e.level.as_str()))
             .map(|e| e.level.clone())
-            .filter(|l| !seen.contains(l))
             .collect();
         rest.sort_by(|a, b| {
             level_key(a)
@@ -656,5 +809,127 @@ mod tests {
         // a table kept before there were any
         let old: TableEntry = serde_json::from_str(r#"{"md5":"a","sha256":"","level":"1","title":"","artist":"","url":"","url_diff":"","comment":""}"#).unwrap();
         assert!(old.org_md5.is_empty());
+    }
+
+    /// A header's values of any JSON type, its courses however they are
+    /// listed.
+    #[test]
+    fn headers_of_any_shape() {
+        let h = parse_header(
+            r#"{"name":1,"symbol":true,"tag":null,"data_url":"d.json","level_order":"x",
+                "x":{"y":[1,{"z":[]}]},
+                "course":{"name":"c","md5":"a","sha256":null,"constraint":["g",1,"",[2],{}],
+                    "trophy":[{"name":"t","missrate":5,"scorerate":"x"},3,{"scorerate":1.5}]}}"#,
+        )
+        .unwrap();
+        assert_eq!((&*h.name, &*h.symbol, &*h.tag), ("1", "true", ""));
+        assert_eq!(h.level_order, ["x"]);
+        let c = &h.courses[0];
+        assert_eq!(
+            (h.courses.len(), &*c.name, &c.md5[..]),
+            (1, "c", &["a".to_string()][..])
+        );
+        assert!(c.sha256.is_empty());
+        assert_eq!(c.constraint, ["g", "1"]);
+        let rates: Vec<(f64, f64)> = c.trophy.iter().map(|t| (t.missrate, t.scorerate)).collect();
+        assert_eq!(rates, [(5.0, 0.0), (0.0, 1.5)]);
+        // courses in a list, in lists in the list; what else is there is none
+        let h = parse_header(
+            r#"{"data_url":"d","level_order":[0,"1",null,2.5],
+                "course":[{"name":"a"},[{"name":"b"},7,[{"name":"deep"}],{"name":"c"}],"x",null]}"#,
+        )
+        .unwrap();
+        assert_eq!(h.level_order, ["0", "1", "2.5"]);
+        let names: Vec<&str> = h.courses.iter().map(|c| &*c.name).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        for (odd, why) in [
+            ("[]", "not an object"),
+            (r#"["n","s","t","d.json"]"#, "not an object"),
+            ("{", "header: "),
+            (r#"{"name":"x"}"#, "no data_url"),
+            (r#"{"data_url":{}}"#, "no data_url"),
+        ] {
+            let e = parse_header(odd).unwrap_err().to_string();
+            assert!(e.contains(why), "{odd}: {e}");
+        }
+    }
+
+    /// A data JSON made to be large to hold: what is no entry is dropped
+    /// as it is read, and entries beyond counting are no table.
+    #[test]
+    fn data_made_to_be_large() {
+        let none = format!("[{}{{}}]", "1,{},[],{\"md5\":\"x\"},".repeat(1_000_000));
+        assert!(parse_data(&none).unwrap().is_empty());
+        let row = r#"{"md5":"0123456789abcdef0123456789abcdef"},"#;
+        let full = format!("[{}1]", row.repeat(MAX_ENTRIES));
+        assert_eq!(parse_data(&full).unwrap().len(), MAX_ENTRIES);
+        let more = format!("[{}1]", row.repeat(MAX_ENTRIES + 1));
+        let e = parse_data(&more).unwrap_err().to_string();
+        assert!(e.contains("more than 200000 entries"), "{e}");
+        // a list where one text is expected is read past, not kept
+        let listed = format!(
+            r#"[{{"md5":"0123456789abcdef0123456789abcdef","org_md5":[{}"A"],"title":[{}1]}}]"#,
+            "0,[],".repeat(500_000),
+            "0,".repeat(500_000)
+        );
+        let e = parse_data(&listed).unwrap();
+        assert_eq!((e[0].org_md5.len(), &*e[0].title), (2, ""));
+    }
+
+    /// Each of a table's answers is taken no larger than its kind may be,
+    /// whoever read it, and asked as its kind.
+    #[test]
+    fn answers_of_their_kinds() {
+        let mut l = TableLoader::new("https://ex.com/t/");
+        let page = "https://ex.com/t/".to_string();
+        assert!(matches!(l.start(), Next::Ask(r) if r == Request::Get(page, Kind::Page)));
+        let meta = br#"<meta name="bmstable" content="h.json">"#.to_vec();
+        let header = "https://ex.com/t/h.json".to_string();
+        let asked = l.feed(Ok(meta));
+        assert!(matches!(asked, Next::Ask(r) if r == Request::Get(header, Kind::Header)));
+        let data = "https://ex.com/t/d.json".to_string();
+        let asked = l.feed(Ok(br#"{"data_url":"d.json"}"#.to_vec()));
+        assert!(matches!(asked, Next::Ask(r) if r == Request::Get(data, Kind::TableData)));
+        let mut l = TableLoader::new("https://ex.com/t/");
+        l.start();
+        l.feed(Ok(br#"<meta name="bmstable" content="h.json">"#.to_vec()));
+        let mut long = br#"{"data_url":"d.json","x":""#.to_vec();
+        long.resize(Kind::Header.limit(), b'x');
+        long.extend(b"\"}");
+        let Next::Done(Err(e)) = l.feed(Ok(long)) else {
+            panic!("a header over its limit was read")
+        };
+        assert!(e.to_string().contains("larger than 1 MiB"), "{e}");
+    }
+
+    /// A table of levels beyond counting is put in order in its size's
+    /// time.
+    #[test]
+    fn many_levels() {
+        let n = 100_000;
+        let t = DifficultyTable {
+            header: TableHeader {
+                level_order: (0..n)
+                    .map(|i| format!("o{i}"))
+                    .chain(["o1".into()])
+                    .collect(),
+                ..Default::default()
+            },
+            entries: (0..n)
+                .map(|i| TableEntry {
+                    level: format!("{}", i % (n / 2)),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let since = std::time::Instant::now();
+        let levels = t.levels();
+        assert!(since.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(levels.len(), n + n / 2);
+        assert_eq!(
+            (&*levels[1], &*levels[n], &*levels[n + 10]),
+            ("o1", "0", "10")
+        );
     }
 }

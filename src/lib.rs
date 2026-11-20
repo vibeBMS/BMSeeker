@@ -48,6 +48,7 @@ pub mod fs;
 pub mod hosts;
 pub mod import;
 pub mod install;
+mod json;
 pub mod library;
 pub mod links;
 pub mod manbow;
