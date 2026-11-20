@@ -68,6 +68,9 @@ jobs:
           # only the default branch writes the cache (other branches and pull
           # requests read it), so their entries do not evict it
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      # which updates the Dependabot merge workflow holds
+      - run: python3 .github/dependabot_merge_test.py
+        if: matrix.os == 'ubuntu-latest'
       - run: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --all-targets --features cli -- -D warnings
