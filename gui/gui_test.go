@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,7 @@ case "$*" in
     echo '{"level":"1","label":"★1","title":"Song A","artist":"x","md5":"a","url":"https://d/a.zip","url_diff":""}'
     echo '{"level":"2","label":"★2","title":"Song B","artist":"y","md5":"b","url":"https://1drv.ms/b","url_diff":""}'
     echo "2 of 9 charts missing" >&2 ;;
+  *"link page-script"*) echo '{"script":"/* by the library */"}' ;;
   *"Song A"*) echo '{"title":"Song A","state":"added","path":"/lib/Song A","files":3}' ;;
   *"Song B"*) echo '{"title":"Song B","state":"page","link":"https://1drv.ms/b"}' ;;
   *"Song C"*)
@@ -246,6 +248,96 @@ func TestOnlyWebLinksOpen(t *testing.T) {
 		if !a.browsable(page{Link: l}) {
 			t.Errorf("%q is a web link", l)
 		}
+	}
+}
+
+// A page's download is kept under a name of the window's making, beside
+// what the downloads folder holds, whatever the page names it; the name
+// goes to the CLI as a value. The script its window runs is the CLI's.
+func TestPageDownloads(t *testing.T) {
+	a, _ := fakeApp(t)
+	dir := t.TempDir()
+	held := map[string]string{"scan.json": "[]", "waiting.bms": "#TITLE A", "page-1.part": "x"}
+	for n, body := range held {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one, err := savePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := savePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{one, two} {
+		st, err := os.Stat(p)
+		if err != nil || filepath.Dir(p) != dir || held[filepath.Base(p)] != "" || st.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v, %v", p, st, err)
+		}
+	}
+	if one == two {
+		t.Errorf("one name for two downloads: %s", one)
+	}
+	for n, body := range held {
+		if got, _ := os.ReadFile(filepath.Join(dir, n)); string(got) != body {
+			t.Errorf("%s is now %q", n, got)
+		}
+	}
+	args := importArgs("-lib", "--reinstall", one)
+	end := slices.Index(args, "--")
+	if end < 0 || !slices.Equal(args[end+1:], []string{one}) ||
+		!slices.Contains(args[:end], "--name=--reinstall") || !slices.Contains(args[:end], "--library=-lib") {
+		t.Errorf("args %q", args)
+	}
+	if got := a.pageScript(); got != "/* by the library */" {
+		t.Errorf("script %q, log %q", got, a.log)
+	}
+}
+
+// The bundled CLI is run from the cache folder only as the bytes it was
+// built with, kept for its user alone; with no cache folder (no home),
+// from nowhere: not from a folder others can write.
+func TestBundledCLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", "")
+	data := []byte("#!/bin/sh\necho the CLI\n")
+	file, err := bundledPath("bmseeker", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(file)
+	if err != nil || !strings.HasPrefix(file, home) || st.Mode().Perm() != 0o700 {
+		t.Fatalf("%s: %v, %v", file, st, err)
+	}
+	if dir, _ := os.Stat(filepath.Dir(file)); dir.Mode().Perm() != 0o700 {
+		t.Errorf("its folder: %v", dir.Mode())
+	}
+	// another program there, of the same size: not run
+	other := []byte("#!/bin/sh\necho another\n")
+	if len(other) != len(data) {
+		t.Fatal("the test's programs differ in size")
+	}
+	if err := os.WriteFile(file, other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := bundledPath("bmseeker", data); err != nil || again != file {
+		t.Fatal(again, err)
+	}
+	if got, _ := os.ReadFile(file); string(got) != string(data) {
+		t.Errorf("run as %q", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(file), "*.tmp")); len(left) != 0 {
+		t.Errorf("left behind: %q", left)
+	}
+	if hashOf(file) != sha256.Sum256(data) || hashOf(file+".none") == sha256.Sum256(nil) {
+		t.Error("hashOf")
+	}
+	t.Setenv("HOME", "")
+	if p, err := bundledPath("bmseeker", data); err == nil {
+		t.Errorf("without a home it is kept in %s", p)
 	}
 }
 

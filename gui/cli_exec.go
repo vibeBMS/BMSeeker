@@ -44,7 +44,8 @@ var (
 )
 
 // cliPath is the CLI's executable: $BMSEEKER_CLI, else the bundled one
-// (written once into the user's cache folder), else `bmseeker` on the PATH.
+// (kept in the user's cache folder: bundledPath), else `bmseeker` on the
+// PATH.
 func cliPath() (string, error) {
 	cliOnce.Do(func() {
 		if p := os.Getenv("BMSEEKER_CLI"); p != "" {
@@ -60,33 +61,70 @@ func cliPath() (string, error) {
 			cliFile, cliErr = exec.LookPath(name)
 			return
 		}
-		sum := sha256.Sum256(data)
-		cache, err := os.UserCacheDir()
-		if err != nil {
-			cache = os.TempDir()
-		}
-		dir := filepath.Join(cache, "bmseeker", "cli-"+hex.EncodeToString(sum[:6]))
-		file := filepath.Join(dir, name)
-		if st, err := os.Stat(file); err == nil && st.Size() == int64(len(data)) {
-			cliFile = file
-			return
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			cliErr = err
-			return
-		}
-		tmp := file + ".tmp"
-		if err := os.WriteFile(tmp, data, 0o755); err != nil {
-			cliErr = err
-			return
-		}
-		if err := os.Rename(tmp, file); err != nil {
-			cliErr = err
-			return
-		}
-		cliFile = file
+		cliFile, cliErr = bundledPath(name, data)
 	})
 	return cliFile, cliErr
+}
+
+// bundledPath is the bundled CLI (data) as the file name in a folder of the
+// user's cache folder named after its hash. Without a cache folder (no
+// home) there is none: the temp folder is everyone's, and a program found
+// there would be run as this user.
+func bundledPath(name string, data []byte) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("no cache folder to keep the bundled bmseeker in (%v); $BMSEEKER_CLI names one to run instead", err)
+	}
+	sum := sha256.Sum256(data)
+	return placed(filepath.Join(cache, "bmseeker", "cli-"+hex.EncodeToString(sum[:6])), name, data, sum)
+}
+
+// placed puts data (whose SHA-256 is sum) in dir as the program name, its
+// user's alone, and returns its path. A file already there is run only
+// when it is the same byte for byte, by its hash: its size says nothing.
+func placed(dir, name string, data []byte, sum [sha256.Size]byte) (string, error) {
+	file := filepath.Join(dir, name)
+	if hashOf(file) == sum {
+		return file, nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	// (a new file of a name of its own, 0600 until it is whole)
+	tmp, err := os.CreateTemp(dir, name+".*.tmp")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	_, err = tmp.Write(data)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o700)
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), file)
+	}
+	if err != nil {
+		return "", err
+	}
+	return file, nil
+}
+
+// hashOf is the SHA-256 of the file at path (zero when it cannot be read).
+func hashOf(path string) (sum [sha256.Size]byte) {
+	f, err := os.Open(path)
+	if err != nil {
+		return sum
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return sum
+	}
+	h.Sum(sum[:0])
+	return sum
 }
 
 // passThrough runs the CLI with args, on this process's stdin, stdout and
