@@ -9,9 +9,13 @@
 //   bmseeker.pickFile() -> Promise<name | "">   a file for the next run's "{file}"
 //   bmseeker.downloadZip() -> Promise<number of bytes>
 //
-// ?proxy=<url> uses another CORS proxy (tests: a local one).
+// ?proxy=<url> uses another CORS proxy, on a page served from this computer
+// only (tests: a local one): anywhere else, a link to the page would choose
+// the server its every request goes through.
 (() => {
-  const PROXY = new URLSearchParams(location.search).get("proxy") || "https://proxy.vibebms.workers.dev/";
+  const local = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+  const asked = local && new URLSearchParams(location.search).get("proxy");
+  const PROXY = asked || "https://proxy.vibebms.workers.dev/";
   const LABELS = {
     vibe: "vibeBMS web library (this browser)",
     folder: "A folder on this computer (Chrome/Edge)",

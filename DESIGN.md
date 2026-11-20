@@ -433,7 +433,8 @@ line in, JSON Lines records and notes out as they come, an exit code.
 The commands are synchronous; a browser's files and network are not,
 except in a worker: `FileReaderSync` reads a `File`, and synchronous
 `XMLHttpRequest` makes a request (`net::Xhr`, the job's `Driver`, through
-vibeBMS's CORS proxy; `?proxy=<url>` uses another). Listing and writing
+vibeBMS's CORS proxy; `?proxy=<url>` uses another, only on a page served
+from localhost, as the tests' is). Listing and writing
 stay asynchronous, so the worker lists the target into a `Mirror` (each
 file's path, size and time; its bytes read when a command reads them),
 runs the command on it, then writes what changed (`Mirror::changes`:
