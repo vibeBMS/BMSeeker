@@ -23,8 +23,6 @@ if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Os -o "$out/pkg/bmseeker_web_bg.wasm" "$out/pkg/bmseeker_web_bg.wasm"
 fi
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/"
-# (as `mygo build -platform web` builds: production, no inspector)
 (cd gui && GOOS=js GOARCH=wasm go build -trimpath \
-  -ldflags "-s -w -X github.com/egoist/mygo.production=1 $identity" \
-  -tags mygo_noinspector,mygo_nodownload -o "$out/gui.wasm" .)
+  -ldflags "$release_ldflags" -tags "$release_tags" -o "$out/gui.wasm" .)
 echo "$out"
