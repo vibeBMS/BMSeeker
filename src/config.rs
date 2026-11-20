@@ -258,8 +258,9 @@ impl Default for Config {
             folder_naming: false,
             folder_name_format: crate::naming::DEFAULT_FORMAT.into(),
             sjis_only: false,
-            // (this crate's own tests ask servers they start on this
-            // machine)
+            // (off; on in this crate's own tests while those of
+            // `install::entry` that ask a server on this machine do not
+            // set it themselves)
             local_hosts: cfg!(test),
         }
     }

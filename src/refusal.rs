@@ -7,12 +7,16 @@
 //! hosts. A `Retry-After` is kept to by not asking again in this run at
 //! all.
 //!
-//! What refuses is the service's own word, not what a link or a table can
+//! What refuses is the service's own word, not what one link or table can
 //! make it say: a 401, 403 or 451 for a file a link leads to, or for a
-//! table's header or data, is that file's failure (any server has
-//! addresses that answer so), and a file that came is a browser check
-//! only where no file was sent (no name, no file host). The service
-//! charged is the one that answered, where the redirects ended.
+//! table's header or data, is that file's failure (any server has an
+//! address that answers so), and a file that came is a browser check
+//! only where no file was sent (no name, no file host). But a host that
+//! answers so for [`STRIKES`] different files' addresses, with no answer
+//! of its own that came between them, refuses BMSeeker its files: it is
+//! not asked for the rest of a table's, one after another. (Not a file
+//! host: there each is one file's quota or sharing, however many.) The
+//! service charged is the one that answered, where the redirects ended.
 //!
 //! [`Refusals`] is a run's memory of them, in its
 //! [`Context`](crate::hosts::Context), so every source, host and job of the
@@ -26,6 +30,7 @@ use crate::hosts::{Context, Link, NOT_WEB};
 use crate::install::job::{Driver, Effect, Fed};
 use crate::net::{Kind, NetError};
 use crate::progress::Progress;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Why a service is not asked.
@@ -33,6 +38,10 @@ use std::sync::{Arc, Mutex};
 pub enum Why {
     /// It answered this HTTP status (401, 403, 429, 451).
     Status(u16),
+    /// It answered this HTTP status (401, 403, 451) for [`STRIKES`]
+    /// files' addresses one after another, none of its answers coming
+    /// between them.
+    Files(u16),
     /// It answered with a browser check (a Cloudflare challenge page,
     /// Turnstile).
     Challenge,
@@ -58,11 +67,12 @@ impl Refusal {
         }
     }
 
-    /// What it was, for a program: `status`, `challenge`, `rate_limited`,
-    /// `earlier`.
+    /// What it was, for a program: `status`, `files`, `challenge`,
+    /// `rate_limited`, `earlier`.
     pub fn code(&self) -> &'static str {
         match self.why {
             Why::Status(_) => "status",
+            Why::Files(_) => "files",
             Why::Challenge => "challenge",
             Why::RateLimited => "rate_limited",
             Why::Earlier => "earlier",
@@ -72,7 +82,7 @@ impl Refusal {
     /// The HTTP status it answered, if that was it.
     pub fn status(&self) -> Option<u16> {
         match self.why {
-            Why::Status(n) => Some(n),
+            Why::Status(n) | Why::Files(n) => Some(n),
             _ => None,
         }
     }
@@ -83,6 +93,10 @@ impl std::fmt::Display for Refusal {
         let h = &self.host;
         match self.why {
             Why::Status(n) => write!(f, "{h} refused BMSeeker (HTTP {n})"),
+            Why::Files(n) => write!(
+                f,
+                "{h} refused BMSeeker {STRIKES} files one after another (HTTP {n})"
+            ),
             Why::Challenge => write!(
                 f,
                 "{h} answered with a browser check (a challenge or CAPTCHA page)"
@@ -107,6 +121,12 @@ pub(crate) fn refuses(url: &str, status: u16, endpoint: bool) -> bool {
         _ => false,
     }
 }
+
+/// The files' addresses a host may answer 401, 403 or 451 for, one after
+/// another, before it has refused BMSeeker its files ([`Why::Files`]):
+/// one link (or two) to an address that answers so says nothing of the
+/// host, a table's every file answered so does.
+pub const STRIKES: usize = 3;
 
 /// Whether `url` is on a file host ([`hosts::service_of`](crate::hosts)).
 fn file_host(url: &str) -> bool {
@@ -229,13 +249,19 @@ fn html_has(body: &[u8], marks: &[&[u8]], within: usize) -> bool {
 /// run's [`Context`](crate::hosts::Context); keep one context for as long
 /// as refusals should be kept to.
 #[derive(Debug, Default)]
-pub struct Refusals(Mutex<Vec<(Refusal, bool)>>);
+pub struct Refusals {
+    /// Each with whether it was told.
+    kept: Mutex<Vec<(Refusal, bool)>>,
+    /// By service, the files' addresses it answered 401, 403 or 451 for
+    /// since its last answer that came ([`STRIKES`]).
+    struck: Mutex<HashMap<String, Vec<String>>>,
+}
 
 impl Refusals {
     /// Whether `url`'s service refused: how.
     pub(crate) fn of(&self, url: &str) -> Option<Refusal> {
         let host = service(url);
-        let all = self.0.lock().unwrap();
+        let all = self.kept.lock().unwrap();
         all.iter()
             .find(|(r, _)| r.host == host)
             .map(|(r, _)| r.clone())
@@ -244,7 +270,7 @@ impl Refusals {
     /// `r` kept: its service is not asked again. The refusal kept for it
     /// (the first, when it had refused already).
     pub(crate) fn keep(&self, r: Refusal) -> Refusal {
-        let mut all = self.0.lock().unwrap();
+        let mut all = self.kept.lock().unwrap();
         if let Some((first, _)) = all.iter().find(|(k, _)| k.host == r.host) {
             return first.clone();
         }
@@ -256,7 +282,7 @@ impl Refusals {
     /// window's, `--skip-host`): skipped, and not told again.
     pub fn earlier(&self, host: &str) {
         let r = Refusal::of(host, Why::Earlier);
-        let mut all = self.0.lock().unwrap();
+        let mut all = self.kept.lock().unwrap();
         if !all.iter().any(|(k, _)| k.host == r.host) {
             all.push((r, true));
         }
@@ -265,7 +291,7 @@ impl Refusals {
     /// Every refusal kept.
     #[cfg(test)]
     pub(crate) fn all(&self) -> Vec<Refusal> {
-        self.0
+        self.kept
             .lock()
             .unwrap()
             .iter()
@@ -275,7 +301,7 @@ impl Refusals {
 
     /// The refusals kept since the last call (to tell a person once).
     fn news(&self) -> Vec<Refusal> {
-        let mut all = self.0.lock().unwrap();
+        let mut all = self.kept.lock().unwrap();
         all.iter_mut()
             .filter(|(_, told)| !*told)
             .map(|(r, told)| {
@@ -283,6 +309,27 @@ impl Refusals {
                 r.clone()
             })
             .collect()
+    }
+
+    /// The file at `url` was answered `status` (401, 403, 451: its own
+    /// failure): the refusal this makes, if it is the [`STRIKES`]th
+    /// address its host (no file host) answered so one after another.
+    fn strike(&self, url: &str, status: u16) -> Option<Refusal> {
+        if !matches!(status, 401 | 403 | 451) || file_host(url) {
+            return None;
+        }
+        let mut struck = self.struck.lock().unwrap();
+        let files = struck.entry(service(url)).or_default();
+        if !files.iter().any(|f| f == url) {
+            files.push(url.to_string());
+        }
+        (files.len() >= STRIKES).then(|| Refusal::of(url, Why::Files(status)))
+    }
+
+    /// An answer of `url`'s host came: the files it refused before count
+    /// no more.
+    fn answered(&self, url: &str) {
+        self.struck.lock().unwrap().remove(&service(url));
     }
 
     /// Before `effect` is done: what it gets at once when its service
@@ -303,36 +350,45 @@ impl Refusals {
     }
 
     /// What came of `effect` (a request, or a download): an answer that
-    /// refuses (a status [`refuses`], a browser check) is kept and fails
-    /// so, told to `progress`.
+    /// refuses (a status [`refuses`], a browser check, the [`STRIKES`]th
+    /// file refused one after another) is kept and fails so, told to
+    /// `progress`.
     pub fn after(&self, effect: &Effect, fed: Fed, progress: Option<&Progress>) -> Fed {
-        let of_error = |e: &NetError, from: &str, endpoint: bool| match e {
-            NetError::Status(n) if refuses(from, *n, endpoint) => {
+        // (`file`: what is asked is a file, not an endpoint of the
+        // service's own)
+        let of_error = |e: &NetError, from: &str, file: bool| match e {
+            NetError::Status(n) if refuses(from, *n, !file) => {
                 Some(Refusal::of(from, Why::Status(*n)))
             }
+            NetError::Status(n) if file => self.strike(from, *n),
             NetError::Refused(r) => Some(r.clone()),
             _ => None,
         };
+        let came = |check: bool, from: &str| {
+            if !check {
+                self.answered(from);
+            }
+            check.then(|| Refusal::of(from, Why::Challenge))
+        };
         let (refusal, http) = match (effect, &fed) {
             (Effect::Http(r), Fed::Http(Err(e))) => {
-                (of_error(e, r.url(), endpoint(r.kind())), true)
+                (of_error(e, r.url(), !endpoint(r.kind())), true)
             }
             // (a page asked for that came as a check; a table's or an
             // API's JSON is whatever it is)
-            (Effect::Http(r), Fed::Http(Ok(body))) => (
-                (r.kind() == Kind::Page && checked(body))
-                    .then(|| Refusal::of(r.url(), Why::Challenge)),
-                true,
-            ),
+            (Effect::Http(r), Fed::Http(Ok(body))) => {
+                let check = r.kind() == Kind::Page && checked(body);
+                (came(check, r.url()), true)
+            }
             (Effect::Download { target, .. }, Fed::Downloaded(Err(u))) => {
                 let at = refused_at(&target.url, u.at.as_deref());
-                (of_error(&u.error, at, false), false)
+                (of_error(&u.error, at, true), false)
             }
             // (a file a host stores is its uploader's, whatever is in it)
             (Effect::Download { target, .. }, Fed::Downloaded(Ok(s))) => {
                 let at = refused_at(&target.url, s.at.as_deref());
                 let check = s.name.is_none() && !file_host(at) && checked(&s.head);
-                (check.then(|| Refusal::of(at, Why::Challenge)), false)
+                (came(check, at), false)
             }
             _ => (None, false),
         };
@@ -702,7 +758,8 @@ mod tests {
     const CHECK_PAGE: &[u8] = b"<html><head><title>Just a moment...</title></head></html>";
 
     /// What a link or a table can make a server say refuses no service:
-    /// an address that answers 403, a stored file that reads as a check.
+    /// an address (or two) that answers 403, a stored file that reads as
+    /// a check.
     #[test]
     fn what_a_link_names_refuses_no_service() {
         let stored = |name: Option<&str>, at: &str| {
@@ -733,7 +790,7 @@ mod tests {
         for effect in [
             download("https://mirror.test/closed/a.zip"),
             get_of("https://mirror.test/closed/header.json", Kind::Header),
-            get_of("https://mirror.test/closed/data.json", Kind::TableData),
+            get_of("https://other.test/closed/data.json", Kind::TableData),
             download("https://drive.usercontent.google.com/download?id=1"),
             download("https://raw.githubusercontent.com/a/b/main/c.zip"),
             download("https://host.test/sent-as-a-file"),
@@ -764,6 +821,92 @@ mod tests {
         ));
         let hosts: Vec<String> = cx.refused.all().into_iter().map(|r| r.host).collect();
         assert_eq!(hosts, ["mirror.test", "page.test"]);
+    }
+
+    /// A host that answers 403 for file after file has refused BMSeeker
+    /// its files: three different addresses one after another, no answer
+    /// of its own coming between them. Never a file host.
+    #[test]
+    fn files_refused_one_after_another() {
+        let net = Asked {
+            asked: RefCell::default(),
+            answer: &|u| match u {
+                u if u.contains("/closed/") && u.ends_with(".json") => {
+                    Fed::Http(Err(NetError::Status(403)))
+                }
+                u if u.contains("/closed/") || u.contains("drive.google.com") => {
+                    Fed::Downloaded(Err(NetError::Status(403).into()))
+                }
+                u if u.contains("/moved/") => Fed::Downloaded(Err(Unserved {
+                    error: NetError::Status(451),
+                    at: Some(u.replace("short.test/moved", "host.test/closed")),
+                })),
+                _ => Fed::Downloaded(Ok(Served::bytes(b"PK\x03\x04".to_vec(), None, None))),
+            },
+        };
+        let told = RefCell::new(Vec::new());
+        let tell = |r: &Refusal| told.borrow_mut().push(r.clone());
+        let cx = Context::default();
+        let g = Guarded::new(&net, &cx).telling(&tell);
+        let error = |f: Fed| match f {
+            Fed::Downloaded(Err(u)) => Some(u.error),
+            Fed::Http(Err(e)) => Some(e),
+            _ => None,
+        };
+        let closed = |n: u32| download(&format!("https://host.test/closed/{n}.zip"));
+        // one link's 403 refuses nothing, however often it is tried
+        for _ in 0..5 {
+            assert_eq!(error(g.perform(closed(1))), Some(NetError::Status(403)));
+        }
+        // nor a second; and an answer of the host's that came between
+        // them and the next has them count no more
+        assert_eq!(error(g.perform(closed(2))), Some(NetError::Status(403)));
+        assert_eq!(
+            error(g.perform(download("https://host.test/open/a.zip"))),
+            None
+        );
+        assert_eq!(error(g.perform(closed(3))), Some(NetError::Status(403)));
+        // (another host's are its own)
+        for n in 1..=2 {
+            let other = download(&format!("https://other.test/closed/{n}.zip"));
+            assert_eq!(error(g.perform(other)), Some(NetError::Status(403)));
+        }
+        // a table's data there, then a third file (where a short link's
+        // redirects ended): the host's refusal
+        let data = get_of("https://www.host.test/closed/data.json", Kind::TableData);
+        assert_eq!(error(g.perform(data)), Some(NetError::Status(403)));
+        assert!(cx.refused.all().is_empty());
+        let third = error(g.perform(download("https://short.test/moved/5.zip")));
+        let Some(NetError::Refused(r)) = third else {
+            panic!("{third:?}")
+        };
+        assert_eq!((r.host.as_str(), r.why), ("host.test", Why::Files(451)));
+        assert_eq!((r.code(), r.status()), ("files", Some(451)));
+        assert_eq!(
+            r.to_string(),
+            "host.test refused BMSeeker 3 files one after another (HTTP 451): \
+             skipped for the rest of this run"
+        );
+        // not asked again, for a file that would come either; told once
+        let asked = net.asked.borrow().len();
+        for u in [
+            "https://host.test/open/a.zip",
+            "https://host.test/closed/6.zip",
+        ] {
+            assert!(matches!(
+                error(g.perform(download(u))),
+                Some(NetError::Refused(_))
+            ));
+        }
+        assert_eq!(net.asked.borrow().len(), asked);
+        assert_eq!(*told.borrow(), [r]);
+        // a file host's 403s are each one file's (its quota, its
+        // sharing), however many
+        for n in 0..10 {
+            let file = download(&format!("https://drive.google.com/uc?id={n}"));
+            assert_eq!(error(g.perform(file)), Some(NetError::Status(403)));
+        }
+        assert_eq!(cx.refused.all().len(), 1);
     }
 
     /// A refusal is the service's that answered: where a short link's

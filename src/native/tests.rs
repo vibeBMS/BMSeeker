@@ -11,9 +11,16 @@ fn get(n: &Native, url: &str) -> crate::net::Answer {
     run_job(&mut TaskJob::new(page), n)
 }
 
-/// A transport as it is set unless the settings say otherwise: hosts of
-/// this machine and its networks are not asked (the tests' own servers
-/// are there, so the tests' default asks them).
+/// The settings that ask the tests' servers, which are on this machine.
+fn local() -> Context {
+    Context::new(Config {
+        local_hosts: true,
+        ..Default::default()
+    })
+}
+
+/// The settings as they are unless they say otherwise: hosts of this
+/// machine and its networks are not asked.
 fn public_only() -> Context {
     Context::new(Config {
         local_hosts: false,
@@ -46,7 +53,7 @@ fn file_names() {
 #[test]
 fn one_connection() {
     let s = serve(vec![("/a", Reply::ok("1")), ("/b", Reply::ok("22"))]);
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     for p in ["/a", "/b", "/a"] {
         let page = Request::Get(format!("{}{p}", s.url), Kind::Page);
         let got = n.perform(Effect::Http(page));
@@ -64,7 +71,7 @@ fn busy_then_answered() {
         ("/t", Reply::ok("table")),
         ("/gone", Reply::status(404, "")),
     ]);
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     let get = |p: &str| get(&n, &format!("{}{p}", s.url));
     let t = std::time::Instant::now();
     assert_eq!(get("/t"), Ok(b"table".to_vec()));
@@ -91,7 +98,7 @@ fn downloads() {
         ("/changed", Reply::ok(changed)),
     ]);
     let dir = tmp("native-dl");
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     let download = |url: String, mega_key| -> Served {
         let target = Target {
             mega_key,
@@ -141,7 +148,7 @@ fn downloads_share_a_connection() {
         ("/b.zip", Reply::ok(big.clone())),
     ]);
     let dir = tmp("native-dl2");
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     let mut heads = Vec::new();
     for p in ["/a.zip", "/b.zip", "/a.zip"] {
         let effect = Effect::Download {
@@ -162,7 +169,7 @@ fn downloads_share_a_connection() {
 #[test]
 fn one_guard() {
     let s = serve(vec![("/a", Reply::status(403, "")), ("/b", Reply::ok("b"))]);
-    let cx = Context::default();
+    let cx = local();
     cx.refused.earlier(&s.url);
     let n = Native::new(&cx);
     let ask = |d: &dyn Driver, p: &str| {
@@ -210,7 +217,7 @@ fn a_stalled_download_cancels() {
     });
     let dir = tmp("stall");
     let t = std::time::Instant::now();
-    let n = Native::new(&Context::default().with_progress(p.clone()));
+    let n = Native::new(&local().with_progress(p.clone()));
     let r = download(&n, format!("http://{addr}/a.zip"), &dir.join("a"));
     assert_eq!(r.map(|_| ()).map_err(|u| u.error), Err(NetError::Cancelled));
     // (what came of it is not left)
@@ -291,7 +298,7 @@ fn user_agents_sent() {
     });
     assert_eq!(ureq_own, HTTP_CLIENT, "bump config::HTTP_CLIENT");
 
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     let sent = user_agent_heard(|url| {
         get(&n, &url).unwrap();
     });
@@ -300,6 +307,7 @@ fn user_agents_sent() {
     let app = "vibeBMS/0.1.0 (+https://github.com/vibeBMS/vibe)";
     let n = Native::new(&Context::new(Config {
         user_agent: user_agent_with(app),
+        local_hosts: true,
         ..Default::default()
     }));
     let dir = tmp("native-ua");
@@ -333,10 +341,7 @@ fn local_hosts_are_not_asked() {
     assert!(s.asked().is_empty(), "{:?}", s.asked());
     assert!(!dir.join("slot").exists());
     // with the setting: asked
-    let n = Native::new(&Context::new(Config {
-        local_hosts: true,
-        ..Default::default()
-    }));
+    let n = Native::new(&local());
     assert_eq!(get(&n, &format!("{}/a", s.url)), Ok(b"secret".to_vec()));
 }
 
@@ -362,7 +367,7 @@ fn each_redirect_is_kept_to_the_runs_refusals() {
     ]);
     let dir = tmp("native-hops");
     let at = |p: &str| format!("{}{p}", s.url);
-    let cx = Context::default();
+    let cx = local();
     let n = Native::new(&cx);
     let got = download(&n, at("/r"), &dir.join("slot")).unwrap();
     assert_eq!(got.at, Some(at("/f.zip?x=1")));
@@ -395,7 +400,7 @@ fn answers_are_read_to_their_kinds_limit() {
     assert!(small.len() < 64 << 10);
     let gzip = |body: &[u8]| Reply::ok(body.to_vec()).header("Content-Encoding", "gzip");
     let s = serve(vec![("/api", gzip(&small)), ("/page", gzip(&small))]);
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     let ask = |p: &str, kind| {
         let r = Request::Get(format!("{}{p}", s.url), kind);
         match n.perform(Effect::Http(r)) {
@@ -425,7 +430,7 @@ fn a_slot_is_made_anew() {
     let (kept, slot) = (dir.join("kept"), dir.join("slot"));
     std::fs::write(&kept, "kept").unwrap();
     std::os::unix::fs::symlink(&kept, &slot).unwrap();
-    let n = Native::new(&Context::default());
+    let n = Native::new(&local());
     download(&n, format!("{}/a.zip", s.url), &slot).unwrap();
     assert_eq!(std::fs::read(&kept).unwrap(), b"kept");
     let made = std::fs::symlink_metadata(&slot).unwrap();
