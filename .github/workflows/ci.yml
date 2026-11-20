@@ -18,9 +18,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Only the default branch's newest cache of each job stays (this
+  # Only the default branch's cache of each job used last stays (this
   # workflow's and build.yml's): other refs' entries and the default
-  # branch's older ones (left when Cargo.lock, the toolchain or go.sum
+  # branch's others (left when Cargo.lock, the toolchain or go.sum
   # changed) are deleted, so the repository's 10 GB hold one set. It runs
   # first, beside the builds, so a newer push cancelling this run does not
   # skip it, and the space is free before this run saves. A replaced key
@@ -39,7 +39,7 @@ jobs:
           # rust-cache: v0-rust-<key>-<job>-<os>-<arch>-<environment>-<lockfiles>;
           # setup-go: setup-go-<os>-<arch>-<image>-go-<version>-<go.sum hash>;
           # any other key: only other refs' entries
-          gh cache list --limit 1000 --sort created_at --order desc \
+          gh cache list --limit 1000 --sort last_accessed_at --order desc \
             --json id,key,ref,sizeInBytes --jq '.[] | "\(.id)\t\(.key)\t\(.ref)\t\(.sizeInBytes)"' |
             awk -F'\t' -v main="$MAIN" '{
               job = $2
