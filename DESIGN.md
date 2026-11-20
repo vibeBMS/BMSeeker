@@ -80,7 +80,9 @@ would.
 
 - `Acquire`: one link to its file (resolved through the hosts; a page
   reached through redirects opened from where it ended; a page's other
-  links tried; Google Drive's quota told apart from a page).
+  links tried; Google Drive's quota told apart from a page). A link that
+  is not an http(s) one is a failure, never a page for a browser. The
+  file's name, whoever gave it (the host, the server), is one file name.
 - `Files`: several links' files in order (a skin, an event's work).
 - `Install`: a song (or its separate chart) from its links, then each
   source's, into the library, until one brings it in.

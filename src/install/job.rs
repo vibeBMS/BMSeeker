@@ -388,8 +388,11 @@ impl Job for Acquire {
     fn start(&mut self) -> Step<Self::Output> {
         self.cx.stage(crate::progress::Stage::Finding);
         if self.plain {
-            let url = self.r.task.link().to_string();
-            return self.resolved(Step::Done(Ok(Target::url(url))));
+            let target = match Link::parse(self.r.task.link(), 0) {
+                Some(l) => Ok(Target::url(l.url)),
+                None => Err(Fetch::Failed(crate::hosts::NOT_WEB.into())),
+            };
+            return self.resolved(Step::Done(target));
         }
         let step = self.r.start();
         self.resolved(step)

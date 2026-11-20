@@ -119,6 +119,11 @@ pub(crate) struct Link {
     pub(crate) hops: u8,
 }
 
+/// What a link that is not an http(s) one comes to: no request is made
+/// for it, and it is no page for a browser either (`file:`,
+/// `javascript:`, an option of a command line).
+pub(crate) const NOT_WEB: &str = "not a web link (http:// or https://)";
+
 impl Link {
     /// An http(s) link.
     pub(crate) fn parse(url: &str, hops: u8) -> Option<Link> {
@@ -403,7 +408,7 @@ impl Resolver {
 
     fn open(&mut self) -> Next<Result<Target, Fetch>> {
         let Some(link) = Link::parse(&self.link, self.hops) else {
-            return self.or_next(Fetch::Page);
+            return self.or_next(Fetch::Failed(NOT_WEB.into()));
         };
         let Some(host) = self.cx.hosts.find(&link) else {
             return self.or_next(Fetch::Page);
@@ -602,7 +607,16 @@ mod tests {
             Ok(Target::url("http://example.com/a.zip"))
         );
         assert_eq!(resolve("https://1drv.ms/u/c/x", &[]), Err(Fetch::Page));
-        assert_eq!(resolve("not a link", &[]), Err(Fetch::Page));
+        // what is no web link is no page for a browser either
+        for l in [
+            "not a link",
+            "file://server/share/x.html",
+            "javascript:alert(1)",
+            "--config=/x.json",
+            "httpx://example.com/a.zip",
+        ] {
+            assert_eq!(resolve(l, &[]), Err(Fetch::Failed(NOT_WEB.into())), "{l}");
+        }
         // (no canned answer for its page)
         let page = "https://www.mediafire.com/file/x/a.rar/file";
         assert_eq!(

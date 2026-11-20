@@ -162,6 +162,46 @@ fn a_name_is_one_file_name() {
     );
 }
 
+/// A link that is no http(s) one is asked nowhere, and is no page for a
+/// browser: through the hosts, a file's own link, a chart's (a web page's
+/// failures are pages).
+#[test]
+fn only_web_links() {
+    use crate::install::{Batch, Done};
+    let not_web = || Fetch::Failed(crate::hosts::NOT_WEB.into());
+    let cx = Context {
+        failures_are_pages: true,
+        ..Default::default()
+    };
+    let links = [
+        "file://server/share/x.zip",
+        "javascript:alert(1)//x.zip",
+        "--config=/tmp/x.json",
+        "ftp://e.test/x.zip",
+    ];
+    for l in links {
+        let d = Canned::default();
+        assert_eq!(acquire(l, &cx, &d).err(), Some(not_web()), "{l}");
+        let mut plain = Acquire::plain(l, "slot".into(), &cx);
+        assert_eq!(run_job(&mut plain, &d).err(), Some(not_web()), "{l}");
+        assert_eq!(steps(&d), [""; 0], "{l}");
+    }
+    // a table's links: no page to open comes of them
+    let d = Canned::default();
+    let m = Arc::new(crate::fs::Mem::default());
+    let charts = links.map(|l| l.replace(".zip", ".bms"));
+    for own in [links, charts.each_ref().map(String::as_str)] {
+        let (q, batch) = (song_query(""), Batch::default());
+        let out = install(&m, &q, &own, Default::default(), batch, &cx, &d);
+        assert!(
+            matches!(&out.done[..], [Done::Failed(e)] if e.to_string() == crate::hosts::NOT_WEB),
+            "{:?}",
+            out.done
+        );
+    }
+    assert_eq!(steps(&d), [""; 0]);
+}
+
 #[test]
 fn a_page_is_a_page() {
     let d = Canned::default();
