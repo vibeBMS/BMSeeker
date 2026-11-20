@@ -226,4 +226,90 @@ mod tests {
         assert_eq!(refused["refused"], "mega.nz");
         assert_eq!(refused["code"], "rate_limited");
     }
+
+    /// The window's command lines (`gui/app.go`): an option's value
+    /// attached to it and the links after `--` are values and links,
+    /// whatever they start with.
+    #[test]
+    fn values_that_look_like_options() {
+        let cli = Cli::try_parse_from([
+            "bmseeker",
+            "--json",
+            "--skip-host=-x.evil.example",
+            "library",
+            "install",
+            "--library=/lib",
+            "--title=-ERROR",
+            "--artist=--reinstall",
+            "--md5=",
+            "--diff",
+            "--",
+            "--config=/x.json",
+            "--third-party",
+        ])
+        .unwrap();
+        assert!(cli.config.is_none() && !cli.third_party);
+        assert_eq!(cli.skip_hosts, ["-x.evil.example"]);
+        let Command::Library(library::Library::Install { links, song, .. }) = cli.command else {
+            panic!("not library install");
+        };
+        assert_eq!(links, ["--config=/x.json", "--third-party"]);
+        assert_eq!(
+            (song.title.as_str(), song.artist.as_str()),
+            ("-ERROR", "--reinstall")
+        );
+        for line in [
+            &["table", "missing", "--library=/lib", "--", "--help"][..],
+            &["library", "pending", "--library=-lib"],
+            &["library", "import", "--library=/lib", "--", "-x.zip"],
+        ] {
+            let args = ["bmseeker", "--json"].iter().chain(line);
+            assert!(Cli::try_parse_from(args).is_ok(), "{line:?}");
+        }
+    }
+
+    /// `link get` into a folder: the file is put right in it, under one
+    /// file name, whatever its host named it (a Drive folder's listing).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn link_get_keeps_to_its_folder() {
+        const ZIP: &[u8] = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        const LISTING: &[u8] = br#"<div class="flip-entry"><a href="https://drive.google.com/file/d/A/view"><div class="flip-entry-title">../../evil.zip</div></a></div>"#;
+        struct Drive;
+        impl Driver for Drive {
+            fn perform(&self, effect: Effect) -> Fed {
+                match effect {
+                    Effect::Http(_) => Fed::Http(Ok(LISTING.to_vec())),
+                    Effect::Download { slot, .. } => {
+                        std::fs::write(&slot, ZIP).unwrap();
+                        Fed::Downloaded(Ok(crate::install::job::Served {
+                            blob: crate::unpack::Blob::File(slot),
+                            name: None,
+                            at: None,
+                            head: ZIP.to_vec(),
+                        }))
+                    }
+                    Effect::Sleep(_) => Fed::Woke,
+                }
+            }
+        }
+        let tmp = crate::testkit::tmp("link-get");
+        let out = tmp.join("a/b/out");
+        std::fs::create_dir_all(&out).unwrap();
+        let run = Run {
+            out: Out::new(true, |_| {}),
+            cx: Context::default(),
+            fs: Arc::new(crate::fs::Disk),
+            net: &Drive,
+        };
+        let link = "https://drive.google.com/drive/folders/F";
+        let args = ["bmseeker", "link", "get", link, "-o", out.to_str().unwrap()];
+        Cli::try_parse_from(args).unwrap().run(&run).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["_.._evil.zip"]);
+        assert!(!tmp.join("a/evil.zip").exists());
+    }
 }

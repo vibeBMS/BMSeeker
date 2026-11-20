@@ -17,7 +17,7 @@ cp "$out/$exe" gui/bin/
 gui_exe=bmseeker-gui
 [[ "$exe" == *.exe ]] && gui_exe=bmseeker-gui.exe
 . gui/identity.sh
-(cd gui && go build -trimpath -ldflags "-s -w $identity" -o "$gui_exe" .)
+(cd gui && go build -trimpath -ldflags "$release_ldflags" -tags "$release_tags" -o "$gui_exe" .)
 mv "gui/$gui_exe" "$out/"
 echo "$out/$exe"
 echo "$out/$gui_exe"

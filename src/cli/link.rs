@@ -173,6 +173,8 @@ fn get(
         });
         return Err("no link gave the file".into());
     };
+    // (one file name in `out`, whatever the transport said)
+    let name = crate::install::safe_name(&name);
     let file = if into_dir {
         let f = out.join(&name);
         std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))?;

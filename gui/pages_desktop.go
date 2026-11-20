@@ -39,6 +39,9 @@ const pressDownload = `(function () {
 // into the library's downloads folder and is imported, and the window
 // closes.
 func (a *app) openPage(p page) {
+	if !a.browsable(p) {
+		return
+	}
 	lib := a.settings.Library
 	dir := a.settings.downloads()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -70,7 +73,7 @@ func (a *app) openPage(p page) {
 		mygo.RunOnMain(func() { win.Close() })
 		a.job("Importing", func() error {
 			got := false
-			err := a.cli([]string{"library", "import", d.Path, "-L", lib}, func(r Record) {
+			err := a.cli([]string{"library", "import", "--library=" + lib, "--", d.Path}, func(r Record) {
 				got = true
 				a.say("%s: %s %s", p.Title, r.S("state"), r.S("path"))
 			})

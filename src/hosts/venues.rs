@@ -313,6 +313,17 @@ mod tests {
             t,
             Target::named("https://gh/094.zip", Some("song_ogg.zip".into()))
         );
+        // the index's name is one file name, whatever it says
+        let odd: &[u8] = br#"[{"num":94,"files":[{"name":"094.zip","url":"https://gh/094.zip","original":"/tmp/../song.zip"}]}]"#;
+        let t = resolve(
+            LINK,
+            &[
+                (CATALOG, catalog),
+                ("https://raw.example/boftt/index.json", odd),
+            ],
+        )
+        .unwrap();
+        assert_eq!(t.name.as_deref(), Some("_tmp_.._song.zip"));
         // the mirror out of reach, or the work not in it: the venue page
         assert!(resolve(LINK, &[(LINK, PAGE)]).unwrap().url.contains("id=O"));
         let t = resolve(

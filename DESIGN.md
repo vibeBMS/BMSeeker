@@ -80,7 +80,9 @@ would.
 
 - `Acquire`: one link to its file (resolved through the hosts; a page
   reached through redirects opened from where it ended; a page's other
-  links tried; Google Drive's quota told apart from a page).
+  links tried; Google Drive's quota told apart from a page). A link that
+  is not an http(s) one is a failure, never a page for a browser. The
+  file's name, whoever gave it (the host, the server), is one file name.
 - `Files`: several links' files in order (a skin, an event's work).
 - `Install`: a song (or its separate chart) from its links, then each
   source's, into the library, until one brings it in.
@@ -431,7 +433,8 @@ line in, JSON Lines records and notes out as they come, an exit code.
 The commands are synchronous; a browser's files and network are not,
 except in a worker: `FileReaderSync` reads a `File`, and synchronous
 `XMLHttpRequest` makes a request (`net::Xhr`, the job's `Driver`, through
-vibeBMS's CORS proxy; `?proxy=<url>` uses another). Listing and writing
+vibeBMS's CORS proxy; `?proxy=<url>` uses another, only on a page served
+from localhost, as the tests' is). Listing and writing
 stay asynchronous, so the worker lists the target into a `Mirror` (each
 file's path, size and time; its bytes read when a command reads them),
 runs the command on it, then writes what changed (`Mirror::changes`:

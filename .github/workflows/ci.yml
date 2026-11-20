@@ -131,6 +131,7 @@ jobs:
       - run: cargo test -p bmseeker-web
       - run: GOOS=js GOARCH=wasm go vet ./...
         working-directory: gui
+      - run: node web/test/proxy.mjs
 
   # the release builds, once the checks pass (a pull request's too, as
   # artifacts)

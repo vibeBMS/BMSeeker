@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -183,8 +184,68 @@ func TestRefusedHostsSkipped(t *testing.T) {
 	args, _ := os.ReadFile(filepath.Join(dir, "args"))
 	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
 	if strings.Contains(lines[0], "--skip-host") ||
-		!strings.Contains(lines[1], "--json --third-party --skip-host api.bmssearch.net library pending") {
+		!strings.Contains(lines[1], "--json --third-party --skip-host=api.bmssearch.net library pending") {
 		t.Fatalf("args %q", args)
+	}
+}
+
+// wordsCLI notes each argument it was given on a line of its own, and an
+// empty line after a command's last.
+const wordsCLI = `#!/bin/sh
+{ for a in "$@"; do printf '%s\n' "$a"; done; echo; } >> "$(dirname "$0")/args"
+`
+
+// What a table or a server says (a title, an artist, an MD5, links, a
+// refused host's name) reaches the CLI as an option's value or after "--",
+// never as an argument the CLI could read as an option.
+func TestSaidValuesAreNoOptions(t *testing.T) {
+	a, bin := fakeApp(t)
+	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(wordsCLI), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := missing{Title: "-ERROR", Artist: "--reinstall", MD5: "--third-party", URL: "--config=/x.json", URLDiff: "-h"}
+	said := []string{m.Title, m.Artist, m.MD5, m.URL, m.URLDiff, "-x.evil.example"}
+	a.refused = []string{"-x.evil.example"}
+	a.download([]missing{m})
+	until(t, func() bool { return len(a.busy) == 0 })
+	args, _ := os.ReadFile(filepath.Join(bin, "args"))
+	var links []string
+	for _, cmd := range strings.Split(strings.TrimSpace(string(args)), "\n\n") {
+		words := strings.Split(cmd, "\n")
+		end := slices.Index(words, "--")
+		if end < 0 {
+			t.Fatalf("no \"--\" before the links: %q", words)
+		}
+		for _, w := range words[:end] {
+			if slices.Contains(said, w) {
+				t.Errorf("%q is an argument of its own: %q", w, words)
+			}
+		}
+		if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--title=-ERROR") {
+			t.Errorf("values not attached to their options: %q", words)
+		}
+		links = append(links, words[end+1:]...)
+	}
+	if !slices.Equal(links, []string{m.URL, m.URLDiff}) {
+		t.Fatalf("links %q", links)
+	}
+}
+
+// The Browser tab opens web links only: a table may say anything where a
+// link goes.
+func TestOnlyWebLinksOpen(t *testing.T) {
+	a, _ := fakeApp(t)
+	for _, l := range []string{"file://evil.example/share/x.html", "javascript:alert(1)", "search-ms:query=x", "https:///x", "--help", ""} {
+		a.log = nil
+		a.openPage(page{Title: "Song", Link: l})
+		if len(a.log) != 1 || !strings.Contains(a.log[0], "not a web link") {
+			t.Errorf("%q: log %q", l, a.log)
+		}
+	}
+	for _, l := range []string{"https://1drv.ms/b", "HTTP://example.com/a?b#c"} {
+		if !a.browsable(page{Link: l}) {
+			t.Errorf("%q is a web link", l)
+		}
 	}
 }
 

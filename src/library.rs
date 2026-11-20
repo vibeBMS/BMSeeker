@@ -323,6 +323,13 @@ impl Library {
             .map_or(&[], |v| v.as_slice())
     }
 
+    /// Whether `dir` is a song's folder of the library: one of those below
+    /// its folder, or one a chart it knows the hash of is in (a player's
+    /// records name charts anywhere).
+    pub(crate) fn lists(&self, fs: &dyn Fs, dir: &Path) -> bool {
+        self.songs(fs).at.contains_key(dir) || self.by_hash.values().flatten().any(|d| d == dir)
+    }
+
     /// Whether it holds a chart of the song `want` (the same artist, the
     /// titles alike, as the downloads compare them), among the charts given
     /// or read so far.

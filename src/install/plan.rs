@@ -15,7 +15,7 @@ use crate::placement::{self, covers, is_chart, Located, Rules};
 use crate::unpack::{unpack, Blob, Member, BUDGET};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// What the link a download came from was for: it counts most in what a
 /// package is.
@@ -157,9 +157,27 @@ fn tally(voters: Vec<HashSet<PathBuf>>) -> Vote {
     }
 }
 
+/// Whether `p` is below the folder `dir`, by its parts (none of them
+/// `..`).
+fn below(p: &Path, dir: &Path) -> bool {
+    p.strip_prefix(dir).is_ok_and(|rest| {
+        let mut parts = rest.components().peekable();
+        parts.peek().is_some() && parts.all(|c| matches!(c, Component::Normal(_)))
+    })
+}
+
+/// Whether a download's files may go into the folder `dir`: one below the
+/// library's own folder, or a song's folder the library lists (a player's
+/// library may hold songs elsewhere). No other: where a download's files
+/// go is worked out from what the download says.
+fn takes(fs: &dyn Fs, lib: &Library, dir: &Path) -> bool {
+    below(dir, lib.root()) || lib.lists(fs, dir)
+}
+
 /// `folder` without `sub` at its end (compared case-insensitively): the
-/// package's folder in the library when a chart in its `sub` is there.
-fn up(folder: &Path, sub: &Path) -> Option<PathBuf> {
+/// package's folder in the library when a chart in its `sub` is there
+/// (None too when that is no folder for a download's files: [`takes`]).
+fn up(fs: &dyn Fs, lib: &Library, folder: &Path, sub: &Path) -> Option<PathBuf> {
     let mut f = folder.to_path_buf();
     for seg in sub.components().rev() {
         let name = f.file_name()?.to_string_lossy().to_lowercase();
@@ -168,7 +186,7 @@ fn up(folder: &Path, sub: &Path) -> Option<PathBuf> {
         }
         f = f.parent()?.to_path_buf();
     }
-    Some(f)
+    takes(fs, lib, &f).then_some(f)
 }
 
 /// What a chart's folder is in its package's.
@@ -181,14 +199,14 @@ fn sub(s: &Staged, p: &Package, c: usize) -> PathBuf {
 
 /// The library's charts in the package vote: each (MD5) for the folders it
 /// is in there (the package's folder, by where the chart is in it).
-fn owned_vote(s: &Staged, p: &Package, lib: &Library) -> Vote {
+fn owned_vote(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vote {
     let mut by_md5: HashMap<&str, HashSet<PathBuf>> = HashMap::new();
     for &c in p.charts.iter().filter(|&&c| s.owned(c, lib)) {
         let chart = &s.charts[c];
         let roots = by_md5.entry(chart.md5.as_str()).or_default();
         let at = lib.folders_of(&chart.md5).iter();
         for f in at.chain(lib.folders_of(&chart.sha256)) {
-            roots.extend(up(f, &sub(s, p, c)));
+            roots.extend(up(fs, lib, f, &sub(s, p, c)));
         }
     }
     tally(by_md5.into_values().filter(|v| !v.is_empty()).collect())
@@ -325,7 +343,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
             .collect();
         waiting(s, &new, Outcome::Ask(labels))
     };
-    match owned_vote(s, p, lib) {
+    match owned_vote(fs, s, p, lib) {
         Vote::One(d) if fits(fs, s, p, lib, &new, &d, req.rules) => return vec![into(d)],
         Vote::One(d) => return vec![ask(vec![d])],
         Vote::Tie(dirs) => return vec![ask(dirs)],
@@ -335,7 +353,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         Vote::One(d) => {
             let d = new
                 .first()
-                .and_then(|&c| up(&d, &sub(s, p, c)))
+                .and_then(|&c| up(fs, lib, &d, &sub(s, p, c)))
                 .unwrap_or(d);
             if fits(fs, s, p, lib, &new, &d, req.rules) {
                 return vec![into(d)];
@@ -363,7 +381,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
     let roots: Vec<Option<PathBuf>> = located
         .iter()
         .map(|(c, l, _)| match l {
-            Located::Move(x) => up(x, &sub(s, p, *c)),
+            Located::Move(x) => up(fs, lib, x, &sub(s, p, *c)),
             _ => None,
         })
         .collect();
@@ -535,7 +553,7 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
     for p in &packages {
         match classify(p, s, lib, req.role, req.rules) {
             PackageKind::Owned => {
-                let dest = match owned_vote(s, p, lib) {
+                let dest = match owned_vote(fs, s, p, lib) {
                     Vote::One(d) => Some(d),
                     _ => None,
                 };
@@ -697,6 +715,25 @@ fn applied(
     };
     let mut out = Vec::new();
     for item in items {
+        // whatever the plan says, files go into a folder that takes them
+        // or wait in the downloads, nowhere else
+        let outside = match &item.outcome {
+            Outcome::New(d) | Outcome::Into(d) | Outcome::Owned(d) => {
+                let stray = item.moves.iter().find(|(_, to)| !below(to, d));
+                let stray = stray.map(|(_, to)| to.clone());
+                stray.or_else(|| (!takes(fs, lib, d)).then(|| d.clone()))
+            }
+            Outcome::Waiting | Outcome::Ask(_) => {
+                let to = item.moves.iter().map(|(_, name)| downloads.join(name));
+                to.into_iter().find(|to| !below(to, downloads))
+            }
+            Outcome::Rejected(_) => None,
+        };
+        if let Some(to) = outside {
+            let f = Failure::Other(format!("{}: not in the library", to.display()));
+            out.push((Outcome::Rejected(f.clone()), vec![Done::Failed(f)]));
+            continue;
+        }
         let done = match &item.outcome {
             Outcome::Rejected(f) => vec![Done::Failed(f.clone())],
             Outcome::New(dir) => {

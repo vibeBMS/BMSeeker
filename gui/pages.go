@@ -1,6 +1,10 @@
 package main
 
-import "github.com/egoist/mygo/ui"
+import (
+	"net/url"
+
+	"github.com/egoist/mygo/ui"
+)
 
 func (a *app) pagesView(c *ui.Context) {
 	ui.Text(c, pagesHint)
@@ -25,6 +29,18 @@ func (a *app) pagesView(c *ui.Context) {
 	}).Grow(1).Submitted() && a.prow < len(a.pages) {
 		a.openPage(a.pages[a.prow])
 	}
+}
+
+// browsable reports whether p's link is one a browser is given: http or
+// https, with a host. Any other (a table may say anything where a link
+// goes: a file's path, a script) is noted in the log and never opened.
+func (a *app) browsable(p page) bool {
+	u, err := url.Parse(p.Link)
+	if err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		return true
+	}
+	a.log = append(a.log, p.Title+": not a web link, not opened: "+p.Link)
+	return false
 }
 
 // forgetPage takes p off the list of pages.

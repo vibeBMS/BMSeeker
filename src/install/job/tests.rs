@@ -112,6 +112,96 @@ fn a_file_and_its_name() {
     );
 }
 
+/// A host that names its file as it likes.
+struct Named(&'static str);
+
+impl Host for Named {
+    fn name(&self) -> &'static str {
+        "named"
+    }
+    fn accepts(&self, link: &Link) -> bool {
+        link.on("naming.test")
+    }
+    fn open(&self, l: &Link, _: Option<&Want>, _: &crate::config::Config) -> BoxTask<Resolved> {
+        Ready::boxed(Resolved::File(Target {
+            name: Some(self.0.into()),
+            ..Target::url(l.url.clone())
+        }))
+    }
+}
+
+/// The name is one file name, whoever said it (a host, the server's
+/// transport) and whatever it says: nothing a path could be made of.
+#[test]
+fn a_name_is_one_file_name() {
+    let link = "https://naming.test/f";
+    let got = |host: &'static str, server: Option<&str>| {
+        let mut hosts = Hosts::default();
+        hosts.first(Box::new(Named(host)));
+        let cx = Context {
+            hosts: Arc::new(hosts),
+            ..Default::default()
+        };
+        let d = Canned::default();
+        let served = Served::bytes(ZIP.to_vec(), server.map(String::from), None);
+        d.file(link, Ok(served));
+        acquire(link, &cx, &d).unwrap().name
+    };
+    assert_eq!(got("../../.bashrc", None), "_.._.bashrc");
+    assert_eq!(
+        got("/home/u/.ssh/authorized_keys", None),
+        "_home_u_.ssh_authorized_keys"
+    );
+    assert_eq!(got(r"C:\Users\u\x.zip", None), "C__Users_u_x.zip");
+    assert_eq!(got("..", Some(r"..\..\y.zip")), "_.._y.zip");
+    assert_eq!(got("...", Some("/")), "_");
+    assert_eq!(got("", Some("..")), "f");
+    assert_eq!(
+        got("[xi] Beatrice (ogg).zip", None),
+        "[xi] Beatrice (ogg).zip"
+    );
+}
+
+/// A link that is no http(s) one is asked nowhere, and is no page for a
+/// browser: through the hosts, a file's own link, a chart's (a web page's
+/// failures are pages).
+#[test]
+fn only_web_links() {
+    use crate::install::{Batch, Done};
+    let not_web = || Fetch::Failed(crate::hosts::NOT_WEB.into());
+    let cx = Context {
+        failures_are_pages: true,
+        ..Default::default()
+    };
+    let links = [
+        "file://server/share/x.zip",
+        "javascript:alert(1)//x.zip",
+        "--config=/tmp/x.json",
+        "ftp://e.test/x.zip",
+    ];
+    for l in links {
+        let d = Canned::default();
+        assert_eq!(acquire(l, &cx, &d).err(), Some(not_web()), "{l}");
+        let mut plain = Acquire::plain(l, "slot".into(), &cx);
+        assert_eq!(run_job(&mut plain, &d).err(), Some(not_web()), "{l}");
+        assert_eq!(steps(&d), [""; 0], "{l}");
+    }
+    // a table's links: no page to open comes of them
+    let d = Canned::default();
+    let m = Arc::new(crate::fs::Mem::default());
+    let charts = links.map(|l| l.replace(".zip", ".bms"));
+    for own in [links, charts.each_ref().map(String::as_str)] {
+        let (q, batch) = (song_query(""), Batch::default());
+        let out = install(&m, &q, &own, Default::default(), batch, &cx, &d);
+        assert!(
+            matches!(&out.done[..], [Done::Failed(e)] if e.to_string() == crate::hosts::NOT_WEB),
+            "{:?}",
+            out.done
+        );
+    }
+    assert_eq!(steps(&d), [""; 0]);
+}
+
 #[test]
 fn a_page_is_a_page() {
     let d = Canned::default();

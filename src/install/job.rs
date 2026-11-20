@@ -196,7 +196,8 @@ impl<T: Task> Job for TaskJob<T> {
 }
 
 /// What [`Acquire`] got: the file, its name (where the host told it, else
-/// the server's or the URL's, else `download`) and its first bytes.
+/// the server's or the URL's, else `download`; one file name, no path:
+/// [`safe_name`](super::safe_name)) and its first bytes.
 #[derive(Debug)]
 pub struct Got {
     pub blob: Blob,
@@ -312,9 +313,10 @@ impl Acquire {
             let moved = s.at.filter(|u| *u != t.url);
             return self.failed(e, moved);
         }
-        let name = t
-            .name
-            .or(s.name)
+        // (a host's and a server's name: whatever they said)
+        let safe = |n: Option<String>| n.as_deref().and_then(crate::text::safe_file_name);
+        let name = safe(t.name)
+            .or_else(|| safe(s.name))
             .or_else(|| crate::hosts::url_file_name(&t.url))
             .unwrap_or_else(|| "download".into());
         Step::Done(Ok(Got {
@@ -386,8 +388,11 @@ impl Job for Acquire {
     fn start(&mut self) -> Step<Self::Output> {
         self.cx.stage(crate::progress::Stage::Finding);
         if self.plain {
-            let url = self.r.task.link().to_string();
-            return self.resolved(Step::Done(Ok(Target::url(url))));
+            let target = match Link::parse(self.r.task.link(), 0) {
+                Some(l) => Ok(Target::url(l.url)),
+                None => Err(Fetch::Failed(crate::hosts::NOT_WEB.into())),
+            };
+            return self.resolved(Step::Done(target));
         }
         let step = self.r.start();
         self.resolved(step)
