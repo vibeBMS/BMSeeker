@@ -210,7 +210,7 @@ mod tests {
     }
 
     /// Two songs of one title: the second gets a folder of its own; the
-    /// same song again goes into its folder.
+    /// same song again goes into its folder, its files there kept.
     #[test]
     fn same_title_other_song() {
         let root = tmp("import-same-title");
@@ -230,10 +230,12 @@ mod tests {
         assert_eq!(got, Imported::Unpacked(second.clone(), 2));
         assert_eq!(std::fs::read(first.join("01.ogg")).unwrap(), b"one");
         assert_eq!(std::fs::read(second.join("01.ogg")).unwrap(), b"two");
-        // alpha's again (a newer copy): over its own folder
+        // alpha's again (another copy): into its own folder, nothing there
+        // replaced on its titles' word
         let got = import_to(&Disk, &pack("alpha", b"new"), &library).unwrap();
         assert_eq!(got, Imported::Unpacked(first.clone(), 2));
-        assert_eq!(std::fs::read(first.join("01.ogg")).unwrap(), b"new");
+        assert_eq!(std::fs::read(first.join("01.ogg")).unwrap(), b"one");
+        assert!(!first.join("a_.bms").exists());
         assert_eq!(std::fs::read(second.join("01.ogg")).unwrap(), b"two");
         // nothing left beside the downloads
         let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().collect();

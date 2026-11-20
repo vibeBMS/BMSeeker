@@ -53,6 +53,7 @@ Every option, the records and the settings: [DESIGN.md](DESIGN.md#cli).
 - A song's links are tried in order, then the other places that know it (tables, Stella, BMS SEARCH).
 - What a download holds is sorted before anything goes into the library.
 - A song the library has already is not added a second time; only the files its folder lacks come in.
+- A download replaces a file of the library only when it holds one of that song's charts (by its hash), or with `--reinstall`; a song found by its title and artist alone gets only the files its folder lacks.
 - A separate chart goes into its song's folder, or waits in the downloads folder until the song comes.
 - Each file is downloaded once a run, whatever link leads to it.
 - A site that refuses BMSeeker is not asked again for the rest of the run.

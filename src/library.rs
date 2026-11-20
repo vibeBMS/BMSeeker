@@ -326,6 +326,35 @@ impl Library {
             .map_or(&[], |v| v.as_slice())
     }
 
+    /// The folders holding the chart of `md5` or `sha256` (hex) that says
+    /// it is `info`: where a download's chart is the library's, the one
+    /// test of a download being the song of a folder there. The hash is
+    /// what counts; the title and artist only check it (an MD5 can be made
+    /// to match another file's): a folder whose charts' are unlike them
+    /// in both ([`titles::Relation::Unrelated`]) is not one. By titles and
+    /// artists alone a download is never the song of a folder.
+    pub(crate) fn holding(
+        &self,
+        fs: &dyn Fs,
+        md5: &str,
+        sha256: &str,
+        info: Option<&ChartInfo>,
+    ) -> Vec<PathBuf> {
+        let said = info.map_or_else(titles::Profile::default, |i| {
+            titles::Profile::one(&i.title, &i.artist)
+        });
+        let mut out: Vec<PathBuf> = Vec::new();
+        for d in self.folders_of(md5).iter().chain(self.folders_of(sha256)) {
+            let theirs = self.folder_titles(fs, d);
+            let unlike =
+                said.relation(&theirs.profile, titles::Rule::Either) == titles::Relation::Unrelated;
+            if !unlike && !out.contains(d) {
+                out.push(d.clone());
+            }
+        }
+        out
+    }
+
     /// Whether `dir` is a song's folder of the library: one of those below
     /// its folder, or one a chart it knows the hash of is in (a player's
     /// records name charts anywhere).
