@@ -11,6 +11,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# what a job's token may do, whatever the repository's default is: read the
+# repository (build.yml, which the build job calls, asks for the same). The
+# jobs that need more say so (cache-prune, pages, release).
+permissions:
+  contents: read
+
 # A newer commit on the same branch or pull request cancels the older run
 # (the organization's hosted runners are limited: 20 jobs, 5 macOS).
 concurrency:
