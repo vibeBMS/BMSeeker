@@ -44,11 +44,18 @@ pub(crate) const STRONG: f64 = 0.72;
 /// Dice for [`Relation::Related`].
 pub(crate) const RELATED: f64 = 0.5;
 
-/// NFKC, ideographic spaces as spaces, runs of space as one, trimmed.
+/// Characters of a title or an artist that are compared: no song's is as
+/// long, and one made long to be slow to compare is cut here, where every
+/// comparison begins.
+const MAX_CHARS: usize = 512;
+
+/// NFKC ([`MAX_CHARS`] of it), ideographic spaces as spaces, runs of space
+/// as one, trimmed.
 fn common(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let s: String = s
         .nfkc()
+        .take(MAX_CHARS)
         .map(|c| if c == '\u{3000}' { ' ' } else { c })
         .collect();
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -267,34 +274,48 @@ fn role_names(t: &[char], i: usize) -> Vec<(usize, bool)> {
         .collect()
 }
 
-/// Roles joined (`obj/bga`, `BGA & obj`), from `i`: as many as are
+/// For each place in `t`, the roles joined from there after another
+/// (`/bga`, `& obj`: the rest of `obj/bga`, `BGA & obj`): as many as are
 /// joined, ending at a separator (the first way that does, as a regular
-/// expression finds it), and whether one of them is for the music.
-fn joined(t: &[char], i: usize, count: usize, music: bool) -> Option<(usize, bool)> {
-    for (e, m) in role_names(t, i) {
-        let music = music || m;
-        // `\s*[&+]\s*` or `/`, then another
-        let j = spaces(t, e);
-        let next = if j < t.len() && matches!(t[j], '&' | '+') {
-            Some(spaces(t, j + 1))
-        } else if e < t.len() && t[e] == '/' {
-            Some(e + 1)
-        } else {
-            None
-        };
-        if let Some(found) = next.and_then(|n| joined(t, n, count + 1, music)) {
-            return Some(found);
-        }
-        if count >= 1 && ends(t, e) {
-            return Some((e, music));
-        }
+/// expression finds it), and whether one of them is for the music. From
+/// the end backwards, each place once: however many are joined.
+fn joined_after(t: &[char]) -> Vec<Option<(usize, bool)>> {
+    let mut after = vec![None; t.len() + 1];
+    for i in (0..t.len()).rev() {
+        after[i] = role_names(t, i).into_iter().find_map(|(e, music)| {
+            more(t, e, &after)
+                .map(|(end, m)| (end, music || m))
+                .or_else(|| ends(t, e).then_some((e, music)))
+        });
     }
-    None
+    after
+}
+
+/// The roles joined to the one ending at `e` (`after`: [`joined_after`]):
+/// `\s*[&+]\s*` or `/`, then another.
+fn more(t: &[char], e: usize, after: &[Option<(usize, bool)>]) -> Option<(usize, bool)> {
+    let j = spaces(t, e);
+    if j < t.len() && matches!(t[j], '&' | '+') {
+        after[spaces(t, j + 1)]
+    } else if e < t.len() && t[e] == '/' {
+        after[e + 1]
+    } else {
+        None
+    }
+}
+
+/// Roles joined (`obj/bga`, `BGA & obj`), from `i`: two at least, their
+/// end and whether one of them is for the music.
+fn joined(t: &[char], i: usize, after: &[Option<(usize, bool)>]) -> Option<(usize, bool)> {
+    role_names(t, i)
+        .into_iter()
+        .find_map(|(e, music)| more(t, e, after).map(|(end, m)| (end, music || m)))
 }
 
 /// A credit at `i` (the fork's role pattern): its end (separators and a
-/// `by` after it taken too) and whether it is for the music.
-fn credit_at(t: &[char], i: usize) -> Option<(usize, bool)> {
+/// `by` after it taken too) and whether it is for the music (`after`:
+/// [`joined_after`]).
+fn credit_at(t: &[char], i: usize, after: &[Option<(usize, bool)>]) -> Option<(usize, bool)> {
     let boundary = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     if i > 0 && boundary(t[i - 1]) {
         return None;
@@ -306,7 +327,7 @@ fn credit_at(t: &[char], i: usize) -> Option<(usize, bool)> {
             .filter_map(|w| word_at(t, s, w))
             .find(|&e| fits(e))
     };
-    let found = joined(t, s, 0, false)
+    let found = joined(t, s, after)
         .or_else(|| first(MUSIC, &|e| ends(t, e)).map(|e| (e, true)))
         .or_else(|| {
             first(EXPLICIT, &|e| {
@@ -349,10 +370,11 @@ pub(crate) fn artist_display(artist: &str) -> String {
     let n = common(artist);
     let t: Vec<char> = n.chars().collect();
     // the credits, as a search finds them (one after another)
+    let after = joined_after(&t);
     let mut credits = Vec::new();
     let mut i = 0;
     while i < t.len() {
-        match credit_at(&t, i) {
+        match credit_at(&t, i, &after) {
             Some((e, music)) if e > i => {
                 credits.push((i, e, music));
                 i = e;
@@ -520,21 +542,26 @@ pub(crate) struct Profile {
 impl Profile {
     /// Of charts' (title, artist, path); charts without a title count not.
     pub(crate) fn of<'a>(charts: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) -> Profile {
-        // (pair, count, first path, first index)
+        // (pair, count, first path, first index), and each pair's place
         let mut groups: Vec<(Song, usize, String, usize)> = Vec::new();
+        let mut at: std::collections::HashMap<Song, usize> = Default::default();
         for (i, (title, artist, path)) in charts.into_iter().enumerate() {
             let pair = Song::of(title, artist);
             if pair.title.is_empty() {
                 continue;
             }
-            match groups.iter_mut().find(|g| g.0 == pair) {
-                Some(g) => {
+            match at.get(&pair) {
+                Some(&g) => {
+                    let g = &mut groups[g];
                     g.1 += 1;
                     if path.to_lowercase() < g.2.to_lowercase() {
                         g.2 = path.to_string();
                     }
                 }
-                None => groups.push((pair, 1, path.to_string(), i)),
+                None => {
+                    at.insert(pair.clone(), groups.len());
+                    groups.push((pair, 1, path.to_string(), i));
+                }
             }
         }
         groups.sort_by(|a, b| {
@@ -683,6 +710,55 @@ mod tests {
         assert_eq!(a("SKY."), "SKY.");
         assert_eq!(a("objective"), "objective");
         assert_eq!(artist_key("ALPHA / obj"), "alpha");
+    }
+
+    /// Roles joined, however many: each place looked at once.
+    #[test]
+    fn roles_joined_without_end() {
+        let t: Vec<char> = "obj/"
+            .repeat(100_000)
+            .chars()
+            .chain("bga: x".chars())
+            .collect();
+        let after = joined_after(&t);
+        assert_eq!(credit_at(&t, 0, &after), Some((t.len() - 1, false)));
+        let t: Vec<char> = "obj & "
+            .repeat(100_000)
+            .chars()
+            .chain("remix".chars())
+            .collect();
+        assert_eq!(credit_at(&t, 0, &joined_after(&t)), Some((t.len(), true)));
+        // none ends at a separator: no credit, from any of them
+        let t: Vec<char> = "obj&"
+            .repeat(100_000)
+            .chars()
+            .chain("objX".chars())
+            .collect();
+        let after = joined_after(&t);
+        assert!((0..t.len())
+            .step_by(4)
+            .all(|i| joined(&t, i, &after).is_none()));
+    }
+
+    /// A title or an artist made long to be slow: its first
+    /// [`MAX_CHARS`] are what is compared.
+    #[test]
+    fn long_titles_and_artists() {
+        let crossed = "(".repeat(200_000) + &"]".repeat(200_000);
+        assert!(title_display(&crossed).chars().count() <= MAX_CHARS);
+        assert!(artist_display(&crossed).chars().count() <= MAX_CHARS);
+        let long = "obj&".repeat(50_000) + "objX";
+        assert_eq!(artist_display(&long).chars().count(), MAX_CHARS);
+        let name = "a".repeat(MAX_CHARS);
+        assert_eq!(
+            Song::of(&format!("{name}bc [A]"), &format!("{name}de / obj: x")),
+            Song::of(&name, &name)
+        );
+        // each pair of a folder's many charts once
+        let titles: Vec<String> = (0..50_000).map(|i| format!("Song {i}")).collect();
+        let p = Profile::of(titles.iter().map(|t| (t.as_str(), "a", "")));
+        assert_eq!(p.pairs.len(), 50_000);
+        assert_eq!(p.dominant(), Some(&Song::of("Song 0", "a")));
     }
 
     #[test]
