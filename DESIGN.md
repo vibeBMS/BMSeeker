@@ -43,7 +43,7 @@ The modules in more detail:
 | --- | --- |
 | `table` | bmstable difficulty tables (the HTML's `<meta name="bmstable">` → header → data) |
 | `hosts` | link → archive: direct links, Google Drive files and folders (their `resourcekey` kept), Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a chart's page bmssearch.net/bmses/ID: its work's links; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
-| `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh / .tar / .tar.gz (.tgz) into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder; at most 4 GiB unpacked natively, 1 GiB in a web page; the archive's file times kept; archives inside one holding no chart unpacked too; 7z on one thread in a web page and on phones). `import` takes a file brought in by hand, and places the separate charts that waited for what came in |
+| `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh / .tar / .tar.gz (.tgz) into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder; each name one that Windows holds too, wherever it is unpacked: no device's name, no dot or space at its end; at most 4 GiB unpacked natively, 1 GiB in a web page, what an archive decodes for members passed by counted too; at most 250,000 files, in paths of 32 folders; a 7z's decoder within 1 GiB of memory, 256 MiB in a web page and on phones, its header within 17 MiB, 9 there; a tar's long names within 1 MiB; the archive's file times kept; archives inside one holding no chart unpacked too; 7z on one thread in a web page and on phones; given up when its download is cancelled). `import` takes a file brought in by hand, and places the separate charts that waited for what came in. A chart is read up to 32 MiB (a larger one is a chart that cannot be read). What a download passes through in the downloads folder (`.job-…`, `.take-…`, `.in-…`) is made anew under a name that cannot be guessed, and what a run that died left of them goes after a day |
 | `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not; where file times mean nothing, as in a web page's storage, the one there stays) |
 | `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists (by artist, as compared), and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan_cached`), folder by folder when first needed (`new`), or given by a player's own records (`from_catalog`); what comes in is added to it (`add`, `add_folder`) |
 | `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
@@ -53,7 +53,7 @@ The modules in more detail:
 | `manbow` | manbow events: works and their links (with labels) from the URL list and work list, and which link is the main archive (HQ > ogg > file, the newest package), an add-on (extra charts, BGA alone) or a mirror (the BMS event mirror's `works.json`; the links to download from a work page) |
 | `bmssearch` | the BMS SEARCH API: a chart's work and its download links |
 | `probe` | a link downloaded, unpacked and sorted: downloaded / page / gone (404, 410) / error; main (90% or more of its charts' sounds inside), add-on (separate charts), media (no charts) |
-| `export` | a difficulty table as an LR2 custom folder (`.lr2folder`) or a beatoraja cache (`.bmt`) |
+| `export` | a difficulty table as an LR2 custom folder (`.lr2folder`) or a beatoraja cache (`.bmt`). An LR2 export notes what it wrote (`bmseeker-export.json` in the folder): the next removes the levels the table no longer has by that note, no other file, and does not write into a folder noted as another table's |
 | `naming` | a song's folder named after its charts (Folder naming, below) |
 | `chart` | what bmseeker needs of a chart: its title, artist and the files it uses |
 | `text` | text from BMS files and pages: Shift_JIS, EUC-KR, UTF-8 |
@@ -339,6 +339,8 @@ bmseeker [--json] [--config FILE] [--third-party] [--name-folders] [--skip-host 
 
 link resolve <link>... [-t title -a artist]          what a link leads to (a file's URL and name / a page that
                                                      needs a browser / an error), without downloading
+link page-script                                     the script a window showing a link's page runs on it (it presses
+                                                     a OneDrive share's Download button, on OneDrive's hosts only)
 link get <link>... [-o folder|file] [-t -a --md5] [--search] [--any]
                                                      download from the links in turn (into a folder: under the
                                                      file's own name; --search: when all fail, the sources' links
@@ -351,8 +353,10 @@ table show <URL>                                     a difficulty table and its 
 table missing <URL> -L library [-l level] [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
                                                      the charts the library lacks (--get: download them)
 table export lr2|bmt <URL> <folder>                  an LR2 custom folder / a beatoraja table cache
-library import <file> -L library [--reinstall]       a downloaded file into the library, and the waiting
-                                                     charts it lets be placed
+library import <file> -L library [--name NAME] [--reinstall]
+                                                     a downloaded file into the library, and the waiting
+                                                     charts it lets be placed (--name: the name it was
+                                                     published under, when the file's own is not it)
 library place <chart> -L library [--to folder] [--min percent]
                                                      the song folders a separate chart may go into (or move it)
 library pending -L library                           separate charts waiting for their songs
@@ -409,12 +413,17 @@ a child process and reads its records. Released as two binaries:
 `bmseeker` (CLI) and the GUI, which embeds the CLI: started with a CLI
 command it runs as the CLI (same arguments, stdin/stdout, exit code); with
 no arguments or a path it opens the window. A link that needs a browser
-opens in a MyGo web view, which presses the page's Download button and
-hands the download back to the CLI.
+opens in a MyGo web view, which runs the CLI's script (`link
+page-script`: a OneDrive share's Download button pressed, no other
+host's) and hands the page's first download back to the CLI (`library
+import --name`): kept until then under a name of the window's making, the
+page's name for it only said to the CLI.
 
-The CLI it carries is unpacked into the user's cache folder on first use
-(`$BMSEEKER_CLI` if set; a development build without it uses `bmseeker`
-on the PATH). A host that refused BMSeeker (a `refused` record) is noted
+The CLI it carries is unpacked into the user's cache folder on first use,
+for its user alone, and run from there only as the bytes it was built
+with (its hash, each start); without a cache folder (no home) it is not
+unpacked at all (`$BMSEEKER_CLI` if set; a development build without it
+uses `bmseeker` on the PATH). A host that refused BMSeeker (a `refused` record) is noted
 in the log and skipped by every later run while the window is open
 (`--skip-host`). Turning third-party sources on asks first, once; the OK is
 remembered in `<config folder>/bmseeker/third-party-acknowledged` (in a

@@ -85,8 +85,8 @@ How BMSeeker behaves towards these sites:
   with a browser check (a Cloudflare challenge, Turnstile, Google's CAPTCHA), is not asked again for the rest of the run, and the refusal is reported
   (see [DESIGN.md, Refusals](DESIGN.md#refusals)). It does not retry with other queries, other addresses or other headers.
 - It does not bypass access controls: no solving or evading of challenges, CAPTCHAs, logins or download limits.
-  A link that needs a browser is shown to the user in one (the window's web view presses a share page's Download
-  button once, as a person would; the web page opens it in a tab).
+  A link that needs a browser is shown to the user in one (the window's web view presses a OneDrive share page's
+  Download button once, as a person would; the web page opens it in a tab).
 
 BMSeeker hosts no songs or charts, and is not affiliated with, endorsed by or operated by any of the services above.
 Users are responsible for complying with each site's terms of use and with the rights of the copyright holders of what
@@ -108,7 +108,8 @@ bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, 
 - **Tables**: the charts the library lacks in a difficulty table, by level; download one or all those shown.
 - **Link**: one link into the library.
 - **Waiting**: separate charts that came before their songs, and the likeliest folder.
-- **Browser**: links that only give a page (OneDrive ...), opened in a web view that presses its Download button.
+- **Browser**: links that only give a page (OneDrive ...), opened in a web view (a OneDrive share's Download button
+  is pressed for you).
 - **Settings**: the BMS folder, third-party sources (asked once before they are on), the difficulty tables.
 
 ## Web page
