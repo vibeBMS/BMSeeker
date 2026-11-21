@@ -81,6 +81,10 @@ jobs:
       - run: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --all-targets --features cli -- -D warnings
+      # the library as vibeBMS links it: no features, and its tests' testkit
+      # (with tests/api_vibe.rs, the items vibe names from it)
+      - run: cargo clippy --lib -- -D warnings
+      - run: cargo clippy --lib --test api_vibe --features testkit -- -D warnings
       - run: cargo test --features cli
 
   wasm:
