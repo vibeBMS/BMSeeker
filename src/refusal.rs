@@ -29,34 +29,10 @@
 use crate::hosts::{Context, Link, NOT_WEB};
 use crate::install::job::{Driver, Effect, Fed};
 use crate::net::{Kind, NetError};
+pub use crate::net::{Refusal, Why};
 use crate::progress::Progress;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
-/// Why a service is not asked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Why {
-    /// It answered this HTTP status (401, 403, 429, 451).
-    Status(u16),
-    /// It answered this HTTP status (401, 403, 451) for [`STRIKES`]
-    /// files' addresses one after another, none of its answers coming
-    /// between them.
-    Files(u16),
-    /// It answered with a browser check (a Cloudflare challenge page,
-    /// Turnstile).
-    Challenge,
-    /// Its API said it limits BMSeeker's requests (MEGA's `-4`).
-    RateLimited,
-    /// It refused in an earlier run of this session (`--skip-host`).
-    Earlier,
-}
-
-/// A service that refused, by its host ([`service`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Refusal {
-    pub host: String,
-    pub why: Why,
-}
 
 impl Refusal {
     /// `url`'s service refused for `why`.
@@ -64,26 +40,6 @@ impl Refusal {
         Refusal {
             host: service(url),
             why,
-        }
-    }
-
-    /// What it was, for a program: `status`, `files`, `challenge`,
-    /// `rate_limited`, `earlier`.
-    pub fn code(&self) -> &'static str {
-        match self.why {
-            Why::Status(_) => "status",
-            Why::Files(_) => "files",
-            Why::Challenge => "challenge",
-            Why::RateLimited => "rate_limited",
-            Why::Earlier => "earlier",
-        }
-    }
-
-    /// The HTTP status it answered, if that was it.
-    pub fn status(&self) -> Option<u16> {
-        match self.why {
-            Why::Status(n) | Why::Files(n) => Some(n),
-            _ => None,
         }
     }
 }

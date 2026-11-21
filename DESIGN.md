@@ -37,6 +37,12 @@ cli            the CLI's commands (noun-verb, --json) on a Run: a Store, a Drive
 bin/bmseeker   the CLI natively: the disk, Native, stdout / stderr
 ```
 
+The layers, lowest first: base, parsing and data, the network model,
+hosts and sources, archives, the library, install, drivers, front ends. A
+module uses nothing of a layer above its own; which module is in which
+layer, and the few uses upward that remain (each with why), are in
+`tools/check_layers.py`, which CI runs.
+
 The modules in more detail:
 
 | Module | What it does |

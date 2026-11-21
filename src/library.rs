@@ -6,9 +6,9 @@
 //! own records of its charts ([`Library::from_catalog`]: a web page cannot
 //! read its library's charts when it likes).
 
-use crate::chart::ChartInfo;
+use crate::chart::{is_chart, md5_hex, sha256_hex, ChartInfo};
 use crate::fs::{file_name, Fs, Store};
-use crate::placement::{is_chart, rel, song_folders_except, Class, Folder, Keys, Names};
+use crate::placement::{rel, song_folders_except, Class, Folder, Keys, Names};
 use crate::titles;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -206,7 +206,7 @@ impl Read {
     fn of(fs: &dyn Fs, p: &Path) -> Option<Read> {
         let bytes = crate::chart::read(fs, p)?;
         Some(Read {
-            md5: crate::install::md5_hex(&bytes),
+            md5: md5_hex(&bytes),
             sha256: sha256_hex(&bytes),
             info: crate::chart::info(p, &bytes),
         })
@@ -263,12 +263,6 @@ impl Cached {
             }),
         }
     }
-}
-
-/// The SHA-256 of `bytes`, in hex.
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    crate::text::hex(&sha2::Sha256::digest(bytes))
 }
 
 impl Library {

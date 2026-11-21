@@ -649,7 +649,7 @@ impl Install {
                 self.tries.record(vec![Done::Failed(failed)]);
                 continue;
             }
-            let chart = super::chart_link(&link).then(|| super::chart_name(&link));
+            let chart = crate::links::chart_link(&link).then(|| super::chart_name(&link));
             let acquire = match &chart {
                 Some(name) => Acquire::plain(&link, job.join(name), &self.cx),
                 None => {

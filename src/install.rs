@@ -3,7 +3,7 @@
 //! chart (差分) goes into the song's folder ([`placement`](crate::placement)).
 //! A link that leads to a page instead is [`Done::Page`], for a browser.
 
-use crate::fs::Store;
+use crate::fs::{now, Store};
 use crate::library::Library;
 use std::path::{Path, PathBuf};
 
@@ -11,8 +11,10 @@ pub(crate) mod entry;
 pub mod job;
 pub(crate) mod plan;
 
+pub use crate::chart::md5_hex;
+pub use crate::package::Role;
 pub use entry::{Batch, Entry, EntryJob};
-pub use plan::{take, Naming, Request, Role};
+pub use plan::{take, Naming, Request};
 
 /// What became of one link.
 #[derive(Clone, Debug)]
@@ -106,18 +108,6 @@ impl From<&str> for Failure {
     }
 }
 
-/// The MD5 of `bytes`, in hex.
-pub fn md5_hex(bytes: &[u8]) -> String {
-    use md5::Digest;
-    crate::text::hex(&md5::Md5::digest(bytes))
-}
-
-/// A link to a chart file of its own (`….bms` and the like).
-pub(crate) fn chart_link(u: &str) -> bool {
-    let path = u.split(['?', '#']).next().unwrap_or("");
-    crate::placement::is_chart(Path::new(path))
-}
-
 /// The chart's file name in its link.
 pub(crate) fn chart_name(u: &str) -> String {
     let path = u.split(['?', '#']).next().unwrap_or("");
@@ -136,13 +126,6 @@ pub(crate) fn file_name_of(name: &str) -> Option<String> {
 /// left).
 pub fn safe_name(name: &str) -> String {
     file_name_of(name).unwrap_or_else(|| "download".into())
-}
-
-/// Seconds since 1970.
-pub(crate) fn now() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// A name no other download has, of this process or another, and none
@@ -315,6 +298,7 @@ impl Tries {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::links::chart_link;
     use crate::net::NetError;
 
     /// `BMSEEKER_SONG=URL BMSEEKER_DIFF=URL [BMSEEKER_TITLE=… BMSEEKER_ARTIST=…]
