@@ -7,11 +7,10 @@
 //! [`classify`], the link it came from counting most. Where the rules are
 //! not sure, the whole download is one package.
 
-use crate::chart::ChartInfo;
+use crate::chart::{is_chart, md5_hex, sha256_hex, ChartInfo};
 use crate::fs::Fs;
-use crate::install::plan::Role;
 use crate::library::Library;
-use crate::placement::{class_of, is_chart, key, rel};
+use crate::placement::{class_of, key, rel};
 use crate::placement::{Class, Keys, Names, Rules};
 use crate::progress::Progress;
 use crate::titles::Song;
@@ -67,8 +66,8 @@ impl Staged {
                 let hash = |of: fn(&[u8]) -> String| bytes.as_deref().map(of).unwrap_or_default();
                 StagedChart {
                     member: i,
-                    md5: hash(crate::install::md5_hex),
-                    sha256: hash(crate::library::sha256_hex),
+                    md5: hash(md5_hex),
+                    sha256: hash(sha256_hex),
                     info: bytes.as_deref().and_then(|b| crate::chart::info(&m.rel, b)),
                 }
             })
@@ -355,6 +354,19 @@ pub(crate) enum PackageKind {
     /// Charts for a song's folder in the library (a 差分, or a song the
     /// library has some charts of).
     Diff,
+}
+
+/// What the link a download came from was for: it counts most in what a
+/// package is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Role {
+    /// A song's own link (a table's `url`).
+    Song,
+    /// A separate chart's (差分: a table's `url_diff`).
+    Diff,
+    /// Not known (a file brought in by hand).
+    #[default]
+    Any,
 }
 
 /// What the package `p` of `s` is, the link it came from (`role`) counting

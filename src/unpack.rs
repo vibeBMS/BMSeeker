@@ -889,7 +889,7 @@ pub(crate) fn unpack_from(
     let mut sink = Into::new(store, dest);
     members(r, format, budget, &mut left, &mut sink)?;
     let mut out: Vec<Member> = sink.members().collect();
-    let charts = out.iter().any(|m| crate::placement::is_chart(&m.rel));
+    let charts = out.iter().any(|m| crate::chart::is_chart(&m.rel));
     let nested: Vec<usize> = (0..out.len())
         .filter(|&i| !charts && is_archive(&out[i].rel))
         .collect();

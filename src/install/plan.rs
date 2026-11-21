@@ -5,33 +5,20 @@
 //! song), then the plan carried out ([`apply`]). [`take`] does it all, for
 //! a download that has just arrived: natively and in a web page alike.
 
-use super::{md5_hex, safe_name, unique, Done, Failure};
-use crate::chart::{md5_key, ChartInfo};
+use super::{safe_name, unique, Done, Failure};
+use crate::chart::{is_chart, md5_hex, md5_key, ChartInfo};
 use crate::fs::{file_name, move_file, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
 use crate::net::NetError;
-use crate::package::{classify, split, Package, PackageKind, Staged};
-use crate::placement::{self, is_chart, Keys, Located, Names, Rules};
+use crate::package::{classify, split, Package, PackageKind, Role, Staged};
+use crate::placement::{self, Keys, Located, Names, Rules};
 use crate::progress::Progress;
 use crate::unpack::{unpack_watched, Blob, Member, BUDGET};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-
-/// What the link a download came from was for: it counts most in what a
-/// package is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Role {
-    /// A song's own link (a table's `url`).
-    Song,
-    /// A separate chart's (差分: a table's `url_diff`).
-    Diff,
-    /// Not known (a file brought in by hand).
-    #[default]
-    Any,
-}
 
 /// How a song new to the library names its folder.
 #[derive(Clone, Debug, Default, PartialEq)]

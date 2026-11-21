@@ -226,8 +226,7 @@ fn file_link(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     let path = lower.split(['?', '#']).next().unwrap_or("");
     (lower.starts_with("https://") || lower.starts_with("http://"))
-        && (crate::install::chart_link(path)
-            || crate::unpack::is_archive(std::path::Path::new(path)))
+        && (crate::links::chart_link(path) || crate::unpack::is_archive(std::path::Path::new(path)))
 }
 
 impl Source for ByMd5 {

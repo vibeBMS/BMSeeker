@@ -20,8 +20,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub use crate::chart::ChartInfo;
 pub(crate) use crate::chart::{class_of, Class};
+pub use crate::chart::{is_chart, ChartInfo};
 // (vibeBMS's song select asks these whether a table's song is in its
 // library, until it asks `titles::same_song` as the downloads do)
 pub use crate::titles::{same_artist, same_name, same_title};
@@ -430,14 +430,6 @@ pub enum Located {
     Ask(Vec<(PathBuf, String)>),
 }
 
-const CHART_EXTS: [&str; 5] = ["bms", "bme", "bml", "pms", "bmson"];
-
-pub fn is_chart(p: &std::path::Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| CHART_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
-}
-
 /// `p`'s path in `dir`, `/` between its parts.
 pub(crate) fn rel(p: &Path, dir: &Path) -> String {
     p.strip_prefix(dir)
@@ -712,7 +704,7 @@ pub(crate) fn clash(
     if !times || (new.1 == old.1 && (new.0 - old.0).abs() <= 2) {
         return Clash::Keep;
     }
-    let now = i64::try_from(crate::install::now()).unwrap_or(i64::MAX);
+    let now = i64::try_from(crate::fs::now()).unwrap_or(i64::MAX);
     if new.0 > old.0 && new.0 <= now {
         Clash::Overwrite
     } else {
@@ -1317,7 +1309,7 @@ mod tests {
     /// is newer than none.
     #[test]
     fn a_time_to_come_wins_nothing() {
-        let now = crate::install::now() as i64;
+        let now = crate::fs::now() as i64;
         let later = now + 24 * 60 * 60;
         assert_eq!(clash((later, 6), Some((now, 5)), false, true), Clash::Keep);
         assert_eq!(clash((later, 6), Some((0, 5)), false, true), Clash::Keep);

@@ -12,7 +12,7 @@
 //! first (one to a dead uploader last: the uploader's mirrors may have its
 //! file), to try one after another.
 
-use crate::chart::md5_key;
+use crate::chart::{is_chart, md5_key};
 use crate::table::{DifficultyTable, TableEntry};
 use std::collections::HashMap;
 
@@ -229,6 +229,12 @@ impl Links {
         }
         n
     }
+}
+
+/// A link to a chart file of its own (`….bms` and the like).
+pub(crate) fn chart_link(u: &str) -> bool {
+    let path = u.split(['?', '#']).next().unwrap_or("");
+    is_chart(std::path::Path::new(path))
 }
 
 #[cfg(test)]

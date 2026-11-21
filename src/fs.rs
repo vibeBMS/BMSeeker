@@ -90,6 +90,13 @@ pub(crate) fn move_file(store: &dyn Store, from: &Path, to: &Path) -> io::Result
     }
 }
 
+/// Seconds since 1970.
+pub(crate) fn now() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// `mtime` (seconds since 1970) as a time (None: before it).
 pub(crate) fn system_time(mtime: i64) -> Option<std::time::SystemTime> {
     let secs = u64::try_from(mtime).ok()?;

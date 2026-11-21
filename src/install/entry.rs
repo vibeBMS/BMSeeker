@@ -5,12 +5,13 @@
 //! charts) gets each file once. [`EntryJob`] takes them.
 
 use super::job::{Dead, Fed, Install, Installed, Job, Step};
-use super::{got, Done, Failure, Role};
+use super::{got, Done, Failure};
 use crate::chart::md5_key;
 use crate::fs::Store;
 use crate::hosts::{Context, DownloadKey, Want};
 use crate::library::Library;
 use crate::net::NetError;
+use crate::package::Role;
 use crate::sources::{Query, Sources};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;

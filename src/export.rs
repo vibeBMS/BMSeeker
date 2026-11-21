@@ -134,7 +134,7 @@ fn constraint_name(c: &str) -> Option<&'static str> {
 /// The file name beatoraja gives a table's cache: the SHA-256 (hex) of its
 /// URL, `.bmt`.
 pub fn bmt_file_name(url: &str) -> String {
-    format!("{}.bmt", crate::library::sha256_hex(url.as_bytes()))
+    format!("{}.bmt", crate::chart::sha256_hex(url.as_bytes()))
 }
 
 /// The table as beatoraja caches it: gzip of its JSON (`url`, `name`,

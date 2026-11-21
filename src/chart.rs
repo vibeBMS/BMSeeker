@@ -222,6 +222,26 @@ fn bmson_info(bytes: &[u8]) -> Option<ChartInfo> {
     Some(out)
 }
 
+const CHART_EXTS: [&str; 5] = ["bms", "bme", "bml", "pms", "bmson"];
+
+pub fn is_chart(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| CHART_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// The MD5 of `bytes`, in hex.
+pub fn md5_hex(bytes: &[u8]) -> String {
+    use md5::Digest;
+    crate::text::hex(&md5::Md5::digest(bytes))
+}
+
+/// The SHA-256 of `bytes`, in hex.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    crate::text::hex(&sha2::Sha256::digest(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

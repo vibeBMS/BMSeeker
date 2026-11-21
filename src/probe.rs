@@ -91,7 +91,7 @@ pub(crate) fn classify(dir: &Path) -> (Kind, usize, String) {
             let p = e.path();
             if p.is_dir() {
                 todo.push(p);
-            } else if crate::placement::is_chart(&p) {
+            } else if crate::chart::is_chart(&p) {
                 here.push(p);
             }
         }
@@ -142,7 +142,7 @@ pub fn probe(
         };
     }
     let file = tmp.join("download");
-    let r = if crate::install::chart_link(link) {
+    let r = if crate::links::chart_link(link) {
         let mut plain = crate::install::job::Acquire::plain(link, file.clone(), cx);
         match crate::install::job::run_job(&mut plain, net) {
             Ok(g) if g.head.trim_ascii_start().starts_with(b"<") => Err(Fetch::Page),
@@ -163,7 +163,7 @@ pub fn probe(
         }
         Ok(()) => {
             let size = std::fs::metadata(&file).map_or(0, |m| m.len());
-            if crate::install::chart_link(link) {
+            if crate::links::chart_link(link) {
                 Checked {
                     state: State::Chart,
                     kind: Some(Kind::Addon),
