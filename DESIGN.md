@@ -155,8 +155,12 @@ Where a request goes is the link's to say only so far:
   folded as the key's last 8 bytes say) or no file: natively checked as
   the last bytes come and the file removed, in a page before it is handed
   on (`web::served`).
-- A download's file is made anew for it, the user's only (`create_new`,
-  0600): what is at its place is removed, never written through.
+- A download's file is made anew for it (`create_new`), in a folder of
+  the run's own (0700) that keeps it from others while it comes, and with
+  the mode any file made there has, as an unpacked one (`link get -o
+  file` writes it where it is told): what is at its place is removed,
+  never written through; what is neither a file nor a link (a device, a
+  pipe) is not removed, and the download fails.
 
 ### Refusals
 

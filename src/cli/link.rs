@@ -136,11 +136,16 @@ fn get(
     if into_dir {
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     }
-    let tmp = if into_dir {
-        out.join(format!(".bmseeker-{}", crate::install::unique()))
-    } else {
-        out.to_path_buf()
-    };
+    // (into a folder: through one of this run's own, which keeps the file
+    // from others while it comes)
+    let aside = into_dir.then(|| out.join(format!(".bmseeker-{}", crate::install::unique())));
+    if let Some(d) = &aside {
+        crate::fs::Store::create_new_dir(&crate::fs::Disk, d)
+            .map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let tmp = aside
+        .as_ref()
+        .map_or(out.to_path_buf(), |d| d.join("download"));
     let mut errors = Vec::new();
     // links that gave a page: a browser may get the file from them
     let mut pages = Vec::new();
@@ -183,6 +188,9 @@ fn get(
     }
     let Some((link, name)) = got else {
         let _ = std::fs::remove_file(&tmp);
+        if let Some(d) = &aside {
+            let _ = std::fs::remove_dir(d);
+        }
         r.out.record(json!({"errors": errors, "pages": pages}), || {
             errors.join("\n")
         });
@@ -190,12 +198,16 @@ fn get(
     };
     // (one file name in `out`, whatever the transport said)
     let name = crate::install::safe_name(&name);
-    let file = if into_dir {
-        let f = out.join(&name);
-        std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))?;
-        f
-    } else {
-        tmp
+    let file = match &aside {
+        Some(d) => {
+            let f = out.join(&name);
+            let moved = std::fs::rename(&tmp, &f);
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_dir(d);
+            moved.map_err(|e| format!("{}: {e}", f.display()))?;
+            f
+        }
+        None => tmp,
     };
     let format = crate::unpack::sniff_file(&file).map_or("file", |f| f.ext());
     r.out.record(

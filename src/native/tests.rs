@@ -420,7 +420,8 @@ fn answers_are_read_to_their_kinds_limit() {
 }
 
 /// A download's file is made for it alone: what is at its place is not
-/// written through, and the file is the user's only.
+/// written through; the file has the mode any file made there has (its
+/// folder keeps it from others while it comes).
 #[cfg(unix)]
 #[test]
 fn a_slot_is_made_anew() {
@@ -435,7 +436,9 @@ fn a_slot_is_made_anew() {
     assert_eq!(std::fs::read(&kept).unwrap(), b"kept");
     let made = std::fs::symlink_metadata(&slot).unwrap();
     assert!(made.is_file());
-    assert_eq!(made.permissions().mode() & 0o777, 0o600);
+    std::fs::write(dir.join("any"), "").unwrap();
+    let any = std::fs::metadata(dir.join("any")).unwrap();
+    assert_eq!(made.permissions().mode(), any.permissions().mode());
     assert_eq!(std::fs::read(&slot).unwrap(), b"PK new");
     // an earlier try's file is replaced
     download(&n, format!("{}/a.zip", s.url), &slot).unwrap();
