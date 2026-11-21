@@ -341,6 +341,47 @@ fn zip_time<R: std::io::Read>(e: &zip::read::ZipFile<'_, R>) -> Option<i64> {
     ))
 }
 
+/// Entries a zip's directory may list (its folders too): the zip reader
+/// holds each in memory before the first member is counted.
+const ZIP_ENTRIES: u64 = 2 * MEMBERS as u64;
+
+/// The most entries an end record in the last 64 KiB of the zip `r` says
+/// its directory has (the reader tries each, from the last; a zip64 one's
+/// count where its locator says, the zip read from its first byte).
+fn zip_entries(r: &mut dyn ReadSeek) -> io::Result<u64> {
+    use std::io::SeekFrom;
+    let len = r.seek(SeekFrom::End(0))?;
+    // (the record, 22 bytes, then a comment of 64 KiB at most)
+    r.seek(SeekFrom::Start(len.saturating_sub((1 << 16) + 64)))?;
+    let mut tail = Vec::new();
+    r.read_to_end(&mut tail)?;
+    let at = |b: &[u8], i: usize, n: usize| -> u64 {
+        (b.get(i..i + n)).map_or(0, |x| x.iter().rev().fold(0, |v, &d| v << 8 | u64::from(d)))
+    };
+    let mut most = 0;
+    for i in (0..tail.len()).filter(|&i| tail[i..].starts_with(b"PK\x05\x06")) {
+        let zip64 = at(&tail, i + 10, 2) == 0xffff
+            || at(&tail, i + 12, 4) == 0xffff_ffff
+            || at(&tail, i + 16, 4) == 0xffff_ffff;
+        let locator = i
+            .checked_sub(20)
+            .filter(|&l| tail[l..].starts_with(b"PK\x06\x07"));
+        let n = match locator {
+            Some(l) if zip64 => {
+                let mut record = [0; 40];
+                r.seek(SeekFrom::Start(at(&tail, l + 8, 8)))?;
+                match r.read_exact(&mut record) {
+                    Ok(()) if record.starts_with(b"PK\x06\x06") => at(&record, 32, 8),
+                    _ => 0,
+                }
+            }
+            _ => at(&tail, i + 10, 2),
+        };
+        most = most.max(n);
+    }
+    Ok(most)
+}
+
 /// The zip `r`, refused when a member's local header names another file,
 /// or another method or encryption, than the central directory does: a
 /// tool that reads the local headers would unpack other files than these.
@@ -349,7 +390,15 @@ fn zip_time<R: std::io::Read>(e: &zip::read::ZipFile<'_, R>) -> Option<i64> {
 fn zip_checked(
     r: Box<dyn ReadSeek + Send>,
 ) -> Result<zip::ZipArchive<Box<dyn ReadSeek + Send>>, String> {
-    let z = zip::ZipArchive::new(r).map_err(|e| e.to_string())?;
+    // (from its first byte, as `sniff` found it: no other records looked
+    // for than those `zip_entries` reads)
+    let open = |r| {
+        let from_start = zip::read::Config {
+            archive_offset: zip::read::ArchiveOffset::Known(0),
+        };
+        zip::ZipArchive::with_config(from_start, r).map_err(|e| e.to_string())
+    };
+    let z = open(r)?;
     let at = (0..z.len())
         .map(|i| {
             let e = z.by_index_data(i)?;
@@ -368,7 +417,7 @@ fn zip_checked(
             ));
         }
     }
-    zip::ZipArchive::new(r).map_err(|e| e.to_string())
+    open(r)
 }
 
 /// What a zip member's local and central headers must agree on.
@@ -497,6 +546,11 @@ fn each_member(
 ) -> Result<(), String> {
     match format {
         Format::Zip => {
+            let mut r = r;
+            if zip_entries(&mut r).map_err(|e| e.to_string())? > ZIP_ENTRIES {
+                why.set(Some(Stopped::TooMany));
+                return Err(Error::TooMany(MEMBERS).to_string());
+            }
             let mut z = zip_checked(r)?;
             for i in 0..z.len() {
                 let mut e = z.by_index(i).map_err(|e| e.to_string())?;
@@ -1318,6 +1372,34 @@ mod tests {
         assert_eq!(got.len(), 20_000);
         assert_eq!(got[0].rel, PathBuf::from("Song/0.wav"));
         assert_eq!(mem.get(Path::new("d/Song/7.wav")).unwrap().0, b"new");
+    }
+
+    /// A zip whose directory lists more entries than it may hold files is
+    /// refused by its end record, before its directory is read; one of
+    /// more than 65,535 (its end record a zip64 one) is not.
+    #[test]
+    fn a_zip_directory_within_the_number_of_files() {
+        let names: Vec<String> = (0..66_000).map(|i| format!("{i}")).collect();
+        let files: Vec<(&str, &[u8])> = (names.iter()).map(|n| (n.as_str(), &b""[..])).collect();
+        let z = zip(&files);
+        let mut n = 0;
+        assert_eq!(unpack_bytes(z.clone(), |_, _| n += 1), Ok(66_000));
+        // the zip64 end record says 600,000
+        let at = z.windows(4).rposition(|w| w == b"PK\x06\x06").unwrap();
+        let mut many = z.clone();
+        for i in [at + 24, at + 32] {
+            many[i..i + 8].copy_from_slice(&600_000u64.to_le_bytes());
+        }
+        let mut n = 0;
+        let e = unpack_bytes(many.clone(), |_, _| n += 1).unwrap_err();
+        assert_eq!((e, n), (Error::TooMany(MEMBERS).to_string(), 0));
+        let e = unpack(
+            Blob::Bytes(many),
+            &crate::fs::Mem::default(),
+            Path::new("d"),
+            BUDGET,
+        );
+        assert_eq!(e.unwrap_err(), Error::TooMany(MEMBERS).to_string());
     }
 
     /// Cancelled: nothing more is unpacked.
