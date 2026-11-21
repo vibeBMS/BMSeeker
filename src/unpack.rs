@@ -899,8 +899,9 @@ pub(crate) fn unpack_from(
     for &i in nested.iter().rev() {
         let at = dest.join(&out[i].rel);
         let rel = &out[i].rel;
+        // (one folder's name, whatever the stem: `...zip`'s is `..`)
         let stem = (rel.file_name().map(|n| n.to_string_lossy()))
-            .and_then(|n| archive_stem(&n).map(str::to_owned))
+            .and_then(|n| archive_stem(&n).and_then(safe_part))
             .unwrap_or_else(|| "archive".into());
         let into = rel.with_file_name(stem);
         let sub = dest.join(&into);
@@ -1669,6 +1670,39 @@ mod tests {
         let got = unpack(Blob::Bytes(outer), &mem, Path::new("d"), BUDGET).unwrap();
         assert_eq!(got.len(), 2);
         assert!(mem.get(Path::new("d/Song_bga.zip")).is_some());
+    }
+
+    /// An archive in an archive is unpacked into a folder of one safe name
+    /// beside it: a name that is no folder of its own (`..`, `.`) or one a
+    /// file system changes is made one.
+    #[test]
+    fn archives_in_an_archive_named_as_no_folder() {
+        use crate::fs::Mem;
+        let inner = zip(&[("a.txt", b"a"), ("Song/b.txt", b"b")]);
+        for (name, into) in [
+            ("...zip", "archive"),
+            ("..zip", "archive"),
+            (" .zip", "archive"),
+            ("Song..zip", "Song"),
+            ("Song. .rar", "Song"),
+            ("CON.7z", "_CON"),
+        ] {
+            let outer = zip(&[(name, &inner), ("readme.txt", b"hi")]);
+            let mem = Mem::default();
+            let got = unpack(Blob::Bytes(outer), &mem, Path::new("d"), BUDGET).unwrap();
+            let rels: Vec<PathBuf> = sorted(got).into_iter().map(|m| m.rel).collect();
+            let into = Path::new(into);
+            assert_eq!(
+                rels,
+                [
+                    into.join("Song/b.txt"),
+                    into.join("a.txt"),
+                    "readme.txt".into()
+                ],
+                "{name}"
+            );
+            assert!(mem.get(&Path::new("d").join(into).join("a.txt")).is_some());
+        }
     }
 
     /// An archive in an archive that is none (or cannot be read) stays as

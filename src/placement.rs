@@ -636,11 +636,17 @@ pub(crate) fn sounds_in(
 }
 
 /// The folder below `lib`'s root for a song's archive named `stem` whose
-/// charts are `charts`: `stem` when it is free or holds the same song (a
-/// chart of the same title and artist, as `lib` knows them), else
+/// charts are `charts`: `stem` (made one folder's name, [`safe_part`];
+/// [`NEW_FOLDER`] when nothing is left) when it is free or holds the same
+/// song (a chart of the same title and artist, as `lib` knows them), else
 /// `stem (2)`, `stem (3)`... (another song of that title).
+///
+/// [`safe_part`]: crate::fs::safe_part
+/// [`NEW_FOLDER`]: crate::naming::NEW_FOLDER
 pub(crate) fn song_folder(fs: &dyn Fs, lib: &Library, stem: &str, charts: &[ChartInfo]) -> PathBuf {
-    free_folder(fs, lib.root(), stem, charts, |d| lib.charts_below(fs, d))
+    // (a download's, a title's or the charts' name: one folder's below it)
+    let stem = crate::fs::safe_part(stem).unwrap_or_else(|| crate::naming::NEW_FOLDER.into());
+    free_folder(fs, lib.root(), &stem, charts, |d| lib.charts_below(fs, d))
 }
 
 fn free_folder(
@@ -1278,6 +1284,29 @@ mod tests {
         let near = index.near(&Disk, &[z], Path::new(""));
         assert_eq!(near[0].0.dir, lib.join("Pack/Song"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A song's folder is one folder below the library, whatever it is
+    /// named after.
+    #[test]
+    fn a_songs_folder_is_one_below_the_library() {
+        let mem = crate::fs::Mem::default();
+        let lib = Library::new(Path::new("bms"));
+        for (stem, at) in [
+            ("..", "bms/新しいフォルダー"),
+            (".", "bms/新しいフォルダー"),
+            ("", "bms/新しいフォルダー"),
+            ("a/../..", "bms/a_.._"),
+            ("Song.", "bms/Song"),
+            ("Song ", "bms/Song"),
+            ("CON", "bms/_CON"),
+        ] {
+            assert_eq!(
+                song_folder(&mem, &lib, stem, &[]),
+                Path::new(at),
+                "{stem:?}"
+            );
+        }
     }
 
     #[test]
