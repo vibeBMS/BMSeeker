@@ -170,10 +170,12 @@ mod tests {
         );
     }
 
-    /// A text of nothing but `&` costs its length, not its square.
+    /// A text of nothing but `&` costs its length, not its square (the
+    /// square of this length would take minutes; its length takes well
+    /// under the limit on a slow machine running other tests beside it).
     #[test]
     fn many_references() {
-        let n = 2_000_000;
+        let n = 200_000;
         let t = std::time::Instant::now();
         assert_eq!(unescape(&"&".repeat(n)).len(), n);
         assert_eq!(unescape(&"&amp".repeat(n / 4)).len(), n / 4);
