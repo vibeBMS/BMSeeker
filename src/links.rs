@@ -114,15 +114,12 @@ impl Links {
     /// each row taken as it is read.
     pub fn from_stella(json: &[u8]) -> Links {
         use serde::de::{Deserializer, SeqAccess, Visitor};
-        #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
-        struct Row {
-            #[serde(deserialize_with = "crate::json::text")]
-            md5: String,
-            #[serde(deserialize_with = "crate::json::text")]
-            url: String,
-            #[serde(deserialize_with = "crate::json::text")]
-            url_diff: String,
+        crate::json::last_wins! {
+            struct Row {
+                md5: String = crate::json::text,
+                url: String = crate::json::text,
+                url_diff: String = crate::json::text,
+            }
         }
         struct Rows<'a>(&'a mut Links);
         impl<'de> Visitor<'de> for Rows<'_> {
@@ -283,6 +280,19 @@ mod tests {
         assert!(is_dead(
             "https://web.archive.org/web/2019/http://absolute.pv.land.to/x"
         ));
+    }
+
+    /// A Stella row with a key twice: its last value.
+    #[test]
+    fn a_stella_key_twice() {
+        let stella = br#"[{"md5":"0123456789abcdef0123456789abcdef","url":"https://a/","url":"https://b/"}]"#;
+        let links = Links::from_stella(stella);
+        assert_eq!(links.len(), 1);
+        let e = TableEntry {
+            md5: "0123456789abcdef0123456789abcdef".into(),
+            ..Default::default()
+        };
+        assert_eq!(links.of(&e).0, "https://b/");
     }
 
     /// A table's link to a dead uploader is tried last (its mirrors may

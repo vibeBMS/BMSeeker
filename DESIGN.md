@@ -49,10 +49,10 @@ The modules in more detail:
 | --- | --- |
 | `table` | bmstable difficulty tables (the HTML's `<meta name="bmstable">` → header → data) |
 | `hosts` | link → archive: direct links, Google Drive files and folders (their `resourcekey` kept), Dropbox, MediaFire, MEGA files and folders (in a pack, the song found by title and artist), event work pages on manbow and BMS SEARCH (venue.bmssearch.net; a chart's page bmssearch.net/bmses/ID: its work's links; a manbow work in the [event mirror](https://github.com/vibeBMS/BMS) comes from the mirror), dead uploaders' mirrors. OneDrive in a browser, with `PRESS_DOWNLOAD_JS` |
-| `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh / .tar / .tar.gz (.tgz) into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder; each name one that Windows holds too, wherever it is unpacked: no device's name, no dot or space at its end; at most 4 GiB unpacked natively, 1 GiB in a web page, what an archive decodes for members passed by counted too; at most 250,000 files, in paths of 32 folders; a 7z's decoder within 1 GiB of memory, 256 MiB in a web page and on phones, its header within 17 MiB, 9 there; a tar's long names within 1 MiB; the archive's file times kept; archives inside one holding no chart unpacked too; 7z on one thread in a web page and on phones; given up when its download is cancelled). `import` takes a file brought in by hand, and places the separate charts that waited for what came in. A chart is read up to 32 MiB (a larger one is a chart that cannot be read). What a download passes through in the downloads folder (`.job-…`, `.take-…`, `.in-…`) is made anew under a name that cannot be guessed, and what a run that died left of them goes after a day |
-| `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not, nor one of a time still to come; where file times mean nothing, as in a web page's storage, the one there stays) |
+| `unpack` / `import` | unpacking .zip / .7z / .rar / .lzh / .tar / .tar.gz (.tgz) into a disk or any `fs::Store` (Shift_JIS and EUC-KR names; no escaping the folder; each name one that Windows holds too, wherever it is unpacked: no device's name, no dot or space at its end; at most 4 GiB unpacked natively, 1 GiB in a web page, what an archive decodes for members passed by counted too; at most 250,000 files, in paths of 32 folders (a zip is read from its first byte; one whose directory says it lists more than 500,000 entries, its folders counted, is refused before that directory is read); a 7z's decoder within 1 GiB of memory, 256 MiB in a web page and on phones, its header within 17 MiB, 9 there (it lists the files, some 150 bytes each: a 7z of more than about 100,000 files, 50,000 there, is refused by it before the 250,000); a tar's long names within 1 MiB; the archive's file times kept; archives inside one holding no chart unpacked too; 7z on one thread in a web page and on phones; given up when its download is cancelled). `import` takes a file brought in by hand, and places the separate charts that waited for what came in. A chart is read up to 32 MiB (a larger one is a chart that cannot be read). What a download passes through (`.job-…` and `.take-…` in the downloads folder; `.in-…` there, or in the song's folder whose files it replaces) is made anew under a name that cannot be guessed; what a run that died left of them in the downloads folder goes after a day. A `.in-…` in a song's folder is not removed: it holds the song's own files a run that died while replacing them had set aside (`N.old`), to be put back by hand |
+| `placement` | which song folder a separate chart belongs in: a song's folder is one holding charts, its files matched by their path in it (`sound/kick.wav` is `sound/kick.ogg` there, not a `kick.ogg` beside the charts) and kind (sounds .wav .ogg .mp3 .flac, images .png .bmp .jpg .jpeg, movies); 99% or more of the sounds the chart uses, counting the files that came with it, plus the same song (title and artist), else up to three candidates holding 80% or more (ranked by sounds, then BGA images, movies, stage file / banner / back image); files of the same name overwritten smartly (`clash`: a chart never replaces another; the same size within 2 seconds is the same file; a newer one replaces, an older one does not, nor one of a time more than a day to come (a zip's times are local, read as UTC); where file times mean nothing, as in a web page's storage, the one there stays) |
 | `library` | the library as the install tools see it: its songs' folders (those holding charts) with their files, the charts' titles and artists (by artist, as compared), and which folders hold a chart of an MD5 or SHA-256; read from the files once (`scan_cached`), folder by folder when first needed (`new`), or given by a player's own records (`from_catalog`); what comes in is added to it (`add`, `add_folder`) |
-| `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
+| `package` | what a download holds: its packages (`split`: songs' folders, charts of their own; a file in a folder above them all, as a cover beside a song's folder, in none; the whole download when not sure) and what each is to the library (`classify`: owned, a new song, charts for a song's folder there; the link it came from counting most) |
 | `install` | one song of a table: its song and separate chart links downloaded into the library (what was found by name only if it holds the chart); what arrives goes through `take` (on any `fs::Store`): unpacked into a folder of its own, planned without touching a file (`plan`), carried out (`apply`) |
 | `sources` | where else a song's links are looked for: tables, Stella's list, TSV lists, BMS SEARCH, chart mirrors, Ginger's and Konmai's packages by MD5, the community archive |
 | `links` | other links by a chart's MD5 (the tables given, the Stella uploader's list): filling empty or dead links, trying them in turn when one does not download |
@@ -111,7 +111,11 @@ under 240 KiB (4 KiB a second: a server that sends a byte now and then
 holds a run no longer than the file's size at that speed); a MEGA file is
 decrypted as it comes, and the file's head kept as it is written. Waits are
 slept, ended by a cancel. A server has 15 seconds to take the connection
-and 20 (a page, an API) or 30 (a download) to begin its answer.
+and 20 (a page, an API) or 30 (a download) to begin its answer. A web
+page's driver cannot watch a download come (a worker's request has one
+time limit): an answer has a minute in all there, a download 30 minutes
+(`web::DOWNLOAD_MS`; a pack of 300 MB from a host that sends 100 KB a
+second does not come in time: download it in a tab and import it).
 
 What another party's answer may cost is bounded where it is read:
 
@@ -155,8 +159,12 @@ Where a request goes is the link's to say only so far:
   folded as the key's last 8 bytes say) or no file: natively checked as
   the last bytes come and the file removed, in a page before it is handed
   on (`web::served`).
-- A download's file is made anew for it, the user's only (`create_new`,
-  0600): what is at its place is removed, never written through.
+- A download's file is made anew for it (`create_new`), in a folder of
+  the run's own (0700) that keeps it from others while it comes, and with
+  the mode any file made there has, as an unpacked one (`link get -o
+  file` writes it where it is told): what is at its place is removed,
+  never written through; what is neither a file nor a link (a device, a
+  pipe) is not removed, and the download fails.
 
 ### Refusals
 
@@ -327,13 +335,15 @@ then places the separate charts that waited for what came in.
   are not unlike that chart's in both (`titles::Relation::Unrelated`: an
   MD5 can be made to match; such a chart is not the library's, and its
   package is kept apart). Only then do its newer files replace those of
-  their paths there (a chart never). A folder found by its charts'
+  their paths there (a chart never), in that folder and below it: a
+  package laid out above it (a pack of songs, its folder the pack's)
+  replaces nothing of the songs beside it, even brought in again. A folder found by its charts'
   titles and artists, its name, its sounds or a table's `org_md5` takes
   only the files it lacks (a chart of a name there beside it, `name_.bms`),
   unless brought in again (`--reinstall`: newer files replace those
   there; a song's folder of its name has them all replaced). A file's
-  time still to come (an archive gives its files any) is newer than
-  none.
+  time more than a day to come (an archive gives its files any; a day,
+  as a zip's local times are read as UTC) is newer than none.
 - **Which song's folder**, in this order:
   1. the package's own charts the library has (each votes for its folder;
      two folders with as many votes, as when the library holds a chart

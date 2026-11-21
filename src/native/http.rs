@@ -313,19 +313,23 @@ fn too_large() -> NetError {
     crate::unpack::Error::TooLarge(BUDGET).to_string().into()
 }
 
-/// `out` made for this download alone, the user's only: what is there
-/// under its name (an earlier try's file) is removed, never written
-/// through, so a link made ready there leads the bytes nowhere else.
+/// `out` made for this download alone, with the mode any file made there
+/// has (as an unpacked one: its folder, the run's own, keeps it from
+/// others while it comes): what is there under its name (an earlier try's
+/// file) is removed, never written through, so a link made ready there
+/// leads the bytes nowhere else; what is neither a file nor a link (a
+/// device, a pipe) is left as it is.
 fn create(out: &Path) -> std::io::Result<std::fs::File> {
-    match std::fs::remove_file(out) {
+    match std::fs::symlink_metadata(out) {
+        Ok(m) if m.is_file() || m.file_type().is_symlink() => std::fs::remove_file(out)?,
+        Ok(_) => return Err(std::io::Error::other("not a file")),
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
+        Err(_) => {}
     }
-    let mut options = std::fs::File::options();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(out)
+    std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(out)
 }
 
 /// `target` into `out` (a MEGA file decrypted as it comes, and checked
@@ -374,7 +378,8 @@ pub(super) fn download(
         .as_deref()
         .map(crate::hosts::MegaCipher::new);
     let body = Paced::new(res.body_mut().as_reader(), WINDOW, SLOW);
-    let head = receive(body, mega, out, progress, &failed).inspect_err(|_| {
+    let file = create(out).map_err(|e| NetError::from(format!("{}: {e}", out.display())))?;
+    let head = receive(body, mega, file, progress, &failed).inspect_err(|_| {
         let _ = std::fs::remove_file(out);
     })?;
     Ok(Served {
@@ -385,17 +390,16 @@ pub(super) fn download(
     })
 }
 
-/// `body` into the new file `out` (through `mega`, if it is a MEGA file's:
+/// `body` into the new `file` (through `mega`, if it is a MEGA file's:
 /// decrypted as it comes, and at its end the file its key was made for),
 /// reporting to `progress`: its first bytes.
 fn receive(
     mut body: impl Read,
     mut mega: Option<crate::hosts::MegaCipher>,
-    out: &Path,
+    file: std::fs::File,
     progress: Option<&Progress>,
     failed: &dyn Fn(ureq::Error) -> NetError,
 ) -> Result<Vec<u8>, NetError> {
-    let file = create(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut w = std::io::BufWriter::new(file);
     let mut buf = vec![0u8; 1 << 16];
     let mut head = Vec::with_capacity(HEAD);

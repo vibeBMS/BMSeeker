@@ -131,7 +131,8 @@ The same window runs in a browser at <https://vibebms.github.io/BMSeeker/>. Sett
 - **Download as zip**: what comes in, as one zip.
 
 Downloads go through vibeBMS's CORS proxy. A link that gives a page opens in a tab: download its file there, then
-Browser › Import a downloaded file.
+Browser › Import a downloaded file. A download in the page has 30 minutes in all: a large pack from a slow host
+is downloaded the same way.
 
 ## Building
 

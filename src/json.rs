@@ -194,6 +194,67 @@ pub(crate) fn objects_of<T: serde::de::DeserializeOwned>(body: &[u8]) -> Vec<T> 
     read.unwrap_or_default()
 }
 
+/// A struct of the fields `name: Type` (`= with`: read by that function,
+/// as a field's `deserialize_with`), each its default when not given, read
+/// from an object as a tree reads one: a key given twice, its last value
+/// (serde's derive refuses such an object), other keys passed by.
+macro_rules! last_wins {
+    ($(#[$m:meta])* struct $t:ident { $($f:ident: $ty:ty $(= $with:path)?),* $(,)? }) => {
+        $(#[$m])*
+        #[derive(Default)]
+        struct $t {
+            $($f: $ty),*
+        }
+        impl<'de> serde::Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<$t, D::Error> {
+                struct V;
+                impl<'de> serde::de::Visitor<'de> for V {
+                    type Value = $t;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("an object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut m: A,
+                    ) -> Result<$t, A::Error> {
+                        let mut out = $t::default();
+                        while let Some(k) = m.next_key::<std::borrow::Cow<str>>()? {
+                            match &*k {
+                                $(stringify!($f) => {
+                                    out.$f = $crate::json::field!(m, $ty $(, $with)?)
+                                })*
+                                _ => {
+                                    m.next_value::<serde::de::IgnoredAny>()?;
+                                }
+                            }
+                        }
+                        Ok(out)
+                    }
+                }
+                d.deserialize_map(V)
+            }
+        }
+    };
+}
+pub(crate) use last_wins;
+
+/// A [`last_wins`] field's value, of its type or read by `with`.
+macro_rules! field {
+    ($m:ident, $ty:ty) => {
+        $m.next_value::<$ty>()?
+    };
+    ($m:ident, $ty:ty, $with:path) => {{
+        struct W($ty);
+        impl<'de> serde::Deserialize<'de> for W {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<W, D::Error> {
+                $with(d).map(W)
+            }
+        }
+        $m.next_value::<W>()?.0
+    }};
+}
+pub(crate) use field;
+
 #[cfg(test)]
 mod tests {
     use super::*;

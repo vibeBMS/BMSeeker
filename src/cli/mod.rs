@@ -351,4 +351,35 @@ mod tests {
         assert_eq!(names, ["_.._evil.zip"]);
         assert!(!tmp.join("a/evil.zip").exists());
     }
+
+    /// `link get -o` what is no file (a device, a pipe, a socket): not
+    /// written to, nor removed.
+    #[cfg(unix)]
+    #[test]
+    fn link_get_into_no_file() {
+        use std::os::unix::fs::FileTypeExt;
+        let tmp = crate::testkit::tmp("link-get-socket");
+        let socket = tmp.join("socket");
+        let _listening = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        struct Offline;
+        impl Driver for Offline {
+            fn perform(&self, effect: Effect) -> Fed {
+                panic!("{effect:?}: nothing is asked for");
+            }
+        }
+        let run = Run {
+            out: Out::new(true, |_| {}),
+            cx: Context::default(),
+            fs: Arc::new(crate::fs::Disk),
+            net: &Offline,
+        };
+        let args = ["bmseeker", "link", "get", "https://h.example/a.zip", "-o"];
+        let args = args.into_iter().chain([socket.to_str().unwrap()]);
+        let e = Cli::try_parse_from(args).unwrap().run(&run).unwrap_err();
+        assert!(e.contains("not a file"), "{e}");
+        assert!(std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket());
+    }
 }

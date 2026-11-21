@@ -115,8 +115,9 @@ pub(crate) enum Over {
     /// itself.
     Keep,
     /// The overwrite rule ([`placement::clash`]: a newer file replaces it,
-    /// a chart never does): the folder holds one of the package's charts
-    /// ([`Library::holding`]), or the package is brought in again.
+    /// a chart never does) in or below the item's `within` folders (they
+    /// hold one of the package's charts, [`Library::holding`], or the
+    /// package is brought in again); [`Over::Keep`] elsewhere.
     Newer,
     /// It is replaced, a chart too: a song new to the library brought in
     /// again (`reinstall`) into the folder of its name.
@@ -131,6 +132,20 @@ pub(crate) struct Item {
     pub(crate) outcome: Outcome,
     pub(crate) moves: Vec<(PathBuf, PathBuf)>,
     pub(crate) over: Over,
+    /// Where [`Over::Newer`] replaces: a package laid out above the
+    /// folders that tell where it goes (a song of a pack's) reaches the
+    /// songs beside them too, and their files stay.
+    pub(crate) within: Vec<PathBuf>,
+}
+
+impl Item {
+    /// What the file moved to `to` does to the one there.
+    fn over_at(&self, to: &Path) -> Over {
+        match self.over {
+            Over::Newer if !self.within.iter().any(|d| below(to, d)) => Over::Keep,
+            o => o,
+        }
+    }
 }
 
 impl Item {
@@ -139,6 +154,7 @@ impl Item {
             outcome: Outcome::Rejected(f),
             moves: Vec::new(),
             over: Over::Keep,
+            within: Vec::new(),
         }
     }
 }
@@ -231,6 +247,13 @@ fn owned_vote(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vote {
         }
     }
     tally(by_md5.into_values().filter(|v| !v.is_empty()).collect())
+}
+
+/// The library's folders holding one of the package's charts.
+fn holding(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vec<PathBuf> {
+    (p.charts.iter())
+        .flat_map(|&c| s.held(fs, c, lib))
+        .collect()
 }
 
 /// The song's own charts a table names (`org_md5`) vote for theirs.
@@ -332,6 +355,7 @@ fn waiting(s: &Staged, charts: &[usize], outcome: Outcome) -> Item {
     Item {
         outcome,
         over: Over::Keep,
+        within: Vec::new(),
         moves: charts
             .iter()
             .map(|&c| {
@@ -364,10 +388,11 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         true => Over::Newer,
         false => Over::Keep,
     };
-    let into = |d: PathBuf, over: Over| Item {
+    let into = |d: PathBuf, over: Over, within: Vec<PathBuf>| Item {
         moves: laid_out(fs, s, p, lib, &d, fill),
         outcome: Outcome::Into(d),
         over,
+        within,
     };
     let ask = |dirs: Vec<PathBuf>| {
         let labels = dirs
@@ -381,20 +406,20 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
     };
     match owned_vote(fs, s, p, lib) {
         Vote::One(d) if fits(fs, s, p, lib, &new, &d, req.rules) => {
-            return vec![into(d, Over::Newer)]
+            return vec![into(d, Over::Newer, holding(fs, s, p, lib))]
         }
         Vote::One(d) => return vec![ask(vec![d])],
         Vote::Tie(dirs) => return vec![ask(dirs)],
         Vote::None => {}
     }
     match hint_vote(lib, &req.org_md5) {
-        Vote::One(d) => {
+        Vote::One(song) => {
             let d = new
                 .first()
-                .and_then(|&c| up(fs, lib, &d, &sub(s, p, c)))
-                .unwrap_or(d);
+                .and_then(|&c| up(fs, lib, &song, &sub(s, p, c)))
+                .unwrap_or_else(|| song.clone());
             if fits(fs, s, p, lib, &new, &d, req.rules) {
-                return vec![into(d, over)];
+                return vec![into(d, over, vec![song])];
             }
         }
         Vote::Tie(dirs) => return vec![ask(dirs)],
@@ -433,7 +458,11 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         .collect();
     if let Some(Some(first)) = roots.first() {
         if roots.iter().all(|r| r.as_ref() == Some(first)) {
-            return vec![into(first.clone(), over)];
+            let songs = (located.iter()).filter_map(|(_, l, _)| match l {
+                Located::Move(x) => Some(x.clone()),
+                _ => None,
+            });
+            return vec![into(first.clone(), over, songs.collect())];
         }
     }
     // each chart on its own: the files right beside it with it (with the
@@ -458,6 +487,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
                     }
                 }
                 Item {
+                    within: vec![to.clone()],
                     outcome: Outcome::Into(to),
                     moves,
                     over,
@@ -556,6 +586,7 @@ fn new_item(
             true => Over::All,
             false => Over::Keep,
         },
+        within: Vec::new(),
     }
 }
 
@@ -639,6 +670,7 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
                         .unwrap_or_default(),
                     outcome: Outcome::Owned(at),
                     over: Over::Newer,
+                    within: holding(fs, s, p, lib),
                 });
             }
             PackageKind::Song => new.push(p),
@@ -807,7 +839,7 @@ fn applied(
             Outcome::New(dir) if fs.read_dir(dir).is_ok() && item.over != Over::All => {
                 // the folder of a song there: the files it lacks come in
                 let bad: Vec<Done> = (item.moves.iter())
-                    .filter_map(|(from, to)| bring(lib, from, to, item.over).err())
+                    .filter_map(|(from, to)| bring(lib, from, to, item.over_at(to)).err())
                     .collect();
                 match bad.is_empty() {
                     true => vec![Done::Added(dir.clone(), item.moves.len())],
@@ -840,7 +872,7 @@ fn applied(
             Outcome::Into(_) => item
                 .moves
                 .iter()
-                .filter_map(|(from, to)| match bring(lib, from, to, item.over) {
+                .filter_map(|(from, to)| match bring(lib, from, to, item.over_at(to)) {
                     Ok(at) => at.filter(|at| is_chart(at)).map(Done::Placed),
                     Err(d) => Some(d),
                 })
@@ -848,7 +880,7 @@ fn applied(
             Outcome::Owned(dir) => {
                 let mut done = vec![Done::Owned(dir.clone())];
                 for (from, to) in &item.moves {
-                    done.extend(bring(lib, from, to, item.over).err());
+                    done.extend(bring(lib, from, to, item.over_at(to)).err());
                 }
                 done
             }
