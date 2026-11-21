@@ -128,6 +128,11 @@ fn get(
         return Err("no link (give links, or --search with --title / --md5)".into());
     }
     let into_dir = out.is_dir() || out.as_os_str().to_string_lossy().ends_with('/');
+    // (a device or a pipe is neither written to nor removed)
+    let other = std::fs::symlink_metadata(out).is_ok_and(|m| !m.is_file() && !m.is_symlink());
+    if other && !into_dir {
+        return Err(format!("{}: not a file", out.display()));
+    }
     if into_dir {
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     }

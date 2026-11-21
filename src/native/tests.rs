@@ -440,4 +440,14 @@ fn a_slot_is_made_anew() {
     // an earlier try's file is replaced
     download(&n, format!("{}/a.zip", s.url), &slot).unwrap();
     assert_eq!(std::fs::read(&slot).unwrap(), b"PK new");
+    // what is no file (a device, a pipe, a socket) is not removed
+    use std::os::unix::fs::FileTypeExt;
+    let socket = dir.join("socket");
+    let _listening = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let e = download(&n, format!("{}/a.zip", s.url), &socket).unwrap_err();
+    assert!(e.error.to_string().contains("not a file"), "{}", e.error);
+    assert!(std::fs::symlink_metadata(&socket)
+        .unwrap()
+        .file_type()
+        .is_socket());
 }
