@@ -152,20 +152,15 @@ fn attr(tag: &str, ltag: &str, name: &str) -> Option<String> {
 /// where text is expected (a symbol as a number), `course` a list of
 /// courses, or of lists of them, or one course.
 pub(crate) fn parse_header(text: &str) -> Result<TableHeader, TableError> {
-    #[derive(Deserialize)]
-    struct Header {
-        #[serde(default)]
-        name: Text,
-        #[serde(default)]
-        symbol: Text,
-        #[serde(default)]
-        tag: Text,
-        #[serde(default)]
-        data_url: Text,
-        #[serde(default)]
-        level_order: Texts,
-        #[serde(default)]
-        course: Courses,
+    crate::json::last_wins! {
+        struct Header {
+            name: Text,
+            symbol: Text,
+            tag: Text,
+            data_url: Text,
+            level_order: Texts,
+            course: Courses,
+        }
     }
     let h = serde_json::from_str::<crate::json::Object<Header>>(text)
         .map_err(|e| TableError::Format(format!("header: {e}")))?
@@ -340,29 +335,23 @@ impl<'de> Deserialize<'de> for Texts {
     }
 }
 
-/// A course of a header's `course`.
-#[derive(Deserialize)]
-struct CourseRow {
-    #[serde(default)]
-    name: Text,
-    #[serde(default)]
-    md5: Texts,
-    #[serde(default)]
-    sha256: Texts,
-    #[serde(default)]
-    constraint: Texts,
-    #[serde(default, deserialize_with = "crate::json::objects")]
-    trophy: Vec<TrophyRow>,
+crate::json::last_wins! {
+    /// A course of a header's `course`.
+    struct CourseRow {
+        name: Text,
+        md5: Texts,
+        sha256: Texts,
+        constraint: Texts,
+        trophy: Vec<TrophyRow> = crate::json::objects,
+    }
 }
 
-#[derive(Deserialize)]
-struct TrophyRow {
-    #[serde(default)]
-    name: Text,
-    #[serde(default, deserialize_with = "rate")]
-    missrate: f64,
-    #[serde(default, deserialize_with = "rate")]
-    scorerate: f64,
+crate::json::last_wins! {
+    struct TrophyRow {
+        name: Text,
+        missrate: f64 = rate,
+        scorerate: f64 = rate,
+    }
 }
 
 impl From<CourseRow> for Course {
@@ -852,6 +841,24 @@ mod tests {
             let e = parse_header(odd).unwrap_err().to_string();
             assert!(e.contains(why), "{odd}: {e}");
         }
+    }
+
+    /// A key given twice in a header, a course or a trophy: its last value,
+    /// as in a data row.
+    #[test]
+    fn a_key_twice() {
+        let h = parse_header(
+            r#"{"name":"a","data_url":"d.json","name":"b",
+                "course":[{"name":"c","md5":["x"],"name":"d","trophy":[{"missrate":1,"missrate":2}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(&*h.name, "b");
+        let c = &h.courses[0];
+        assert_eq!((&*c.name, &c.md5[..]), ("d", &["x".to_string()][..]));
+        assert_eq!(c.trophy[0].missrate, 2.0);
+        let d =
+            parse_data(r#"[{"md5":"0123456789abcdef0123456789abcdef","level":"1","level":"2"}]"#);
+        assert_eq!(d.unwrap()[0].level, "2");
     }
 
     /// A data JSON made to be large to hold: what is no entry is dropped
