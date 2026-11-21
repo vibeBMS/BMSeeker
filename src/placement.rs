@@ -689,12 +689,17 @@ pub(crate) enum Clash {
     Rename,
 }
 
+/// How far to come a file's time may be and still be newer: a zip's times
+/// are the packing machine's local time, read as UTC, so one packed an
+/// hour ago in a zone ahead of UTC (up to 14 hours) is of a time to come.
+const AHEAD: i64 = 24 * 60 * 60;
+
 /// [`Clash`] for a file (`new`: its time and size; `old`: the one there):
 /// a chart never replaces another; the same size within 2 seconds is the
 /// same file; else a newer one replaces the one there, an older one does
-/// not, nor one of a time still to come (an archive gives its files the
-/// times it likes). Without file times to go by (`times` false: a web
-/// page's storage), the one there stays.
+/// not, nor one of a time still to come, more than a day ([`AHEAD`]; an
+/// archive gives its files the times it likes). Without file times to go
+/// by (`times` false: a web page's storage), the one there stays.
 pub(crate) fn clash(
     new: (i64, u64),
     old: Option<(i64, u64)>,
@@ -711,7 +716,7 @@ pub(crate) fn clash(
         return Clash::Keep;
     }
     let now = i64::try_from(crate::fs::now()).unwrap_or(i64::MAX);
-    if new.0 > old.0 && new.0 <= now {
+    if new.0 > old.0 && new.0 <= now.saturating_add(AHEAD) {
         Clash::Overwrite
     } else {
         Clash::Keep
@@ -1334,12 +1339,18 @@ mod tests {
         assert_eq!(clash((t, 5), None, false, false), Clash::Move);
     }
 
-    /// A file of a time still to come (an archive gives its files any)
-    /// is newer than none.
+    /// A file of a time more than a day to come (an archive gives its
+    /// files any) is newer than none; a zip's local time ahead of UTC
+    /// (packed an hour ago in Japan: 8 hours to come) is newer.
     #[test]
     fn a_time_to_come_wins_nothing() {
         let now = crate::fs::now() as i64;
-        let later = now + 24 * 60 * 60;
+        let later = now + 2 * 24 * 60 * 60;
+        let in_japan = now + 8 * 60 * 60;
+        assert_eq!(
+            clash((in_japan, 6), Some((now, 5)), false, true),
+            Clash::Overwrite
+        );
         assert_eq!(clash((later, 6), Some((now, 5)), false, true), Clash::Keep);
         assert_eq!(clash((later, 6), Some((0, 5)), false, true), Clash::Keep);
         assert_eq!(clash((now, 6), Some((0, 5)), false, true), Clash::Overwrite);
