@@ -327,7 +327,9 @@ then places the separate charts that waited for what came in.
   are not unlike that chart's in both (`titles::Relation::Unrelated`: an
   MD5 can be made to match; such a chart is not the library's, and its
   package is kept apart). Only then do its newer files replace those of
-  their paths there (a chart never). A folder found by its charts'
+  their paths there (a chart never), in that folder and below it: a
+  package laid out above it (a pack of songs, its folder the pack's)
+  replaces nothing of the songs beside it, even brought in again. A folder found by its charts'
   titles and artists, its name, its sounds or a table's `org_md5` takes
   only the files it lacks (a chart of a name there beside it, `name_.bms`),
   unless brought in again (`--reinstall`: newer files replace those

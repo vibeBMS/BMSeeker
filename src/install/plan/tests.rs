@@ -586,6 +586,7 @@ fn a_failed_move_keeps_the_song() {
             outcome: Outcome::New("bms/Song".into()),
             moves: moves.to_vec(),
             over: Over::All,
+            within: Vec::new(),
         };
         let mut lib = Library::scan(&fs, Path::new("bms"));
         let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
@@ -613,6 +614,7 @@ fn a_failed_overwrite_keeps_the_file() {
         outcome: Outcome::Into("bms/Song".into()),
         moves: vec![("dl/s/01.ogg".into(), "bms/Song/01.ogg".into())],
         over: Over::Newer,
+        within: vec!["bms/Song".into()],
     };
     let mut lib = Library::scan(&fs, Path::new("bms"));
     let done = apply(&fs, vec![item.clone()], Path::new(DL), &mut lib);
@@ -721,6 +723,7 @@ fn a_copy_failing_midway_leaves_nothing() {
             outcome: Outcome::New("bms/Song".into()),
             moves: moves.to_vec(),
             over: Over::All,
+            within: Vec::new(),
         };
         let mut lib = Library::scan(&fs, Path::new("bms"));
         let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
@@ -749,6 +752,7 @@ fn a_long_name_moves_in() {
             outcome: Outcome::New(song.clone()),
             moves: vec![(from.clone(), song.join(&name))],
             over: Over::All,
+            within: Vec::new(),
         };
         let done = apply(&Disk, vec![item], &d.join("dl"), &mut lib);
         assert!(matches!(&done[..], [Done::Added(_, 1)]), "{done:?}");
@@ -912,6 +916,7 @@ fn moves_keep_to_the_library() {
             outcome,
             moves: vec![("dl/s/a.ogg".into(), to.into())],
             over: Over::Keep,
+            within: Vec::new(),
         };
         let done = apply(&m, vec![item], Path::new(DL), &mut l);
         assert!(matches!(&done[..], [Done::Failed(_)]), "{to}: {done:?}");
@@ -1047,4 +1052,75 @@ fn a_hash_unlike_its_folder_is_not_the_song() {
         matches!(&items[..], [Item { outcome: Outcome::Owned(d), .. }] if d == Path::new("bms/Song")),
         "{items:?}"
     );
+}
+
+/// A library of packs (`bms/Pack/X`, `bms/Pack/Y`): a download laid out as
+/// the pack, holding a chart of X the library has, goes into the pack's
+/// folder; it replaces files of X by the overwrite rule, none of Y's,
+/// whatever its link and brought in again or not.
+#[test]
+fn a_pack_replaces_only_its_songs_files() {
+    let x = "#TITLE X\n#ARTIST alpha\n#WAV01 01.wav\n#WAV02 02.wav\n";
+    let y = "#TITLE Y\n#ARTIST beta\n#WAV01 01.wav\n";
+    let pack = || {
+        store(&[
+            ("bms/Pack/X/x.bms", x),
+            ("bms/Pack/X/01.ogg", "old"),
+            ("bms/Pack/X/02.ogg", "old"),
+            ("bms/Pack/Y/y.bms", y),
+            ("bms/Pack/Y/01.ogg", "Y's"),
+            ("bms/Pack/Y/bg.png", "Y's"),
+        ])
+    };
+    // (a chart at its top that uses Y's sound: the whole of it one package,
+    // not a song's whole folder: X's 01.ogg is not in it)
+    let top = "#TITLE X [top]\n#ARTIST alpha\n#WAV01 Y/01.wav\n";
+    let files = [
+        ("x.bms", top),
+        ("X/x.bms", x),
+        ("X/02.ogg", "new"),
+        ("Y/01.ogg", "new"),
+        ("Y/bg.png", "new"),
+    ];
+    for role in [Role::Song, Role::Diff, Role::Any] {
+        for reinstall in [false, true] {
+            let m = pack();
+            let r = Request {
+                reinstall,
+                ..req(role)
+            };
+            let done = take_zip(&m, &files, &r, &mut lib(&m));
+            let at = format!("{role:?}, reinstall {reinstall}");
+            assert!(
+                matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/Pack/x.bms")),
+                "{at}: {done:?}"
+            );
+            assert_eq!(
+                text(&m, "bms/Pack/X/02.ogg").as_deref(),
+                Some("new"),
+                "{at}"
+            );
+            for f in ["bms/Pack/Y/01.ogg", "bms/Pack/Y/bg.png"] {
+                assert_eq!(text(&m, f).as_deref(), Some("Y's"), "{at}: {f}");
+            }
+        }
+    }
+    // all its charts the library's (Y's sound in no package: the whole of
+    // it one)
+    let files = [("X/x.bms", x), ("X/01.ogg", "new"), ("Y/01.ogg", "new")];
+    for reinstall in [false, true] {
+        let m = pack();
+        let r = Request {
+            reinstall,
+            ..req(Role::Song)
+        };
+        let done = take_zip(&m, &files, &r, &mut lib(&m));
+        assert!(
+            matches!(&done[..], [Done::Owned(d)] if d == Path::new("bms/Pack")),
+            "reinstall {reinstall}: {done:?}"
+        );
+        let x = text(&m, "bms/Pack/X/01.ogg");
+        assert_eq!(x.as_deref(), Some(if reinstall { "new" } else { "old" }));
+        assert_eq!(text(&m, "bms/Pack/Y/01.ogg").as_deref(), Some("Y's"));
+    }
 }
