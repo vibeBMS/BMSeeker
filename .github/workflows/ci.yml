@@ -78,6 +78,9 @@ jobs:
       # which updates the Dependabot merge workflow holds
       - run: python3 .github/dependabot_merge_test.py
         if: matrix.os == 'ubuntu-latest'
+      # no module uses a higher layer's items (DESIGN.md, Layers)
+      - run: python3 tools/check_layers.py
+        if: matrix.os == 'ubuntu-latest'
       - run: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --all-targets --features cli -- -D warnings
