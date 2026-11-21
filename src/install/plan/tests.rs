@@ -1124,3 +1124,44 @@ fn a_pack_replaces_only_its_songs_files() {
         assert_eq!(text(&m, "bms/Pack/Y/01.ogg").as_deref(), Some("Y's"));
     }
 }
+
+/// A song wrapped in a folder with a file beside it at the top (a cover):
+/// the song the library has gets the files its folder lacks, brought in
+/// again or not; a new chart of it goes into its folder.
+#[test]
+fn a_wrapped_song_with_a_file_beside_it() {
+    let known = "#TITLE X\n#ARTIST alpha\n#WAV01 01.wav\n";
+    let files = [
+        ("SongX/known.bms", known),
+        ("SongX/01.ogg", "x"),
+        ("SongX/02.ogg", "lacked"),
+        ("cover.png", "img"),
+    ];
+    for reinstall in [false, true] {
+        let m = store(&[("bms/SongX/known.bms", known), ("bms/SongX/01.ogg", "x")]);
+        let r = Request {
+            reinstall,
+            ..req(Role::Song)
+        };
+        let done = take_zip(&m, &files, &r, &mut lib(&m));
+        assert!(
+            matches!(&done[..], [Done::Owned(d)] if d == Path::new("bms/SongX")),
+            "reinstall {reinstall}: {done:?}"
+        );
+        assert_eq!(text(&m, "bms/SongX/02.ogg").as_deref(), Some("lacked"));
+        assert!(text(&m, "bms/cover.png").is_none() && text(&m, "bms/SongX/cover.png").is_none());
+        no_stage(&m);
+    }
+    let m = store(&[("bms/SongX/known.bms", known), ("bms/SongX/01.ogg", "x")]);
+    let new = "#TITLE X [another]\n#ARTIST alpha\n#WAV01 01.wav\n";
+    let files = [
+        ("SongX/known.bms", known),
+        ("SongX/new.bms", new),
+        ("cover.png", "img"),
+    ];
+    let done = take_zip(&m, &files, &req(Role::Diff), &mut lib(&m));
+    assert!(
+        matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/SongX/new.bms")),
+        "{done:?}"
+    );
+}

@@ -266,8 +266,8 @@ fn one_song(s: &Staged, charts: &[usize]) -> bool {
 /// too; (2) folders below hold charts: each chart here on its own; (3) one
 /// chart, or (4) one song's charts: the whole folder; (5) else each chart
 /// on its own. Folders without charts are looked into. Not sure (a chart
-/// that cannot be read, a sound, image or movie left out of every package):
-/// the whole download, as one.
+/// that cannot be read, a sound, image or movie left out of every package
+/// but in a folder above them all): the whole download, as one.
 pub(crate) fn split(s: &Staged) -> Vec<Package> {
     if s.charts.is_empty() {
         return Vec::new();
@@ -280,11 +280,15 @@ pub(crate) fn split(s: &Staged) -> Vec<Package> {
         packed.extend(p.files.iter().copied());
     }
     let unread = s.charts.iter().any(|c| c.info.is_none());
-    let left_out = s
-        .members
-        .iter()
-        .enumerate()
-        .any(|(i, m)| !packed.contains(&i) && class_of(&rel(&m.rel, Path::new(""))).is_some());
+    // (a file in a folder above every package, a cover beside a song's
+    // folder, is no song's: in none)
+    let above = |m: &Member| {
+        let dir = m.rel.parent().unwrap_or(Path::new(""));
+        out.iter().all(|p| p.root != dir && p.root.starts_with(dir))
+    };
+    let left_out = s.members.iter().enumerate().any(|(i, m)| {
+        !packed.contains(&i) && class_of(&rel(&m.rel, Path::new(""))).is_some() && !above(m)
+    });
     if unread || left_out || out.is_empty() {
         return vec![Package::whole(s)];
     }
@@ -508,6 +512,30 @@ mod tests {
         assert_eq!(roots(&s), [("diffs".into(), 2, 2)]);
     }
 
+    /// A file at the download's top beside its packages (a cover, a
+    /// sample) is in none of them, and makes it none the less sure.
+    #[test]
+    fn files_above_the_packages() {
+        let s = staged(&[
+            ("Song/a.bms", SONG),
+            ("Song/01.ogg", "x"),
+            ("cover.png", "x"),
+            ("sample.ogg", "x"),
+        ]);
+        assert_eq!(roots(&s), [("Song".into(), 1, 2)]);
+        let s = staged(&[
+            ("Pack/A/a.bms", "#TITLE A\n#WAV01 01.wav\n"),
+            ("Pack/A/01.ogg", "x"),
+            ("Pack/B/b.bms", "#TITLE B\n#WAV01 01.wav\n"),
+            ("Pack/B/01.ogg", "x"),
+            ("Pack/cover.png", "x"),
+        ]);
+        assert_eq!(
+            roots(&s),
+            [("Pack/A".into(), 1, 2), ("Pack/B".into(), 1, 2)]
+        );
+    }
+
     /// Not sure: the whole download.
     #[test]
     fn unsure_is_one_package() {
@@ -518,6 +546,14 @@ mod tests {
             ("sounds/01.ogg", "x"),
         ]);
         assert_eq!(roots(&s), [("".into(), 2, 3)]);
+        // a sound beside a package below the top
+        let s = staged(&[
+            ("Pack/A/a.bms", "#TITLE A\n#WAV01 01.wav\n"),
+            ("Pack/A/01.ogg", "x"),
+            ("Pack/x.ogg", "x"),
+            ("b.bms", "#TITLE B\n#WAV01 02.wav\n"),
+        ]);
+        assert_eq!(roots(&s), [("".into(), 2, 4)]);
         // a chart that cannot be read
         let mut s = staged(&[("a/a.bms", SONG), ("b/b.bms", SONG), ("b/01.ogg", "x")]);
         s.charts[0].info = None;
