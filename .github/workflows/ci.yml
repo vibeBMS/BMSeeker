@@ -174,7 +174,7 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.first.outputs.page_url || steps.second.outputs.page_url }}
     # one deploy at a time
     concurrency:
       group: web-pages
@@ -184,11 +184,24 @@ jobs:
         with:
           name: bmseeker-web
       - run: unzip -q bmseeker-web.zip -d site
+      # (named for this attempt: a re-run of this job finds only its own;
+      # the listing can lag the upload by a moment, so a second try)
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site
-      - id: deploy
+          name: github-pages-${{ github.run_attempt }}
+      - id: first
+        continue-on-error: true
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+      - if: steps.first.outcome == 'failure'
+        run: sleep 30
+      - id: second
+        if: steps.first.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
 
   release:
     name: nightly release
