@@ -15,8 +15,10 @@ use crate::package::{classify, split, Package, PackageKind, Role, Staged};
 use crate::placement::{self, Keys, Located, Names, Rules};
 use crate::progress::Progress;
 use crate::unpack::{unpack_watched, Blob, Member, BUDGET};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,9 +117,10 @@ pub(crate) enum Over {
     /// itself.
     Keep,
     /// The overwrite rule ([`placement::clash`]: a newer file replaces it,
-    /// a chart never does) in or below the item's `within` folders (they
-    /// hold one of the package's charts, [`Library::holding`], or the
-    /// package is brought in again); [`Over::Keep`] elsewhere.
+    /// a chart never does) in or below the item's `within` folders (those
+    /// of the package's charts the library holds that tell where it goes,
+    /// [`Library::holding`], or the package is brought in again);
+    /// [`Over::Keep`] elsewhere.
     Newer,
     /// It is replaced, a chart too: a song new to the library brought in
     /// again (`reinstall`) into the folder of its name.
@@ -132,17 +135,30 @@ pub(crate) struct Item {
     pub(crate) outcome: Outcome,
     pub(crate) moves: Vec<(PathBuf, PathBuf)>,
     pub(crate) over: Over,
-    /// Where [`Over::Newer`] replaces: a package laid out above the
-    /// folders that tell where it goes (a song of a pack's) reaches the
-    /// songs beside them too, and their files stay.
+    /// The song's folders: where [`Over::Newer`] replaces, and where an
+    /// [`Outcome::Into`] or [`Outcome::Owned`] puts charts. A package laid
+    /// out above the folders that tell where it goes (a song of a pack's)
+    /// reaches the songs beside them too: their files stay, and no chart
+    /// goes there.
     pub(crate) within: Vec<PathBuf>,
+    /// The library's songs' folders below those (another song's, or one
+    /// of them): what is in one is that song's, not the folder's above it.
+    pub(crate) others: Vec<PathBuf>,
 }
 
 impl Item {
+    /// Whether `to` is in or below one of the song's folders (`within`),
+    /// and in none of the library's songs' folders below that (`others`)
+    /// but one of those.
+    fn covers(&self, to: &Path) -> bool {
+        let at = |d: &PathBuf| below_as(to, d, SPELLING);
+        (self.within.iter()).any(|d| at(d) && !self.others.iter().any(|o| below(o, d) && at(o)))
+    }
+
     /// What the file moved to `to` does to the one there.
     fn over_at(&self, to: &Path) -> Over {
         match self.over {
-            Over::Newer if !self.within.iter().any(|d| below(to, d)) => Over::Keep,
+            Over::Newer if !self.covers(to) => Over::Keep,
             o => o,
         }
     }
@@ -155,6 +171,7 @@ impl Item {
             moves: Vec::new(),
             over: Over::Keep,
             within: Vec::new(),
+            others: Vec::new(),
         }
     }
 }
@@ -198,6 +215,57 @@ fn below(p: &Path, dir: &Path) -> bool {
         let mut parts = rest.components().peekable();
         parts.peek().is_some() && parts.all(|c| matches!(c, Component::Normal(_)))
     })
+}
+
+/// How the library's file system tells two names apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spelling {
+    /// By their bytes.
+    Exact,
+    /// In any case (Windows).
+    Case,
+    /// In any case and either Unicode form (macOS).
+    CaseAndForm,
+}
+
+/// The file systems' as they are set up by default (Linux, Android and
+/// iOS tell cases apart, and a web page's storage is not known).
+const SPELLING: Spelling = if cfg!(windows) {
+    Spelling::Case
+} else if cfg!(target_os = "macos") {
+    Spelling::CaseAndForm
+} else {
+    Spelling::Exact
+};
+
+/// Whether `a` and `b` name one file where names are told apart by `sp`;
+/// in doubt (a name that is no Unicode, letters a file system may pair
+/// otherwise: ß and SS, or in case alone k and the Kelvin sign), not.
+fn same_name(a: &OsStr, b: &OsStr, sp: Spelling) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    if a == b {
+        return true;
+    }
+    let (Some(a), Some(b)) = (a.to_str(), b.to_str()) else {
+        return false;
+    };
+    let (a, b): (String, String) = match sp {
+        Spelling::Exact => return false,
+        Spelling::Case => (a.into(), b.into()),
+        Spelling::CaseAndForm => (a.nfc().collect(), b.nfc().collect()),
+    };
+    a.to_lowercase() == b.to_lowercase() && a.to_uppercase() == b.to_uppercase()
+}
+
+/// [`below`], the parts of `dir` compared as names are by `sp`: only to
+/// narrow what a download may do (a file's path spelled otherwise there
+/// is the same file).
+fn below_as(p: &Path, dir: &Path, sp: Spelling) -> bool {
+    let mut parts = p.components();
+    let within = (dir.components())
+        .all(|d| (parts.next()).is_some_and(|c| same_name(c.as_os_str(), d.as_os_str(), sp)));
+    let mut rest = parts.peekable();
+    within && rest.peek().is_some() && rest.all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// Whether a download's files may go into the folder `dir`: one below the
@@ -249,10 +317,16 @@ fn owned_vote(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vote {
     tally(by_md5.into_values().filter(|v| !v.is_empty()).collect())
 }
 
-/// The library's folders holding one of the package's charts.
-fn holding(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vec<PathBuf> {
+/// The library's folders holding one of the package's charts that are
+/// where the package goes into `dest` puts it: a copy of a chart elsewhere
+/// (a folder above the songs, the library's own) tells nothing of it.
+fn holding(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, dest: &Path) -> Vec<PathBuf> {
     (p.charts.iter())
-        .flat_map(|&c| s.held(fs, c, lib))
+        .flat_map(|&c| {
+            let sub = sub(s, p, c);
+            let held = s.held(fs, c, lib).into_iter();
+            held.filter(move |h| up(fs, lib, h, &sub).as_deref() == Some(dest))
+        })
         .collect()
 }
 
@@ -356,6 +430,7 @@ fn waiting(s: &Staged, charts: &[usize], outcome: Outcome) -> Item {
         outcome,
         over: Over::Keep,
         within: Vec::new(),
+        others: Vec::new(),
         moves: charts
             .iter()
             .map(|&c| {
@@ -393,6 +468,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         outcome: Outcome::Into(d),
         over,
         within,
+        others: Vec::new(),
     };
     let ask = |dirs: Vec<PathBuf>| {
         let labels = dirs
@@ -406,7 +482,8 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
     };
     match owned_vote(fs, s, p, lib) {
         Vote::One(d) if fits(fs, s, p, lib, &new, &d, req.rules) => {
-            return vec![into(d, Over::Newer, holding(fs, s, p, lib))]
+            let within = holding(fs, s, p, lib, &d);
+            return vec![into(d, Over::Newer, within)];
         }
         Vote::One(d) => return vec![ask(vec![d])],
         Vote::Tie(dirs) => return vec![ask(dirs)],
@@ -488,6 +565,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
                 }
                 Item {
                     within: vec![to.clone()],
+                    others: Vec::new(),
                     outcome: Outcome::Into(to),
                     moves,
                     over,
@@ -497,6 +575,45 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
             _ => waiting(s, &[c], Outcome::Waiting),
         })
         .collect()
+}
+
+/// `item`, the other songs' folders below its song's (`songs`: the
+/// library's, in order) in it, and the charts it would put outside its
+/// song's folders waiting in the downloads instead.
+fn charts_to_songs(songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
+    if !matches!(item.outcome, Outcome::Into(_) | Outcome::Owned(_)) {
+        return vec![item];
+    }
+    let mut others: Vec<PathBuf> = Vec::new();
+    for d in &item.within {
+        // (those below a folder come right after it)
+        let after = songs.range::<Path, _>((Excluded(d.as_path()), Unbounded));
+        others.extend(
+            after
+                .take_while(|o| o.starts_with(d))
+                .map(|o| o.to_path_buf()),
+        );
+    }
+    item.others = others;
+    let (astray, moves): (Vec<_>, Vec<_>) = (std::mem::take(&mut item.moves).into_iter())
+        .partition(|(_, to)| is_chart(to) && !item.covers(to));
+    item.moves = moves;
+    let mut out = vec![item];
+    if !astray.is_empty() {
+        out.push(Item {
+            outcome: Outcome::Waiting,
+            moves: (astray.into_iter())
+                .map(|(from, _)| {
+                    let name = PathBuf::from(file_name(&from));
+                    (from, name)
+                })
+                .collect(),
+            over: Over::Keep,
+            within: Vec::new(),
+            others: Vec::new(),
+        });
+    }
+    out
 }
 
 /// The folder all of `files` (members) are in, when they are in one (a
@@ -587,6 +704,7 @@ fn new_item(
             false => Over::Keep,
         },
         within: Vec::new(),
+        others: Vec::new(),
     }
 }
 
@@ -664,13 +782,19 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
                     new.push(p);
                     continue;
                 };
+                let (moves, within) = match &dest {
+                    Some(d) => (
+                        laid_out(fs, s, p, lib, d, !req.reinstall),
+                        holding(fs, s, p, lib, d),
+                    ),
+                    None => Default::default(),
+                };
                 items.push(Item {
-                    moves: dest
-                        .map(|d| laid_out(fs, s, p, lib, &d, !req.reinstall))
-                        .unwrap_or_default(),
+                    moves,
                     outcome: Outcome::Owned(at),
                     over: Over::Newer,
-                    within: holding(fs, s, p, lib),
+                    within,
+                    others: Vec::new(),
                 });
             }
             PackageKind::Song => new.push(p),
@@ -686,6 +810,16 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
             }
         }
     }
+    // a chart laid out beside the song's folders (another song's, a
+    // pack's) is not brought in there: it waits, as one of no song known;
+    // nothing in a song's folder below them is replaced
+    let songs: BTreeSet<&Path> = match items.iter().any(|i| !i.within.is_empty()) {
+        true => lib.song_folders(fs).collect(),
+        false => BTreeSet::new(),
+    };
+    let mut items: Vec<Item> = (items.into_iter())
+        .flat_map(|i| charts_to_songs(&songs, i))
+        .collect();
     if !new.is_empty() {
         items.push(new_item(fs, s, lib, &new, &packages, req));
     }

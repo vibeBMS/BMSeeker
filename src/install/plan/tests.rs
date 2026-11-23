@@ -587,6 +587,7 @@ fn a_failed_move_keeps_the_song() {
             moves: moves.to_vec(),
             over: Over::All,
             within: Vec::new(),
+            others: Vec::new(),
         };
         let mut lib = Library::scan(&fs, Path::new("bms"));
         let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
@@ -615,6 +616,7 @@ fn a_failed_overwrite_keeps_the_file() {
         moves: vec![("dl/s/01.ogg".into(), "bms/Song/01.ogg".into())],
         over: Over::Newer,
         within: vec!["bms/Song".into()],
+        others: Vec::new(),
     };
     let mut lib = Library::scan(&fs, Path::new("bms"));
     let done = apply(&fs, vec![item.clone()], Path::new(DL), &mut lib);
@@ -724,6 +726,7 @@ fn a_copy_failing_midway_leaves_nothing() {
             moves: moves.to_vec(),
             over: Over::All,
             within: Vec::new(),
+            others: Vec::new(),
         };
         let mut lib = Library::scan(&fs, Path::new("bms"));
         let done = apply(&fs, vec![item], Path::new(DL), &mut lib);
@@ -753,6 +756,7 @@ fn a_long_name_moves_in() {
             moves: vec![(from.clone(), song.join(&name))],
             over: Over::All,
             within: Vec::new(),
+            others: Vec::new(),
         };
         let done = apply(&Disk, vec![item], &d.join("dl"), &mut lib);
         assert!(matches!(&done[..], [Done::Added(_, 1)]), "{done:?}");
@@ -917,6 +921,7 @@ fn moves_keep_to_the_library() {
             moves: vec![("dl/s/a.ogg".into(), to.into())],
             over: Over::Keep,
             within: Vec::new(),
+            others: Vec::new(),
         };
         let done = apply(&m, vec![item], Path::new(DL), &mut l);
         assert!(matches!(&done[..], [Done::Failed(_)]), "{to}: {done:?}");
@@ -1057,7 +1062,8 @@ fn a_hash_unlike_its_folder_is_not_the_song() {
 /// A library of packs (`bms/Pack/X`, `bms/Pack/Y`): a download laid out as
 /// the pack, holding a chart of X the library has, goes into the pack's
 /// folder; it replaces files of X by the overwrite rule, none of Y's,
-/// whatever its link and brought in again or not.
+/// whatever its link and brought in again or not. Its chart at the pack's
+/// top is no song's folder's: it waits.
 #[test]
 fn a_pack_replaces_only_its_songs_files() {
     let x = "#TITLE X\n#ARTIST alpha\n#WAV01 01.wav\n#WAV02 02.wav\n";
@@ -1092,7 +1098,7 @@ fn a_pack_replaces_only_its_songs_files() {
             let done = take_zip(&m, &files, &r, &mut lib(&m));
             let at = format!("{role:?}, reinstall {reinstall}");
             assert!(
-                matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/Pack/x.bms")),
+                matches!(&done[..], [Done::Waiting(p)] if p == Path::new("dl/x.bms")),
                 "{at}: {done:?}"
             );
             assert_eq!(
@@ -1164,4 +1170,224 @@ fn a_wrapped_song_with_a_file_beside_it() {
         matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/SongX/new.bms")),
         "{done:?}"
     );
+}
+
+/// The pack library of [`a_pack_replaces_only_its_songs_files`], and a
+/// chart it keeps at its top (`bms/loose.bms`).
+fn packs() -> Mem {
+    store(&[
+        ("bms/Pack/X/x.bms", PACK_X),
+        ("bms/Pack/X/01.ogg", "old"),
+        ("bms/Pack/X/02.ogg", "old"),
+        (
+            "bms/Pack/Y/y.bms",
+            "#TITLE Y\n#ARTIST beta\n#WAV01 01.wav\n",
+        ),
+        ("bms/Pack/Y/01.ogg", "Y's"),
+        ("bms/Pack/Y/bg.png", "Y's"),
+        ("bms/loose.bms", LOOSE),
+    ])
+}
+
+const PACK_X: &str = "#TITLE X\n#ARTIST alpha\n#WAV01 01.wav\n#WAV02 02.wav\n";
+const LOOSE: &str = "#TITLE Loose\n#ARTIST gamma\n";
+/// (a chart at a pack's top that uses Y's sound: the whole of it one
+/// package)
+const PACK_TOP: &str = "#TITLE X [top]\n#ARTIST alpha\n#WAV01 Y/01.wav\n";
+
+/// A pack's download that also holds, where it says nothing of where the
+/// download goes, a copy of a chart the library keeps above the pack's
+/// songs: the songs beside the one it is for keep their files, whatever
+/// its link and brought in again or not.
+#[test]
+fn a_chart_kept_above_the_songs_opens_none() {
+    let with_top = [
+        ("x.bms", PACK_TOP),
+        ("X/x.bms", PACK_X),
+        ("X/02.ogg", "new"),
+        ("junk/loose.bms", LOOSE),
+        ("Y/01.ogg", "new"),
+        ("Y/bg.png", "new"),
+    ];
+    // (all its charts the library's)
+    let owned = [
+        ("X/x.bms", PACK_X),
+        ("X/02.ogg", "new"),
+        ("junk/loose.bms", LOOSE),
+        ("Y/01.ogg", "new"),
+        ("Y/bg.png", "new"),
+    ];
+    for files in [&with_top[..], &owned[..]] {
+        for role in [Role::Song, Role::Diff, Role::Any] {
+            for reinstall in [false, true] {
+                let m = packs();
+                let r = Request {
+                    reinstall,
+                    ..req(role)
+                };
+                take_zip(&m, files, &r, &mut lib(&m));
+                let at = format!("{} files, {role:?}, reinstall {reinstall}", files.len());
+                for f in ["bms/Pack/Y/01.ogg", "bms/Pack/Y/bg.png"] {
+                    assert_eq!(text(&m, f).as_deref(), Some("Y's"), "{at}: {f}");
+                }
+                if files.len() == with_top.len() || reinstall {
+                    let x = text(&m, "bms/Pack/X/02.ogg");
+                    assert_eq!(x.as_deref(), Some("new"), "{at}");
+                }
+            }
+        }
+    }
+}
+
+/// A download for a song the library has brings charts into that song's
+/// folders only: one it lays out in the folder of the song beside it, or
+/// in the pack's, waits in the downloads as one whose song is not known.
+/// Its other files there come in only where none of their names is.
+#[test]
+fn charts_keep_to_their_songs_folders() {
+    let new = "#TITLE X [another]\n#ARTIST alpha\n#WAV01 01.wav\n";
+    let files = [
+        ("x.bms", PACK_TOP),
+        ("X/x.bms", PACK_X),
+        ("X/new.bms", new),
+        ("Y/planted.bms", "#TITLE Planted\n#ARTIST delta\n"),
+        ("Y/01.ogg", "new"),
+        ("Y/extra.png", "new"),
+    ];
+    for role in [Role::Song, Role::Diff, Role::Any] {
+        for reinstall in [false, true] {
+            let m = packs();
+            let r = Request {
+                reinstall,
+                ..req(role)
+            };
+            let mut done = take_zip(&m, &files, &r, &mut lib(&m));
+            done.sort_by_key(|d| format!("{d:?}"));
+            let at = format!("{role:?}, reinstall {reinstall}");
+            assert!(
+                matches!(&done[..], [Done::Placed(p), Done::Waiting(a), Done::Waiting(b)]
+                    if p == Path::new("bms/Pack/X/new.bms")
+                        && a == Path::new("dl/planted.bms")
+                        && b == Path::new("dl/x.bms")),
+                "{at}: {done:?}"
+            );
+            assert!(text(&m, "bms/Pack/Y/planted.bms").is_none(), "{at}");
+            assert!(text(&m, "bms/Pack/x.bms").is_none(), "{at}");
+            assert_eq!(text(&m, "bms/Pack/Y/01.ogg").as_deref(), Some("Y's"));
+            assert_eq!(text(&m, "bms/Pack/Y/extra.png").as_deref(), Some("new"));
+            no_stage(&m);
+        }
+    }
+}
+
+/// Where the file system takes names in another case (Windows), or in
+/// another Unicode form too (macOS), as one, a song's folder spelled
+/// otherwise in its download is the song's folder; elsewhere it is
+/// another.
+#[test]
+fn a_songs_folder_spelled_otherwise() {
+    let m = store(&[
+        ("bms/Pack/SongX/x.bms", PACK_X),
+        ("bms/Pack/SongX/01.ogg", "old"),
+        ("bms/Pack/SongX/02.ogg", "old"),
+    ]);
+    let top = "#TITLE X [top]\n#ARTIST alpha\n#WAV01 songx/02.wav\n";
+    let new = "#TITLE X [another]\n#ARTIST alpha\n#WAV01 02.wav\n";
+    let s = staged(
+        &m,
+        &[
+            ("x.bms", top),
+            ("songx/x.bms", PACK_X),
+            ("songx/new.bms", new),
+            ("songx/02.ogg", "new"),
+        ],
+    );
+    let items = plan(&m, &s, &lib(&m), &req(Role::Diff));
+    let [into, ..] = &items[..] else {
+        panic!("{items:?}")
+    };
+    assert_eq!(into.outcome, Outcome::Into("bms/Pack".into()));
+    let one = cfg!(any(windows, target_os = "macos"));
+    let over = into.over_at(Path::new("bms/Pack/songx/02.ogg"));
+    assert_eq!(over, if one { Over::Newer } else { Over::Keep });
+    let placed = (into.moves.iter()).any(|(_, to)| to == Path::new("bms/Pack/songx/new.bms"));
+    assert_eq!(placed, one, "{items:?}");
+}
+
+/// Names compared as a file system does: exactly; in any case; in any
+/// case and either Unicode form. Never two names that one may tell apart.
+#[test]
+fn names_as_file_systems_tell_them() {
+    use Spelling::*;
+    let same = |a: &str, b: &str| {
+        [Exact, Case, CaseAndForm].map(|sp| same_name(OsStr::new(a), OsStr::new(b), sp))
+    };
+    assert_eq!(same("SongX", "SongX"), [true; 3]);
+    assert_eq!(same("SongX", "songx"), [false, true, true]);
+    // é in NFC and NFD
+    assert_eq!(same("Caf\u{e9}", "cafe\u{301}"), [false, false, true]);
+    assert_eq!(same("Stra\u{df}e", "STRASSE"), [false; 3]);
+    // (the Kelvin sign is K in either Unicode form, not in another case)
+    assert_eq!(same("\u{212a}", "k"), [false, false, true]);
+    let below = |p: &str, sp| below_as(Path::new(p), Path::new("bms/Pack/SongX"), sp);
+    assert!(below("bms/Pack/songx/02.ogg", Case) && below("BMS/pack/SONGX/a/b", Case));
+    assert!(!below("bms/Pack/songx/02.ogg", Exact));
+    assert!(below("bms/Pack/SongX/02.ogg", Exact));
+    assert!(!below("bms/Pack/songx", Case) && !below("bms/Pack/songx/../Y/a", Case));
+    assert!(!below("bms/Pack/songx2/a", Case) && !below("bms/Pack", Case));
+    let by_default = match () {
+        _ if cfg!(windows) => Case,
+        _ if cfg!(target_os = "macos") => CaseAndForm,
+        _ => Exact,
+    };
+    assert_eq!(SPELLING, by_default);
+}
+
+/// A chart the player keeps right in a pack's folder, which holds other
+/// songs' folders too: a download of it replaces its own older files
+/// there, none in the songs' folders below it, whatever its link and
+/// brought in again or not.
+#[test]
+fn a_song_above_others_replaces_none_of_theirs() {
+    let top = "#TITLE Pack\n#ARTIST alpha\n#WAV01 pack.wav\n";
+    let new = "#TITLE Pack [another]\n#ARTIST alpha\n#WAV01 pack.wav\n";
+    let with_new = [
+        ("pack.bms", top),
+        ("new.bms", new),
+        ("bg.png", "new"),
+        ("Y/01.ogg", "new"),
+    ];
+    // (all its charts the library's)
+    let owned = [("pack.bms", top), ("bg.png", "new"), ("Y/01.ogg", "new")];
+    for files in [&with_new[..], &owned[..]] {
+        for role in [Role::Song, Role::Diff, Role::Any] {
+            for reinstall in [false, true] {
+                let m = store(&[
+                    ("bms/Pack/pack.bms", top),
+                    ("bms/Pack/pack.ogg", "x"),
+                    ("bms/Pack/bg.png", "old"),
+                    (
+                        "bms/Pack/Y/y.bms",
+                        "#TITLE Y\n#ARTIST beta\n#WAV01 01.wav\n",
+                    ),
+                    ("bms/Pack/Y/01.ogg", "Y's"),
+                ]);
+                let r = Request {
+                    reinstall,
+                    ..req(role)
+                };
+                let done = take_zip(&m, files, &r, &mut lib(&m));
+                let at = format!("{} files, {role:?}, reinstall {reinstall}", files.len());
+                let y = text(&m, "bms/Pack/Y/01.ogg");
+                assert_eq!(y.as_deref(), Some("Y's"), "{at}: {done:?}");
+                let own = (files.len() == with_new.len() || reinstall).then_some("new");
+                let bg = text(&m, "bms/Pack/bg.png");
+                assert_eq!(bg.as_deref(), Some(own.unwrap_or("old")), "{at}: {done:?}");
+                if files.len() == with_new.len() {
+                    assert!(text(&m, "bms/Pack/new.bms").is_some(), "{at}: {done:?}");
+                }
+                no_stage(&m);
+            }
+        }
+    }
 }
