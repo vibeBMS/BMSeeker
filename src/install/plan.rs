@@ -134,9 +134,11 @@ pub(crate) struct Item {
     pub(crate) outcome: Outcome,
     pub(crate) moves: Vec<(PathBuf, PathBuf)>,
     pub(crate) over: Over,
-    /// Where [`Over::Newer`] replaces: a package laid out above the
-    /// folders that tell where it goes (a song of a pack's) reaches the
-    /// songs beside them too, and their files stay.
+    /// The song's folders: where [`Over::Newer`] replaces, and where an
+    /// [`Outcome::Into`] or [`Outcome::Owned`] puts charts. A package laid
+    /// out above the folders that tell where it goes (a song of a pack's)
+    /// reaches the songs beside them too: their files stay, and no chart
+    /// goes there.
     pub(crate) within: Vec<PathBuf>,
 }
 
@@ -564,6 +566,32 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         .collect()
 }
 
+/// `item`, and the charts it would put outside its song's folders
+/// (`within`) waiting in the downloads instead.
+fn charts_to_songs(mut item: Item) -> Vec<Item> {
+    if !matches!(item.outcome, Outcome::Into(_) | Outcome::Owned(_)) {
+        return vec![item];
+    }
+    let (astray, moves): (Vec<_>, Vec<_>) = (std::mem::take(&mut item.moves).into_iter())
+        .partition(|(_, to)| is_chart(to) && !item.covers(to));
+    item.moves = moves;
+    let mut out = vec![item];
+    if !astray.is_empty() {
+        out.push(Item {
+            outcome: Outcome::Waiting,
+            moves: (astray.into_iter())
+                .map(|(from, _)| {
+                    let name = PathBuf::from(file_name(&from));
+                    (from, name)
+                })
+                .collect(),
+            over: Over::Keep,
+            within: Vec::new(),
+        });
+    }
+    out
+}
+
 /// The folder all of `files` (members) are in, when they are in one (a
 /// folder a download wraps everything in).
 fn wrapper(s: &Staged, files: &[usize]) -> Option<PathBuf> {
@@ -756,6 +784,9 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
             }
         }
     }
+    // a chart laid out beside the song's folders (another song's, a
+    // pack's) is not brought in there: it waits, as one of no song known
+    let mut items: Vec<Item> = items.into_iter().flat_map(charts_to_songs).collect();
     if !new.is_empty() {
         items.push(new_item(fs, s, lib, &new, &packages, req));
     }

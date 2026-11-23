@@ -342,7 +342,11 @@ then places the separate charts that waited for what came in.
   library's top) opens no folder unless it is where the package goes. On
   Windows a path there spelled in another case, on macOS in another case
   or Unicode form, is that folder's (on other systems it is another
-  folder). A folder found by its charts'
+  folder). Its charts go only into the folders of its song (those, a
+  table's `org_md5`'s, or those its sounds were found in): one it lays
+  out anywhere else (beside them, in the pack's folder) waits as a
+  separate chart whose song is not known; its other files there come in
+  only where none of their names is. A folder found by its charts'
   titles and artists, its name, its sounds or a table's `org_md5` takes
   only the files it lacks (a chart of a name there beside it, `name_.bms`),
   unless brought in again (`--reinstall`: newer files replace those
