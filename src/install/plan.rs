@@ -16,6 +16,7 @@ use crate::placement::{self, Keys, Located, Names, Rules};
 use crate::progress::Progress;
 use crate::unpack::{unpack_watched, Blob, Member, BUDGET};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -140,10 +141,15 @@ pub(crate) struct Item {
 }
 
 impl Item {
+    /// Whether `to` is in or below one of the song's folders (`within`).
+    fn covers(&self, to: &Path) -> bool {
+        (self.within.iter()).any(|d| below_as(to, d, SPELLING))
+    }
+
     /// What the file moved to `to` does to the one there.
     fn over_at(&self, to: &Path) -> Over {
         match self.over {
-            Over::Newer if !self.within.iter().any(|d| below(to, d)) => Over::Keep,
+            Over::Newer if !self.covers(to) => Over::Keep,
             o => o,
         }
     }
@@ -199,6 +205,57 @@ fn below(p: &Path, dir: &Path) -> bool {
         let mut parts = rest.components().peekable();
         parts.peek().is_some() && parts.all(|c| matches!(c, Component::Normal(_)))
     })
+}
+
+/// How the library's file system tells two names apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spelling {
+    /// By their bytes.
+    Exact,
+    /// In any case (Windows).
+    Case,
+    /// In any case and either Unicode form (macOS).
+    CaseAndForm,
+}
+
+/// The file systems' as they are set up by default (Linux, Android and
+/// iOS tell cases apart, and a web page's storage is not known).
+const SPELLING: Spelling = if cfg!(windows) {
+    Spelling::Case
+} else if cfg!(target_os = "macos") {
+    Spelling::CaseAndForm
+} else {
+    Spelling::Exact
+};
+
+/// Whether `a` and `b` name one file where names are told apart by `sp`;
+/// in doubt (a name that is no Unicode, letters a file system may pair
+/// otherwise: ß and SS, or in case alone k and the Kelvin sign), not.
+fn same_name(a: &OsStr, b: &OsStr, sp: Spelling) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    if a == b {
+        return true;
+    }
+    let (Some(a), Some(b)) = (a.to_str(), b.to_str()) else {
+        return false;
+    };
+    let (a, b): (String, String) = match sp {
+        Spelling::Exact => return false,
+        Spelling::Case => (a.into(), b.into()),
+        Spelling::CaseAndForm => (a.nfc().collect(), b.nfc().collect()),
+    };
+    a.to_lowercase() == b.to_lowercase() && a.to_uppercase() == b.to_uppercase()
+}
+
+/// [`below`], the parts of `dir` compared as names are by `sp`: only to
+/// narrow what a download may do (a file's path spelled otherwise there
+/// is the same file).
+fn below_as(p: &Path, dir: &Path, sp: Spelling) -> bool {
+    let mut parts = p.components();
+    let within = (dir.components())
+        .all(|d| (parts.next()).is_some_and(|c| same_name(c.as_os_str(), d.as_os_str(), sp)));
+    let mut rest = parts.peekable();
+    within && rest.peek().is_some() && rest.all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// Whether a download's files may go into the folder `dir`: one below the

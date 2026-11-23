@@ -1232,3 +1232,32 @@ fn a_chart_kept_above_the_songs_opens_none() {
         }
     }
 }
+
+/// Names compared as a file system does: exactly; in any case; in any
+/// case and either Unicode form. Never two names that one may tell apart.
+#[test]
+fn names_as_file_systems_tell_them() {
+    use Spelling::*;
+    let same = |a: &str, b: &str| {
+        [Exact, Case, CaseAndForm].map(|sp| same_name(OsStr::new(a), OsStr::new(b), sp))
+    };
+    assert_eq!(same("SongX", "SongX"), [true; 3]);
+    assert_eq!(same("SongX", "songx"), [false, true, true]);
+    // é in NFC and NFD
+    assert_eq!(same("Caf\u{e9}", "cafe\u{301}"), [false, false, true]);
+    assert_eq!(same("Stra\u{df}e", "STRASSE"), [false; 3]);
+    // (the Kelvin sign is K in either Unicode form, not in another case)
+    assert_eq!(same("\u{212a}", "k"), [false, false, true]);
+    let below = |p: &str, sp| below_as(Path::new(p), Path::new("bms/Pack/SongX"), sp);
+    assert!(below("bms/Pack/songx/02.ogg", Case) && below("BMS/pack/SONGX/a/b", Case));
+    assert!(!below("bms/Pack/songx/02.ogg", Exact));
+    assert!(below("bms/Pack/SongX/02.ogg", Exact));
+    assert!(!below("bms/Pack/songx", Case) && !below("bms/Pack/songx/../Y/a", Case));
+    assert!(!below("bms/Pack/songx2/a", Case) && !below("bms/Pack", Case));
+    let by_default = match () {
+        _ if cfg!(windows) => Case,
+        _ if cfg!(target_os = "macos") => CaseAndForm,
+        _ => Exact,
+    };
+    assert_eq!(SPELLING, by_default);
+}
