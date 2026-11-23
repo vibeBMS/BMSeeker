@@ -356,6 +356,13 @@ impl Library {
         self.songs(fs).at.contains_key(dir) || self.held.contains(dir)
     }
 
+    /// The songs' folders it lists ([`Library::lists`]; one may come
+    /// twice).
+    pub(crate) fn song_folders<'a>(&'a self, fs: &dyn Fs) -> impl Iterator<Item = &'a Path> {
+        (self.songs(fs).at.keys().map(PathBuf::as_path))
+            .chain(self.held.iter().map(PathBuf::as_path))
+    }
+
     /// Whether it holds a chart of the song `want` (the same artist, the
     /// titles alike, as the downloads compare them), among the charts given
     /// or read so far.

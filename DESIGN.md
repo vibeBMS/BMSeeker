@@ -339,7 +339,9 @@ then places the separate charts that waited for what came in.
   package laid out above it (a pack of songs, its folder the pack's)
   replaces nothing of the songs beside it, even brought in again, and a
   copy of a chart the library holds elsewhere (at the pack's or the
-  library's top) opens no folder unless it is where the package goes. On
+  library's top) opens no folder unless it is where the package goes;
+  nor does a song's folder open the songs' folders below it (a chart
+  kept right in a pack's folder: the pack's songs keep their files). On
   Windows a path there spelled in another case, on macOS in another case
   or Unicode form, is that folder's (on other systems it is another
   folder). Its charts go only into the folders of its song (those, a

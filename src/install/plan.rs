@@ -15,9 +15,10 @@ use crate::package::{classify, split, Package, PackageKind, Role, Staged};
 use crate::placement::{self, Keys, Located, Names, Rules};
 use crate::progress::Progress;
 use crate::unpack::{unpack_watched, Blob, Member, BUDGET};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -140,12 +141,18 @@ pub(crate) struct Item {
     /// reaches the songs beside them too: their files stay, and no chart
     /// goes there.
     pub(crate) within: Vec<PathBuf>,
+    /// The library's songs' folders below those (another song's, or one
+    /// of them): what is in one is that song's, not the folder's above it.
+    pub(crate) others: Vec<PathBuf>,
 }
 
 impl Item {
-    /// Whether `to` is in or below one of the song's folders (`within`).
+    /// Whether `to` is in or below one of the song's folders (`within`),
+    /// and in none of the library's songs' folders below that (`others`)
+    /// but one of those.
     fn covers(&self, to: &Path) -> bool {
-        (self.within.iter()).any(|d| below_as(to, d, SPELLING))
+        let at = |d: &PathBuf| below_as(to, d, SPELLING);
+        (self.within.iter()).any(|d| at(d) && !self.others.iter().any(|o| below(o, d) && at(o)))
     }
 
     /// What the file moved to `to` does to the one there.
@@ -164,6 +171,7 @@ impl Item {
             moves: Vec::new(),
             over: Over::Keep,
             within: Vec::new(),
+            others: Vec::new(),
         }
     }
 }
@@ -422,6 +430,7 @@ fn waiting(s: &Staged, charts: &[usize], outcome: Outcome) -> Item {
         outcome,
         over: Over::Keep,
         within: Vec::new(),
+        others: Vec::new(),
         moves: charts
             .iter()
             .map(|&c| {
@@ -459,6 +468,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         outcome: Outcome::Into(d),
         over,
         within,
+        others: Vec::new(),
     };
     let ask = |dirs: Vec<PathBuf>| {
         let labels = dirs
@@ -555,6 +565,7 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
                 }
                 Item {
                     within: vec![to.clone()],
+                    others: Vec::new(),
                     outcome: Outcome::Into(to),
                     moves,
                     over,
@@ -566,12 +577,24 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
         .collect()
 }
 
-/// `item`, and the charts it would put outside its song's folders
-/// (`within`) waiting in the downloads instead.
-fn charts_to_songs(mut item: Item) -> Vec<Item> {
+/// `item`, the other songs' folders below its song's (`songs`: the
+/// library's, in order) in it, and the charts it would put outside its
+/// song's folders waiting in the downloads instead.
+fn charts_to_songs(songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
     if !matches!(item.outcome, Outcome::Into(_) | Outcome::Owned(_)) {
         return vec![item];
     }
+    let mut others: Vec<PathBuf> = Vec::new();
+    for d in &item.within {
+        // (those below a folder come right after it)
+        let after = songs.range::<Path, _>((Excluded(d.as_path()), Unbounded));
+        others.extend(
+            after
+                .take_while(|o| o.starts_with(d))
+                .map(|o| o.to_path_buf()),
+        );
+    }
+    item.others = others;
     let (astray, moves): (Vec<_>, Vec<_>) = (std::mem::take(&mut item.moves).into_iter())
         .partition(|(_, to)| is_chart(to) && !item.covers(to));
     item.moves = moves;
@@ -587,6 +610,7 @@ fn charts_to_songs(mut item: Item) -> Vec<Item> {
                 .collect(),
             over: Over::Keep,
             within: Vec::new(),
+            others: Vec::new(),
         });
     }
     out
@@ -680,6 +704,7 @@ fn new_item(
             false => Over::Keep,
         },
         within: Vec::new(),
+        others: Vec::new(),
     }
 }
 
@@ -769,6 +794,7 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
                     outcome: Outcome::Owned(at),
                     over: Over::Newer,
                     within,
+                    others: Vec::new(),
                 });
             }
             PackageKind::Song => new.push(p),
@@ -785,8 +811,15 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
         }
     }
     // a chart laid out beside the song's folders (another song's, a
-    // pack's) is not brought in there: it waits, as one of no song known
-    let mut items: Vec<Item> = items.into_iter().flat_map(charts_to_songs).collect();
+    // pack's) is not brought in there: it waits, as one of no song known;
+    // nothing in a song's folder below them is replaced
+    let songs: BTreeSet<&Path> = match items.iter().any(|i| !i.within.is_empty()) {
+        true => lib.song_folders(fs).collect(),
+        false => BTreeSet::new(),
+    };
+    let mut items: Vec<Item> = (items.into_iter())
+        .flat_map(|i| charts_to_songs(&songs, i))
+        .collect();
     if !new.is_empty() {
         items.push(new_item(fs, s, lib, &new, &packages, req));
     }
