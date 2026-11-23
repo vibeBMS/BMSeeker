@@ -1165,3 +1165,70 @@ fn a_wrapped_song_with_a_file_beside_it() {
         "{done:?}"
     );
 }
+
+/// The pack library of [`a_pack_replaces_only_its_songs_files`], and a
+/// chart it keeps at its top (`bms/loose.bms`).
+fn packs() -> Mem {
+    store(&[
+        ("bms/Pack/X/x.bms", PACK_X),
+        ("bms/Pack/X/01.ogg", "old"),
+        ("bms/Pack/X/02.ogg", "old"),
+        (
+            "bms/Pack/Y/y.bms",
+            "#TITLE Y\n#ARTIST beta\n#WAV01 01.wav\n",
+        ),
+        ("bms/Pack/Y/01.ogg", "Y's"),
+        ("bms/Pack/Y/bg.png", "Y's"),
+        ("bms/loose.bms", LOOSE),
+    ])
+}
+
+const PACK_X: &str = "#TITLE X\n#ARTIST alpha\n#WAV01 01.wav\n#WAV02 02.wav\n";
+const LOOSE: &str = "#TITLE Loose\n#ARTIST gamma\n";
+/// (a chart at a pack's top that uses Y's sound: the whole of it one
+/// package)
+const PACK_TOP: &str = "#TITLE X [top]\n#ARTIST alpha\n#WAV01 Y/01.wav\n";
+
+/// A pack's download that also holds, where it says nothing of where the
+/// download goes, a copy of a chart the library keeps above the pack's
+/// songs: the songs beside the one it is for keep their files, whatever
+/// its link and brought in again or not.
+#[test]
+fn a_chart_kept_above_the_songs_opens_none() {
+    let with_top = [
+        ("x.bms", PACK_TOP),
+        ("X/x.bms", PACK_X),
+        ("X/02.ogg", "new"),
+        ("junk/loose.bms", LOOSE),
+        ("Y/01.ogg", "new"),
+        ("Y/bg.png", "new"),
+    ];
+    // (all its charts the library's)
+    let owned = [
+        ("X/x.bms", PACK_X),
+        ("X/02.ogg", "new"),
+        ("junk/loose.bms", LOOSE),
+        ("Y/01.ogg", "new"),
+        ("Y/bg.png", "new"),
+    ];
+    for files in [&with_top[..], &owned[..]] {
+        for role in [Role::Song, Role::Diff, Role::Any] {
+            for reinstall in [false, true] {
+                let m = packs();
+                let r = Request {
+                    reinstall,
+                    ..req(role)
+                };
+                take_zip(&m, files, &r, &mut lib(&m));
+                let at = format!("{} files, {role:?}, reinstall {reinstall}", files.len());
+                for f in ["bms/Pack/Y/01.ogg", "bms/Pack/Y/bg.png"] {
+                    assert_eq!(text(&m, f).as_deref(), Some("Y's"), "{at}: {f}");
+                }
+                if files.len() == with_top.len() || reinstall {
+                    let x = text(&m, "bms/Pack/X/02.ogg");
+                    assert_eq!(x.as_deref(), Some("new"), "{at}");
+                }
+            }
+        }
+    }
+}

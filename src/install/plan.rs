@@ -115,9 +115,10 @@ pub(crate) enum Over {
     /// itself.
     Keep,
     /// The overwrite rule ([`placement::clash`]: a newer file replaces it,
-    /// a chart never does) in or below the item's `within` folders (they
-    /// hold one of the package's charts, [`Library::holding`], or the
-    /// package is brought in again); [`Over::Keep`] elsewhere.
+    /// a chart never does) in or below the item's `within` folders (those
+    /// of the package's charts the library holds that tell where it goes,
+    /// [`Library::holding`], or the package is brought in again);
+    /// [`Over::Keep`] elsewhere.
     Newer,
     /// It is replaced, a chart too: a song new to the library brought in
     /// again (`reinstall`) into the folder of its name.
@@ -249,10 +250,16 @@ fn owned_vote(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vote {
     tally(by_md5.into_values().filter(|v| !v.is_empty()).collect())
 }
 
-/// The library's folders holding one of the package's charts.
-fn holding(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library) -> Vec<PathBuf> {
+/// The library's folders holding one of the package's charts that are
+/// where the package goes into `dest` puts it: a copy of a chart elsewhere
+/// (a folder above the songs, the library's own) tells nothing of it.
+fn holding(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, dest: &Path) -> Vec<PathBuf> {
     (p.charts.iter())
-        .flat_map(|&c| s.held(fs, c, lib))
+        .flat_map(|&c| {
+            let sub = sub(s, p, c);
+            let held = s.held(fs, c, lib).into_iter();
+            held.filter(move |h| up(fs, lib, h, &sub).as_deref() == Some(dest))
+        })
         .collect()
 }
 
@@ -406,7 +413,8 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
     };
     match owned_vote(fs, s, p, lib) {
         Vote::One(d) if fits(fs, s, p, lib, &new, &d, req.rules) => {
-            return vec![into(d, Over::Newer, holding(fs, s, p, lib))]
+            let within = holding(fs, s, p, lib, &d);
+            return vec![into(d, Over::Newer, within)];
         }
         Vote::One(d) => return vec![ask(vec![d])],
         Vote::Tie(dirs) => return vec![ask(dirs)],
@@ -664,13 +672,18 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
                     new.push(p);
                     continue;
                 };
+                let (moves, within) = match &dest {
+                    Some(d) => (
+                        laid_out(fs, s, p, lib, d, !req.reinstall),
+                        holding(fs, s, p, lib, d),
+                    ),
+                    None => Default::default(),
+                };
                 items.push(Item {
-                    moves: dest
-                        .map(|d| laid_out(fs, s, p, lib, &d, !req.reinstall))
-                        .unwrap_or_default(),
+                    moves,
                     outcome: Outcome::Owned(at),
                     over: Over::Newer,
-                    within: holding(fs, s, p, lib),
+                    within,
                 });
             }
             PackageKind::Song => new.push(p),
