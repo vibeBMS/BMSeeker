@@ -1569,3 +1569,48 @@ fn a_pack_adds_a_new_song_beside() {
         }
     }
 }
+
+/// A song's folder below the one a download is for that the library does
+/// not list (hidden, deeper than it looks): its files are that song's, as
+/// in one it lists. Whatever the link and brought in again or not.
+#[test]
+fn a_song_the_library_does_not_list_keeps_its_files() {
+    let top = "#TITLE Pack\n#ARTIST alpha\n#WAV01 pack.wav\n";
+    let y = "#TITLE Y\n#ARTIST beta\n#WAV01 01.wav\n";
+    let deep = format!("{}Y", "d/".repeat(16));
+    for y_at in [".Y", deep.as_str()] {
+        let y_chart = format!("bms/Pack/{y_at}/y.bms");
+        let y_sound = format!("bms/Pack/{y_at}/01.ogg");
+        let files = [
+            ("pack.bms", top),
+            ("bg.png", "new"),
+            (&format!("{y_at}/01.ogg"), "new"),
+            (&format!("{y_at}/02.ogg"), "new"),
+        ];
+        for role in [Role::Song, Role::Diff, Role::Any] {
+            for reinstall in [false, true] {
+                let m = store(&[
+                    ("bms/Pack/pack.bms", top),
+                    ("bms/Pack/pack.ogg", "x"),
+                    ("bms/Pack/bg.png", "old"),
+                    (&y_chart, y),
+                    (&y_sound, "Y's"),
+                ]);
+                let l = lib(&m);
+                assert!(!l.lists(&m, Path::new(&y_chart).parent().unwrap()));
+                let r = Request {
+                    reinstall,
+                    ..req(role)
+                };
+                let done = take_zip(&m, &files, &r, &mut lib(&m));
+                let at = format!("{y_at}, {role:?}, reinstall {reinstall}: {done:?}");
+                assert_eq!(text(&m, &y_sound).as_deref(), Some("Y's"), "{at}");
+                assert!(text(&m, &y_sound.replace("01", "02")).is_none(), "{at}");
+                if reinstall {
+                    assert_eq!(text(&m, "bms/Pack/bg.png").as_deref(), Some("new"), "{at}");
+                }
+                no_stage(&m);
+            }
+        }
+    }
+}

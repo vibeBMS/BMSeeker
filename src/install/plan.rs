@@ -600,14 +600,20 @@ fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<
                 .map(|o| o.to_path_buf()),
         );
     }
-    // (a folder's on the way to its files once)
+    // a song's on the way to its files: one the library lists, or that
+    // holds a chart (one the library does not list: hidden, deeper than its
+    // walks, not read yet); each folder looked at once
+    let holds_chart = |f: &Path| {
+        let entries = fs.read_dir(f).unwrap_or_default();
+        entries.iter().any(|e| !e.is_dir && is_chart(&e.path))
+    };
     let mut seen: HashSet<&Path> = HashSet::new();
     for (_, to) in &item.moves {
         for f in to.ancestors().skip(1).take_while(|f| f.starts_with(&dest)) {
             if !seen.insert(f) {
                 break;
             }
-            if !item.within.iter().any(|d| d == f) && songs.contains(f) {
+            if !item.within.iter().any(|d| d == f) && (songs.contains(f) || holds_chart(f)) {
                 others.push(f.to_path_buf());
             }
         }

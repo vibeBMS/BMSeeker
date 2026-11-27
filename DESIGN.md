@@ -342,7 +342,11 @@ then places the separate charts that waited for what came in.
   copy of a chart the library holds elsewhere (at the pack's or the
   library's top) opens no folder unless it is where the package goes;
   nor does a song's folder open the songs' folders below it (a chart
-  kept right in a pack's folder: the pack's songs keep their files). On
+  kept right in a pack's folder: the pack's songs keep their files). A
+  folder on the way to a file that holds a chart is a song's of its own,
+  whether the library lists it or not (a name starting with `.`, deeper
+  than the library's walks, charts not read yet): only the folders on
+  that path are looked at, not the whole library. On
   Windows a path there spelled in another case, on macOS in another case
   or Unicode form, is that folder's (on other systems it is another
   folder). Its charts go only into the folders of its song (those, a
