@@ -330,13 +330,13 @@ fn read_text(path: &Path) -> Result<String, String> {
 
 /// Records from `text`: JSON Lines, a JSON array of records, or a JSON
 /// object of records by `key` (`{"42": {...}}`: each gets `key` = its
-/// name, as a number if it is one). The `refused` records a run wrote
-/// among them are left out.
+/// name, as a number if it is one). The `refused` and `notice` records a
+/// run wrote among them are left out.
 fn records(text: &str, key: &str) -> Result<Vec<Map<String, Value>>, String> {
     let all = all_records(text, key)?;
     Ok(all
         .into_iter()
-        .filter(|r| !r.contains_key("refused"))
+        .filter(|r| !r.contains_key("refused") && !r.contains_key("notice"))
         .collect())
 }
 
@@ -406,8 +406,9 @@ mod tests {
         assert_eq!(by_url[0]["url"], "https://a/b.zip");
         assert_eq!(records(r#"{"num":3,"title":"t"}"#, "num").unwrap().len(), 1);
         assert!(records("{\"num\":1}\nnot json\n", "num").is_err());
-        // a run's refusals are no works
-        let lines = "{\"num\":1}\n{\"refused\":\"a.test\",\"code\":\"status\"}\n";
+        // a run's refusals and notices are no works
+        let lines = "{\"notice\":\"third_party\",\"text\":\"t\"}\n{\"num\":1}\n\
+            {\"refused\":\"a.test\",\"code\":\"status\"}\n";
         assert_eq!(records(lines, "num").unwrap().len(), 1);
     }
 }
