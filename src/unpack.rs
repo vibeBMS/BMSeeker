@@ -223,7 +223,7 @@ pub fn archive_folder(name: &str) -> String {
 
 /// A file unpacked: its path below the folder, size, and time in the
 /// archive (seconds since 1970; None: not given). (Offered to a [`Sink`]:
-/// the size the archive gives it.)
+/// the size the archive gives it; once written: the bytes that were.)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Member {
     pub rel: PathBuf,
@@ -323,7 +323,8 @@ pub trait Sink {
     /// lie: what is written is capped by the budget, not by this). An
     /// error ends the reading with it.
     fn open(&mut self, m: &Member) -> Result<Take<'_>, String>;
-    /// The member written in full: `m.size` is what was.
+    /// The member written in full: `m.size` is the bytes that were,
+    /// counted as they were written (not what the archive says).
     fn close(&mut self, m: Member);
     /// The member could not be written in full (too large, or the archive
     /// is damaged): what came of it goes. The reading ends with an error.
@@ -530,20 +531,22 @@ fn members(
 /// said to have; none: a name not kept) offered to `sink`, and written
 /// where it says, or passed by. `decoded`: the archive decodes what is
 /// passed by all the same (to reach the next member), which counts as
-/// what it writes does; else `copy` is not called for it.
+/// what it writes does; else `copy` is not called for it. The sink is
+/// told the bytes that passed the cap, not what the archive says (an
+/// archive's reader may tell the size its header gives).
 fn put(
     left: &mut Left,
     why: &Cell<Option<Stopped>>,
     sink: &mut dyn Sink,
     m: Option<Member>,
     decoded: bool,
-    copy: &mut dyn FnMut(&mut dyn Write) -> Result<u64, String>,
+    copy: &mut dyn FnMut(&mut dyn Write) -> Result<(), String>,
 ) -> Result<(), String> {
     if left.stop.is_some_and(|p| p.cancelled()) {
         why.set(Some(Stopped::Cancelled));
         return Err(CANCELLED.into());
     }
-    let passed = |left: &mut Left, copy: &mut dyn FnMut(&mut dyn Write) -> Result<u64, String>| {
+    let passed = |left: &mut Left, copy: &mut dyn FnMut(&mut dyn Write) -> Result<(), String>| {
         if !decoded {
             return Ok(());
         }
@@ -581,11 +584,12 @@ fn put(
             why,
         };
         copy(&mut capped)
-            .and_then(|n| capped.flush().map(|_| n).map_err(|e| e.to_string()))
-            .map(|n| (n, capped.left))
+            .and_then(|()| capped.flush().map_err(|e| e.to_string()))
+            .map(|()| capped.left)
     };
     match r {
-        Ok((size, bytes)) => {
+        Ok(bytes) => {
+            let size = left.bytes - bytes;
             left.bytes = bytes;
             sink.close(Member { size, ..m });
             Ok(())
@@ -633,7 +637,9 @@ fn each_member(
                 };
                 // (read where it is: one passed by is not decompressed)
                 put(left, why, sink, Some(m), false, &mut |w| {
-                    std::io::copy(&mut e, w).map_err(|e| e.to_string())
+                    std::io::copy(&mut e, w)
+                        .map(drop)
+                        .map_err(|e| e.to_string())
                 })?;
             }
         }
@@ -671,7 +677,7 @@ fn each_member(
                 // (one passed by is decoded all the same: the reader
                 // drains what is not read, to check it and reach the next)
                 match put(left, why, sink, m, true, &mut |w| {
-                    std::io::copy(r, w).map_err(|e| e.to_string())
+                    std::io::copy(r, w).map(drop).map_err(|e| e.to_string())
                 }) {
                     Ok(()) => Ok(EntryDecision::Continue),
                     Err(e) => {
@@ -713,6 +719,7 @@ fn each_member(
                 put(left, why, sink, m, solid, &mut |w| {
                     a.by_index(i)
                         .and_then(|e| e.copy_to(w))
+                        .map(drop)
                         .map_err(|e| format!("{name}: {e}"))
                 })?;
             }
@@ -732,9 +739,8 @@ fn each_member(
                             if !a.is_decoder_supported() {
                                 return Err(format!("{name}: a compression not supported"));
                             }
-                            let n = std::io::copy(&mut a, w).map_err(|e| e.to_string())?;
-                            a.crc_check().map_err(|e| format!("{name}: {e}"))?;
-                            Ok(n)
+                            std::io::copy(&mut a, w).map_err(|e| e.to_string())?;
+                            a.crc_check().map(drop).map_err(|e| format!("{name}: {e}"))
                         })?;
                     }
                 }
@@ -823,7 +829,9 @@ fn each_member(
                 let m = Member { rel, size, mtime };
                 // (one passed by is read past: a .tar.gz's decompressed)
                 put(left, why, sink, Some(m), false, &mut |w| {
-                    std::io::copy(&mut e, w).map_err(|e| e.to_string())
+                    std::io::copy(&mut e, w)
+                        .map(drop)
+                        .map_err(|e| e.to_string())
                 })?;
             }
         }
@@ -984,8 +992,9 @@ impl Sink for Into<'_> {
 /// holding no chart but archives (a shared folder downloaded as a zip of
 /// the song's archives): each of those unpacked into a folder of its name
 /// beside it, then removed (one that cannot be unpacked, but for being too
-/// large, is kept as it is). Returns the files written. What it wrote
-/// before it failed stays (the caller removes the folder).
+/// large, is kept as it is). Returns the files written, each with the
+/// bytes written. What it wrote before it failed stays (the caller removes
+/// the folder).
 pub fn unpack(
     blob: Blob,
     store: &dyn Store,
@@ -2379,5 +2388,106 @@ mod tests {
         prefixed.extend(zip(&files));
         let e = read_within(&prefixed, Format::Zip, LIMITS, &mut FirstChart::default());
         assert!(matches!(e, Err(Error::Other(_))), "{e:?}");
+    }
+
+    /// A sink that writes the members `want` says, passes the others by.
+    struct Picked {
+        want: fn(&Path) -> bool,
+        offered: Vec<Member>,
+        took: Vec<(Member, Vec<u8>)>,
+        buf: Vec<u8>,
+    }
+
+    impl Picked {
+        fn new(want: fn(&Path) -> bool) -> Picked {
+            Picked {
+                want,
+                offered: Vec::new(),
+                took: Vec::new(),
+                buf: Vec::new(),
+            }
+        }
+        fn all() -> Picked {
+            Picked::new(|_| true)
+        }
+    }
+
+    impl Sink for Picked {
+        fn open(&mut self, m: &Member) -> Result<Take<'_>, String> {
+            self.offered.push(m.clone());
+            if !(self.want)(&m.rel) {
+                return Ok(Take::Skip);
+            }
+            self.buf.clear();
+            Ok(Take::Write(Box::new(&mut self.buf)))
+        }
+        fn close(&mut self, m: Member) {
+            self.took.push((m, std::mem::take(&mut self.buf)));
+        }
+        fn drop_partial(&mut self, _: &Path) {
+            self.buf.clear();
+        }
+    }
+
+    /// The RAR of [`crate::testkit::SIZELESS_RAR`], `a.zip`'s header
+    /// saying it unpacks to 400 GiB (its data and checksum as they were).
+    const DECLARED_RAR: [u8; 398] = [
+        82, 97, 114, 33, 26, 7, 1, 0, 243, 225, 130, 235, 11, 1, 5, 7, 0, 6, 1, 1, 128, 128, 128,
+        0, 64, 128, 12, 206, 37, 2, 3, 11, 160, 129, 0, 4, 217, 192, 0, 164, 131, 2, 77, 167, 190,
+        109, 128, 3, 1, 5, 98, 46, 122, 105, 112, 10, 3, 19, 58, 28, 9, 107, 88, 72, 86, 57, 192,
+        7, 157, 38, 69, 85, 35, 246, 96, 52, 231, 95, 70, 9, 2, 86, 213, 41, 146, 4, 186, 54, 74,
+        37, 210, 166, 151, 64, 194, 4, 8, 66, 16, 36, 5, 173, 105, 240, 58, 5, 208, 14, 135, 116,
+        11, 75, 161, 91, 81, 208, 104, 232, 69, 161, 252, 123, 212, 160, 131, 163, 150, 140, 232,
+        116, 231, 78, 156, 230, 130, 230, 154, 202, 240, 204, 179, 234, 51, 74, 229, 45, 50, 109,
+        75, 128, 22, 31, 88, 123, 191, 104, 229, 221, 62, 244, 116, 14, 54, 163, 126, 126, 123, 97,
+        223, 77, 255, 115, 157, 233, 253, 68, 132, 73, 243, 5, 81, 82, 182, 193, 158, 217, 160, 84,
+        192, 60, 207, 153, 68, 163, 141, 126, 58, 114, 22, 127, 185, 223, 144, 170, 211, 36, 162,
+        230, 202, 160, 21, 145, 200, 98, 160, 45, 239, 87, 93, 194, 70, 117, 76, 28, 45, 0, 103,
+        235, 182, 87, 39, 2, 3, 11, 248, 0, 4, 128, 128, 128, 128, 192, 12, 164, 131, 2, 168, 205,
+        46, 165, 128, 3, 1, 5, 97, 46, 122, 105, 112, 10, 3, 19, 58, 28, 9, 107, 47, 61, 144, 57,
+        192, 239, 117, 37, 85, 83, 47, 147, 57, 24, 173, 205, 19, 0, 92, 5, 131, 128, 184, 12, 166,
+        96, 45, 16, 24, 8, 50, 82, 178, 132, 26, 92, 1, 185, 203, 220, 157, 36, 138, 52, 32, 225,
+        83, 246, 123, 255, 249, 223, 31, 15, 96, 62, 199, 186, 29, 59, 87, 67, 135, 49, 228, 28,
+        146, 148, 80, 88, 155, 91, 185, 171, 123, 48, 161, 207, 135, 63, 69, 155, 18, 181, 155, 37,
+        38, 246, 42, 182, 232, 223, 27, 72, 2, 0, 57, 0, 114, 35, 140, 32, 227, 144, 164, 255, 162,
+        111, 86, 195, 235, 246, 138, 93, 57, 167, 135, 241, 191, 45, 121, 227, 184, 0, 29, 119, 86,
+        81, 3, 5, 4, 0,
+    ];
+
+    /// A member is told written as the bytes that were, whatever its
+    /// archive says (a RAR's reader tells the size of the header for a
+    /// member not solid, its cap of 500 GiB for one of no size), and what
+    /// an archive in an archive took is given back as that once it goes:
+    /// the budget holds.
+    #[test]
+    fn a_member_is_counted_by_its_bytes() {
+        use crate::testkit::SIZELESS_RAR;
+        for (name, rar, offered) in [
+            ("no size", &SIZELESS_RAR[..], 0),
+            ("400 GiB", &DECLARED_RAR[..], 400 << 30),
+        ] {
+            let mut sink = Picked::all();
+            read_within(rar, Format::Rar, LIMITS, &mut sink).unwrap();
+            let told: Vec<(u64, u64, usize)> = (sink.offered.iter().zip(&sink.took))
+                .map(|(o, (m, b))| (o.size, m.size, b.len()))
+                .collect();
+            assert_eq!(told, [(8281, 8281, 8281), (offered, 4330, 4330)], "{name}");
+            let mem = crate::fs::Mem::default();
+            let e = unpack(Blob::Bytes(rar.to_vec()), &mem, Path::new("d"), 1 << 20);
+            assert_eq!(e, Err(Error::TooLarge(1 << 20).to_string()), "{name}");
+            let got = unpack(Blob::Bytes(rar.to_vec()), &mem, Path::new("e"), 9 << 20);
+            let got: Vec<(PathBuf, u64)> = sorted(got.unwrap())
+                .into_iter()
+                .map(|m| (m.rel, m.size))
+                .collect();
+            assert_eq!(
+                got,
+                [
+                    (PathBuf::from("a/small/readme.txt"), 4200),
+                    ("b/big/zeros.bin".into(), 8 << 20)
+                ],
+                "{name}"
+            );
+        }
     }
 }
