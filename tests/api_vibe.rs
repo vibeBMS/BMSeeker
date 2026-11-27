@@ -109,9 +109,6 @@ use bmseeker::placement::bring as _;
 use bmseeker::placement::chart_info as _;
 use bmseeker::placement::is_chart as _;
 use bmseeker::placement::locate as _;
-use bmseeker::placement::same_artist as _;
-use bmseeker::placement::same_name as _;
-use bmseeker::placement::same_title as _;
 use bmseeker::placement::ChartInfo as _;
 use bmseeker::placement::Located as _;
 use bmseeker::placement::Located::Ask as _;
@@ -119,6 +116,7 @@ use bmseeker::placement::Located::Here as _;
 use bmseeker::placement::Located::Move as _;
 use bmseeker::placement::Located::NoSong as _;
 use bmseeker::placement::Rules as _;
+use bmseeker::placement::SongKey as _;
 use bmseeker::progress::Progress as _;
 use bmseeker::progress::Stage as _;
 use bmseeker::progress::Stage::Adding as _;
@@ -181,15 +179,19 @@ fn _associated() {
     let _ = bmseeker::config::Config::default;
     let _ = bmseeker::hosts::Context::default;
     let _ = bmseeker::hosts::Context::new;
+    let _ = bmseeker::install::Entry::from_table_in;
     let _ = bmseeker::install::EntryJob::new;
     let _ = bmseeker::install::Request::default;
     let _ = bmseeker::install::job::Files::new;
     let _ = bmseeker::install::job::Files::slot;
+    let _ = bmseeker::links::Links::chart_links_in;
     let _ = bmseeker::links::Links::from_stella;
+    let _ = bmseeker::links::Links::song_links_in;
     let _ = bmseeker::manbow::mirror::Work::default;
     #[cfg(not(target_arch = "wasm32"))]
     let _ = bmseeker::native::Native::new;
     let _ = bmseeker::placement::Rules::default;
+    let _ = bmseeker::placement::SongKey::of;
     let _ = bmseeker::progress::Progress::new;
     let _ = bmseeker::refusal::Guarded::new;
     let _ = bmseeker::sources::Sources::from_config;
@@ -249,9 +251,6 @@ fn _fields_5(v: bmseeker::install::Entry) {
     let _ = matches!(
         v,
         bmseeker::install::Entry {
-            chart: _,
-            md5: _,
-            org_md5: _,
             song: _,
             want: _,
             ..
@@ -330,7 +329,20 @@ fn _fields_11(v: bmseeker::manbow::mirror::File) {
     );
 }
 
-fn _fields_12(v: bmseeker::net::Request) {
+fn _fields_12(v: bmseeker::manbow::mirror::Work) {
+    let _ = matches!(
+        v,
+        bmseeker::manbow::mirror::Work {
+            artist: _,
+            num: _,
+            page: _,
+            title: _,
+            ..
+        }
+    );
+}
+
+fn _fields_13(v: bmseeker::net::Request) {
     let _ = matches!(
         v,
         bmseeker::net::Request::Post {
@@ -341,7 +353,7 @@ fn _fields_12(v: bmseeker::net::Request) {
     );
 }
 
-fn _fields_13(v: bmseeker::sources::Query) {
+fn _fields_14(v: bmseeker::sources::Query) {
     let _ = matches!(
         v,
         bmseeker::sources::Query {
@@ -353,7 +365,7 @@ fn _fields_13(v: bmseeker::sources::Query) {
     );
 }
 
-fn _fields_14(v: bmseeker::table::Course) {
+fn _fields_15(v: bmseeker::table::Course) {
     let _ = matches!(
         v,
         bmseeker::table::Course {
@@ -365,7 +377,7 @@ fn _fields_14(v: bmseeker::table::Course) {
     );
 }
 
-fn _fields_15(v: bmseeker::table::DifficultyTable) {
+fn _fields_16(v: bmseeker::table::DifficultyTable) {
     let _ = matches!(
         v,
         bmseeker::table::DifficultyTable {
@@ -378,13 +390,14 @@ fn _fields_15(v: bmseeker::table::DifficultyTable) {
     );
 }
 
-fn _fields_16(v: bmseeker::table::TableEntry) {
+fn _fields_17(v: bmseeker::table::TableEntry) {
     let _ = matches!(
         v,
         bmseeker::table::TableEntry {
             artist: _,
             level: _,
             md5: _,
+            org_md5: _,
             title: _,
             url: _,
             url_diff: _,
@@ -393,7 +406,7 @@ fn _fields_16(v: bmseeker::table::TableEntry) {
     );
 }
 
-fn _fields_17(v: bmseeker::table::TableHeader) {
+fn _fields_18(v: bmseeker::table::TableHeader) {
     let _ = matches!(
         v,
         bmseeker::table::TableHeader {
@@ -404,7 +417,7 @@ fn _fields_17(v: bmseeker::table::TableHeader) {
     );
 }
 
-fn _fields_18(v: bmseeker::unpack::Limits) {
+fn _fields_19(v: bmseeker::unpack::Limits) {
     let _ = matches!(
         v,
         bmseeker::unpack::Limits {
@@ -415,7 +428,7 @@ fn _fields_18(v: bmseeker::unpack::Limits) {
     );
 }
 
-fn _fields_19(v: bmseeker::unpack::Member) {
+fn _fields_20(v: bmseeker::unpack::Member) {
     let _ = matches!(
         v,
         bmseeker::unpack::Member {
