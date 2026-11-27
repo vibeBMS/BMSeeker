@@ -1242,7 +1242,8 @@ fn a_chart_kept_above_the_songs_opens_none() {
 /// A download for a song the library has brings charts into that song's
 /// folders only: one it lays out in the folder of the song beside it, or
 /// in the pack's, waits in the downloads as one whose song is not known.
-/// Its other files there come in only where none of their names is.
+/// Its other files there stay out too (a file a song lacks may be one its
+/// charts would play).
 #[test]
 fn charts_keep_to_their_songs_folders() {
     let new = "#TITLE X [another]\n#ARTIST alpha\n#WAV01 01.wav\n";
@@ -1274,7 +1275,7 @@ fn charts_keep_to_their_songs_folders() {
             assert!(text(&m, "bms/Pack/Y/planted.bms").is_none(), "{at}");
             assert!(text(&m, "bms/Pack/x.bms").is_none(), "{at}");
             assert_eq!(text(&m, "bms/Pack/Y/01.ogg").as_deref(), Some("Y's"));
-            assert_eq!(text(&m, "bms/Pack/Y/extra.png").as_deref(), Some("new"));
+            assert!(text(&m, "bms/Pack/Y/extra.png").is_none(), "{at}");
             no_stage(&m);
         }
     }
@@ -1390,4 +1391,120 @@ fn a_song_above_others_replaces_none_of_theirs() {
             }
         }
     }
+}
+
+/// A pack's download that holds no chart of the song beside the one it is
+/// for (Y) brings it no file a chart of Y would find for one of its own by
+/// another extension (`01.wav` for its `01.ogg`, `bg.bmp` for its
+/// `bg.png`): Y plays what it played, whatever the download's link and
+/// brought in again or not.
+#[test]
+fn a_pack_brings_no_file_a_song_beside_finds_by_its_name() {
+    let with_top = [
+        ("x.bms", PACK_TOP),
+        ("X/x.bms", PACK_X),
+        ("Y/01.wav", "pack's"),
+        ("Y/bg.bmp", "pack's"),
+    ];
+    // (all its charts the library's)
+    let owned = [
+        ("X/x.bms", PACK_X),
+        ("X/02.ogg", "new"),
+        ("Y/01.wav", "pack's"),
+        ("Y/bg.bmp", "pack's"),
+    ];
+    for files in [&with_top[..], &owned[..]] {
+        for role in [Role::Song, Role::Diff, Role::Any] {
+            for reinstall in [false, true] {
+                let m = packs();
+                let r = Request {
+                    reinstall,
+                    ..req(role)
+                };
+                let done = take_zip(&m, files, &r, &mut lib(&m));
+                let at = format!(
+                    "{} files, {role:?}, reinstall {reinstall}: {done:?}",
+                    files.len()
+                );
+                assert!(text(&m, "bms/Pack/Y/01.wav").is_none(), "{at}");
+                assert!(text(&m, "bms/Pack/Y/bg.bmp").is_none(), "{at}");
+                assert_eq!(
+                    text(&m, "bms/Pack/Y/01.ogg").as_deref(),
+                    Some("Y's"),
+                    "{at}"
+                );
+                no_stage(&m);
+            }
+        }
+    }
+}
+
+/// A 差分 placed by its sounds in a song's folder brings the files beside
+/// it that the folder lacks, but none a chart of the song would find for
+/// one of its own by another extension.
+#[test]
+fn a_diff_brings_no_file_its_song_finds_by_its_name() {
+    let m = store(&[
+        (
+            "bms/Song/song.bms",
+            "#TITLE Song\n#ARTIST alpha\n#WAV01 01.wav\n#WAV02 02.wav\n",
+        ),
+        ("bms/Song/01.ogg", "song's"),
+        ("bms/Song/02.ogg", "song's"),
+        ("bms/Song/bg.png", "song's"),
+    ]);
+    let chart = "#TITLE Song [X]\n#ARTIST alpha\n#WAV01 01.wav\n#WAV02 02.wav\n#WAV03 x.wav\n";
+    let files = [
+        ("d/x.bms", chart),
+        ("d/01.wav", "diff's"),
+        ("d/BG.BMP", "diff's"),
+        ("d/x.ogg", "new"),
+    ];
+    for reinstall in [false, true] {
+        let r = Request {
+            reinstall,
+            ..req(Role::Diff)
+        };
+        let done = take_zip(&m, &files, &r, &mut lib(&m));
+        assert!(
+            matches!(&done[..], [Done::Placed(p)] if p == Path::new("bms/Song/x.bms")),
+            "{done:?}"
+        );
+        assert_eq!(text(&m, "bms/Song/x.ogg").as_deref(), Some("new"));
+        if !reinstall {
+            assert!(text(&m, "bms/Song/01.wav").is_none());
+            assert!(text(&m, "bms/Song/BG.BMP").is_none());
+        }
+        let _ = m.remove(Path::new("bms/Song/x.bms"));
+        let _ = m.remove(Path::new("bms/Song/x.ogg"));
+    }
+}
+
+/// A song's own download (a chart of it the library has) brings in, beside
+/// its older files, what it now has under another extension (`bg.png` for
+/// `bg.bmp`), in its folder alone or in a pack's.
+#[test]
+fn a_songs_download_brings_its_files_by_another_extension() {
+    let song = "#TITLE Song\n#ARTIST alpha\n#WAV01 01.wav\n#BMP01 bg.bmp\n";
+    let m = store(&[
+        ("bms/Song/song.bms", song),
+        ("bms/Song/01.ogg", "old"),
+        ("bms/Song/bg.bmp", "old"),
+    ]);
+    let files = [
+        ("Song/song.bms", song),
+        ("Song/01.ogg", "old"),
+        ("Song/bg.png", "new"),
+    ];
+    let done = take_zip(&m, &files, &req(Role::Song), &mut lib(&m));
+    assert!(matches!(&done[..], [Done::Owned(_)]), "{done:?}");
+    assert_eq!(text(&m, "bms/Song/bg.png").as_deref(), Some("new"));
+    let m = packs();
+    let files = [
+        ("x.bms", PACK_TOP),
+        ("X/x.bms", PACK_X),
+        ("X/01.wav", "new"),
+    ];
+    take_zip(&m, &files, &req(Role::Song), &mut lib(&m));
+    assert_eq!(text(&m, "bms/Pack/X/01.wav").as_deref(), Some("new"));
 }

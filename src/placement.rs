@@ -723,6 +723,22 @@ pub(crate) fn clash(
     }
 }
 
+/// Whether `dir` holds a file a chart naming `name` finds (a player looks
+/// for the name a chart gives first, then for one of its kind by the rest:
+/// a sound, an image, a movie): of `name`'s kind and its name but for the
+/// extension (`01.ogg` for `01.wav`, [`key`]). One brought beside it would
+/// change what the charts there play.
+fn found_as(fs: &dyn Fs, dir: &Path, name: &str) -> bool {
+    let Some(class) = class_of(name) else {
+        return false;
+    };
+    let k = key(name);
+    (fs.read_dir(dir).unwrap_or_default().iter()).any(|e| {
+        let n = file_name(&e.path);
+        !e.is_dir && class_of(&n) == Some(class) && key(&n) == k
+    })
+}
+
 /// Move `file` into the folder `dir` (a chart, or a file it came with), by
 /// `clash`: a chart of the same name there is not replaced (it comes in
 /// as `name_.bms`; the same chart again just goes); another file of the
@@ -734,7 +750,8 @@ pub fn bring(fs: &dyn Store, file: &Path, dir: &Path) -> std::io::Result<Option<
 }
 
 /// [`bring`]; without `replace`, a file of the same name there stays
-/// whatever its time (`file` goes).
+/// whatever its time, and so does one a chart would find in its place
+/// ([`found_as`]): `file` goes.
 pub(crate) fn bring_in(
     fs: &dyn Store,
     file: &Path,
@@ -742,6 +759,10 @@ pub(crate) fn bring_in(
     replace: bool,
 ) -> std::io::Result<Option<PathBuf>> {
     let name = file_name(file);
+    if !replace && found_as(fs, dir, &name) {
+        fs.remove(file)?;
+        return Ok(None);
+    }
     let mut to = dir.join(&name);
     let chart = is_chart(file);
     if chart && fs.stamp(&to).is_some() {
@@ -1379,6 +1400,30 @@ mod tests {
         );
         assert_eq!(mem.get(&song.join("01.ogg")).unwrap().0, b"song's");
         assert!(mem.get(&pkg.join("01.ogg")).is_none());
+    }
+
+    /// Without replacing, a file a chart there finds by another extension
+    /// stays as a file of its name would: one of another kind comes in.
+    #[test]
+    fn found_by_another_extension() {
+        let mem = crate::fs::Mem::default();
+        let song = Path::new("bms/Song");
+        mem.put(&song.join("01.ogg"), b"song's", 0);
+        mem.put(&song.join("bg.png"), b"song's", 0);
+        for f in ["01.wav", "BG.bmp", "01.png", "01.flac"] {
+            mem.put(&Path::new("p").join(f), b"new", 100);
+        }
+        let brought = |f: &str, replace| bring_in(&mem, &Path::new("p").join(f), song, replace);
+        assert_eq!(brought("01.wav", false).unwrap(), None);
+        assert_eq!(brought("BG.bmp", false).unwrap(), None);
+        assert!(mem.get(Path::new("p/01.wav")).is_none());
+        assert_eq!(brought("01.png", false).unwrap(), Some(song.join("01.png")));
+        // (replacing: as a file of its name would be, by the overwrite rule)
+        assert_eq!(
+            brought("01.flac", true).unwrap(),
+            Some(song.join("01.flac"))
+        );
+        assert_eq!(mem.get(&song.join("01.ogg")).unwrap().0, b"song's");
     }
 
     /// Where files keep no times (a web page's storage), what is there

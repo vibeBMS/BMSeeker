@@ -142,7 +142,8 @@ pub(crate) struct Item {
     /// goes there.
     pub(crate) within: Vec<PathBuf>,
     /// The library's songs' folders below those (another song's, or one
-    /// of them): what is in one is that song's, not the folder's above it.
+    /// of them), or on the way to its files: what is in one is that song's,
+    /// not the folder's above it.
     pub(crate) others: Vec<PathBuf>,
 }
 
@@ -578,12 +579,15 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
 }
 
 /// `item`, the other songs' folders below its song's (`songs`: the
-/// library's, in order) in it, and the charts it would put outside its
-/// song's folders waiting in the downloads instead.
+/// library's, in order) or on the way to its files in it, and what it
+/// would put outside its song's folders: the charts waiting in the
+/// downloads instead, the other files in another song's folder left out
+/// (a file there it lacks may be one its charts would play).
 fn charts_to_songs(songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
-    if !matches!(item.outcome, Outcome::Into(_) | Outcome::Owned(_)) {
-        return vec![item];
-    }
+    let dest = match &item.outcome {
+        Outcome::Into(d) | Outcome::Owned(d) => d.clone(),
+        _ => return vec![item],
+    };
     let mut others: Vec<PathBuf> = Vec::new();
     for d in &item.within {
         // (those below a folder come right after it)
@@ -594,9 +598,32 @@ fn charts_to_songs(songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
                 .map(|o| o.to_path_buf()),
         );
     }
+    // (a folder's on the way to its files once)
+    let mut seen: HashSet<&Path> = HashSet::new();
+    for (_, to) in &item.moves {
+        for f in to.ancestors().skip(1).take_while(|f| f.starts_with(&dest)) {
+            if !seen.insert(f) {
+                break;
+            }
+            if !item.within.iter().any(|d| d == f) && songs.contains(f) {
+                others.push(f.to_path_buf());
+            }
+        }
+    }
+    others.sort();
+    others.dedup();
     item.others = others;
-    let (astray, moves): (Vec<_>, Vec<_>) = (std::mem::take(&mut item.moves).into_iter())
-        .partition(|(_, to)| is_chart(to) && !item.covers(to));
+    let theirs = |to: &Path| item.others.iter().any(|o| below_as(to, o, SPELLING));
+    let mut astray = Vec::new();
+    let mut moves = Vec::new();
+    for (from, to) in std::mem::take(&mut item.moves) {
+        match (item.covers(&to), is_chart(&to)) {
+            (true, _) => moves.push((from, to)),
+            (false, true) => astray.push((from, to)),
+            (false, false) if !theirs(&to) => moves.push((from, to)),
+            (false, false) => {}
+        }
+    }
     item.moves = moves;
     let mut out = vec![item];
     if !astray.is_empty() {
