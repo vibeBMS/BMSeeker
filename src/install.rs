@@ -34,6 +34,22 @@ pub enum Done {
     Failed(Failure),
 }
 
+impl Done {
+    /// What it is, in a word, for a program (the CLI's records' `state`;
+    /// its text is a front end's to write): `added`, `owned`, `placed`,
+    /// `waiting`, `page`, `failed`. The first four are what [`got`] counts.
+    pub fn state(&self) -> &'static str {
+        match self {
+            Done::Added(..) => "added",
+            Done::Owned(_) => "owned",
+            Done::Placed(_) => "placed",
+            Done::Waiting(_) => "waiting",
+            Done::Page(_) => "page",
+            Done::Failed(_) => "failed",
+        }
+    }
+}
+
 /// Why a link (or every link) brought nothing. Its text (`Display`) is
 /// what a person reads.
 #[derive(Clone, Debug, PartialEq)]
@@ -544,5 +560,26 @@ mod tests {
         assert_eq!(Failure::from(NetError::Status(404)).to_string(), "HTTP 404");
         assert!(Failure::from(NetError::Cancelled).cancelled());
         assert!(!Failure::Other("cancelled".into()).cancelled());
+    }
+
+    /// Each outcome's word; those `got` counts are the first four.
+    #[test]
+    fn states() {
+        let all = [
+            Done::Added("a".into(), 1),
+            Done::Owned("a".into()),
+            Done::Placed("a/x.bms".into()),
+            Done::Waiting("x.bms".into()),
+            Done::Page("https://1drv.ms/x".into()),
+            Done::Failed(Failure::NoLink),
+        ];
+        let states: Vec<_> = all.iter().map(Done::state).collect();
+        assert_eq!(
+            states,
+            ["added", "owned", "placed", "waiting", "page", "failed"]
+        );
+        for (i, d) in all.iter().enumerate() {
+            assert_eq!(got(std::slice::from_ref(d)), i < 4, "{d:?}");
+        }
     }
 }

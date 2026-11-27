@@ -27,7 +27,7 @@ var bundled embed.FS
 
 // cliWords are the first arguments that make this binary the CLI.
 var cliWords = map[string]bool{
-	"link": true, "song": true, "table": true, "library": true, "event": true,
+	"link": true, "song": true, "table": true, "library": true, "event": true, "config": true,
 	"help": true, "--help": true, "-h": true, "--version": true, "-V": true,
 	"--json": true, "--config": true,
 }

@@ -4,6 +4,8 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,25 +17,59 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// fakeCLI answers as the CLI would: `table missing` lists two charts,
-// `library install` brings the first in and finds a page for the second.
-// It notes the arguments it was given.
-const fakeCLI = `#!/bin/sh
-echo "$*" >> "$(dirname "$0")/args"
-case "$*" in
-  *"table missing"*)
-    echo '{"level":"1","label":"★1","title":"Song A","artist":"x","md5":"a","url":"https://d/a.zip","url_diff":""}'
-    echo '{"level":"2","label":"★2","title":"Song B","artist":"y","md5":"b","url":"https://1drv.ms/b","url_diff":""}'
-    echo "2 of 9 charts missing" >&2 ;;
-  *"link page-script"*) echo '{"script":"/* by the library */"}' ;;
-  *"Song A"*) echo '{"title":"Song A","state":"added","path":"/lib/Song A","files":3}' ;;
-  *"Song B"*) echo '{"title":"Song B","state":"page","link":"https://1drv.ms/b"}' ;;
-  *"Song C"*)
-    echo "bmseeker: third-party sources are on (...)" >&2
-    echo '{"refused":"api.bmssearch.net","code":"status","status":403,"error":"api.bmssearch.net refused BMSeeker (HTTP 403): skipped for the rest of this run"}'
-    echo '{"title":"Song C","state":"failed","code":"no_link","error":"no link"}' ;;
-esac
-`
+// The protocol's fixture: runs of the CLI, each its command line, the
+// lines it wrote in order and its exit code, as the CLI's own test writes
+// them (src/cli/mod.rs, the_records_the_window_reads).
+const fixture = "../testdata/records.jsonl"
+
+// A run of the CLI the fixture holds.
+type run struct {
+	Args  []string `json:"args"`
+	Lines []struct {
+		Record json.RawMessage `json:"record"`
+		Note   *string         `json:"note"`
+	} `json:"lines"`
+	Exit int `json:"exit"`
+}
+
+// Started with $BMSEEKER_REPLAY (the fixture's path), this test binary is
+// the CLI as the fixture has it.
+func TestMain(m *testing.M) {
+	if f := os.Getenv("BMSEEKER_REPLAY"); f != "" {
+		os.Exit(replay(f, os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+// replay writes what the CLI wrote for args in the fixture file's run of
+// them, and ends as it did. A command line it has no run of fails.
+func replay(file string, args []string) int {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bmseeker:", err)
+		return 2
+	}
+	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var r run
+		if err := json.Unmarshal([]byte(l), &r); err != nil {
+			fmt.Fprintln(os.Stderr, "bmseeker:", err)
+			return 2
+		}
+		if !slices.Equal(r.Args, args) {
+			continue
+		}
+		for _, x := range r.Lines {
+			if x.Note != nil {
+				fmt.Fprintln(os.Stderr, *x.Note)
+			} else {
+				fmt.Println(string(x.Record))
+			}
+		}
+		return r.Exit
+	}
+	fmt.Fprintf(os.Stderr, "bmseeker: the fixture has no run of %q\n", args)
+	return 2
+}
 
 func until(t *testing.T, ok func() bool) {
 	t.Helper()
@@ -45,51 +81,79 @@ func until(t *testing.T, ok func() bool) {
 	}
 }
 
-func TestTablesToBrowser(t *testing.T) {
+// fakeApp is a window on the library /lib, in a home of its own, whose CLI
+// answers as the fixture says.
+func fakeApp(t *testing.T) *app {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
-	cli := filepath.Join(dir, "bmseeker")
-	if err := os.WriteFile(cli, []byte(fakeCLI), 0o755); err != nil {
+	self, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BMSEEKER_CLI", cli)
+	file, err := filepath.Abs(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BMSEEKER_CLI", self)
+	t.Setenv("BMSEEKER_REPLAY", file)
 	cliOnce = sync.Once{}
+	return newApp("/lib")
+}
 
-	a := newApp(dir)
+// The window on the fixture's runs: its settings, a table's missing
+// charts, those shown downloaded in one run (one into the library, one a
+// page for the Browser tab, one whose source refused), and a later run
+// that skips the host that refused, with third-party sources on, whose
+// notice it does not repeat.
+func TestTablesToBrowser(t *testing.T) {
+	a := fakeApp(t)
+	a.readSettings()
+	until(t, func() bool { return len(a.busy) == 0 })
+	if !slices.Equal(a.settings.Tables, []string{"https://t.example/table.json"}) || a.table != a.settings.Tables[0] ||
+		a.settings.downloads() != filepath.Join("/lib", ".bmseeker") || a.configThirdParty {
+		t.Fatalf("settings %+v, table %q, log %q", a.settings, a.table, a.log)
+	}
 	tt := ui.NewTester(a.view, 980, 720)
 	if err := tt.Click("Missing charts"); err != nil {
 		t.Fatal(err)
 	}
-	until(t, func() bool { return len(a.missing) == 2 && len(a.busy) == 0 })
+	until(t, func() bool { return len(a.missing) == 3 && len(a.busy) == 0 })
 	tt.Frame()
-	if !tt.HasText("Song A") || !tt.HasText("2 missing") {
+	if !tt.HasText("Song A") || !tt.HasText("3 missing") {
 		t.Fatalf("texts %q", tt.Texts())
 	}
 	if err := tt.Click("Download all shown"); err != nil {
 		t.Fatal(err)
 	}
 	until(t, func() bool { return len(a.busy) == 0 && len(a.pages) == 1 })
-	if len(a.missing) != 1 || a.missing[0].Title != "Song B" {
-		t.Fatalf("missing %v", a.missing)
+	if len(a.missing) != 2 || a.missing[0].Title != "Song B" || a.missing[1].Title != "Song C" {
+		t.Fatalf("missing %v, log %q", a.missing, a.log)
 	}
 	tt.Frame()
 	if !tt.HasText("Browser (1)") {
 		t.Fatalf("texts %q", tt.Texts())
 	}
 	joined := strings.Join(a.log, "\n")
-	if !strings.Contains(joined, "2 of 9 charts missing") || !strings.Contains(joined, "Song A: added") {
-		t.Fatalf("log %q", joined)
+	for _, said := range []string{"3 of 3 charts missing", "Song A: added /lib/Song A",
+		"Song B: needs a browser: https://b.example/b", "bmssearch.net refused BMSeeker (HTTP 403)", "Song C: no link"} {
+		if !strings.Contains(joined, said) {
+			t.Fatalf("%q not in the log %q", said, joined)
+		}
 	}
-	// the third-party setting goes to the CLI
+	if !slices.Equal(a.refused, []string{"bmssearch.net"}) {
+		t.Fatalf("refused %q", a.refused)
+	}
+	// later runs skip it; the third-party setting goes to the CLI, which
+	// the fixture answers only for this command line
 	a.settings.ThirdParty = true
-	if err := a.cli([]string{"library", "pending", "-L", "/lib"}, nil); err != nil {
+	got := 0
+	if err := a.cli([]string{"library", "pending", "--library=/lib"}, func(Record) { got++ }); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := os.ReadFile(filepath.Join(dir, "args"))
-	if !strings.Contains(string(args), "--json --third-party library pending") ||
-		strings.Contains(strings.SplitN(string(args), "\n", 2)[0], "--third-party") {
-		t.Fatalf("args %q", args)
+	joined = strings.Join(a.log, "\n")
+	if got != 0 || !strings.Contains(joined, "0 charts waiting") || strings.Contains(joined, "third-party sources are on") {
+		t.Fatalf("records %d, log %q", got, joined)
 	}
 	// every tab draws
 	for _, tab := range []string{"Link", "Waiting", "Settings", "Browser (1)"} {
@@ -100,26 +164,8 @@ func TestTablesToBrowser(t *testing.T) {
 	}
 }
 
-// fakeApp is a window on the fake CLI, in a home of its own.
-func fakeApp(t *testing.T) (*app, string) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	// (beside the config folder's bmseeker/, not in its place)
-	bin := filepath.Join(dir, "bin")
-	if err := os.Mkdir(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(fakeCLI), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BMSEEKER_CLI", filepath.Join(bin, "bmseeker"))
-	cliOnce = sync.Once{}
-	return newApp(dir), bin
-}
-
 func TestThirdPartyAsksFirst(t *testing.T) {
-	a, _ := fakeApp(t)
+	a := fakeApp(t)
 	tt := ui.NewTester(a.view, 980, 720)
 	if err := tt.Click("Settings"); err != nil {
 		t.Fatal(err)
@@ -165,32 +211,6 @@ func TestThirdPartyAsksFirst(t *testing.T) {
 	}
 }
 
-func TestRefusedHostsSkipped(t *testing.T) {
-	a, dir := fakeApp(t)
-	a.settings.ThirdParty = true
-	got := 0
-	err := a.cli([]string{"library", "install", "--title", "Song C"}, func(Record) { got++ })
-	if err != nil {
-		t.Fatal(err)
-	}
-	// the refusal is logged, not handed on; the CLI's third-party note left out
-	joined := strings.Join(a.log, "\n")
-	if got != 1 || !strings.Contains(joined, "api.bmssearch.net refused BMSeeker (HTTP 403)") ||
-		strings.Contains(joined, "third-party sources are on") {
-		t.Fatalf("records %d, log %q", got, joined)
-	}
-	// later runs skip it
-	if err := a.cli([]string{"library", "pending", "-L", "/lib"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	args, _ := os.ReadFile(filepath.Join(dir, "args"))
-	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
-	if strings.Contains(lines[0], "--skip-host") ||
-		!strings.Contains(lines[1], "--json --third-party --skip-host=api.bmssearch.net library pending") {
-		t.Fatalf("args %q", args)
-	}
-}
-
 // wordsCLI notes each argument it was given on a line of its own, and an
 // empty line after a command's last.
 const wordsCLI = `#!/bin/sh
@@ -198,45 +218,50 @@ const wordsCLI = `#!/bin/sh
 `
 
 // What a table or a server says (a title, an artist, an MD5, links, a
-// refused host's name) reaches the CLI as an option's value or after "--",
-// never as an argument the CLI could read as an option.
+// table's URL, a refused host's name) reaches the CLI as an option's
+// value or after "--", never as an argument the CLI could read as an
+// option.
 func TestSaidValuesAreNoOptions(t *testing.T) {
-	a, bin := fakeApp(t)
+	a := fakeApp(t)
+	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(wordsCLI), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("BMSEEKER_CLI", filepath.Join(bin, "bmseeker"))
+	cliOnce = sync.Once{}
 	m := missing{Title: "-ERROR", Artist: "--reinstall", MD5: "--third-party", URL: "--config=/x.json", URLDiff: "-h"}
-	said := []string{m.Title, m.Artist, m.MD5, m.URL, m.URLDiff, "-x.evil.example"}
+	said := []string{m.Title, m.Artist, m.MD5, m.URL, m.URLDiff, "-x.evil.example", "--help"}
 	a.refused = []string{"-x.evil.example"}
+	a.missingFrom = "--help"
 	a.download([]missing{m})
 	until(t, func() bool { return len(a.busy) == 0 })
 	args, _ := os.ReadFile(filepath.Join(bin, "args"))
-	var links []string
-	for _, cmd := range strings.Split(strings.TrimSpace(string(args)), "\n\n") {
-		words := strings.Split(cmd, "\n")
-		end := slices.Index(words, "--")
-		if end < 0 {
-			t.Fatalf("no \"--\" before the links: %q", words)
-		}
-		for _, w := range words[:end] {
-			if slices.Contains(said, w) {
-				t.Errorf("%q is an argument of its own: %q", w, words)
-			}
-		}
-		if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--title=-ERROR") {
-			t.Errorf("values not attached to their options: %q", words)
-		}
-		links = append(links, words[end+1:]...)
+	cmds := strings.Split(strings.TrimSpace(string(args)), "\n\n")
+	words := strings.Split(cmds[0], "\n")
+	end := slices.Index(words, "--")
+	if len(cmds) != 1 || end < 0 || !slices.Equal(words[end+1:], []string{"--help"}) {
+		t.Fatalf("not one command, its table after \"--\": %q", cmds)
 	}
-	if !slices.Equal(links, []string{m.URL, m.URLDiff}) {
-		t.Fatalf("links %q", links)
+	if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--md5=--third-party") {
+		t.Errorf("values not attached to their options: %q", words)
+	}
+	// the Link tab's command
+	link := installArgs("/lib", m.Title, m.Artist, m.MD5, []string{"--own-links"}, m.URL)
+	at := slices.Index(link, "--")
+	if at < 0 || !slices.Equal(link[at+1:], []string{m.URL}) || !slices.Contains(link[:at], "--title=-ERROR") {
+		t.Fatalf("link %q", link)
+	}
+	for _, w := range append(words[:end:end], link[:at]...) {
+		if slices.Contains(said, w) {
+			t.Errorf("%q is an argument of its own: %q, %q", w, words, link)
+		}
 	}
 }
 
 // The Browser tab opens web links only: a table may say anything where a
 // link goes.
 func TestOnlyWebLinksOpen(t *testing.T) {
-	a, _ := fakeApp(t)
+	a := fakeApp(t)
 	for _, l := range []string{"file://evil.example/share/x.html", "javascript:alert(1)", "search-ms:query=x", "https:///x", "--help", ""} {
 		a.log = nil
 		a.openPage(page{Title: "Song", Link: l})
@@ -255,7 +280,7 @@ func TestOnlyWebLinksOpen(t *testing.T) {
 // what the downloads folder holds, whatever the page names it; the name
 // goes to the CLI as a value. The script its window runs is the CLI's.
 func TestPageDownloads(t *testing.T) {
-	a, _ := fakeApp(t)
+	a := fakeApp(t)
 	dir := t.TempDir()
 	held := map[string]string{"scan.json": "[]", "waiting.bms": "#TITLE A", "page-1.part": "x"}
 	for n, body := range held {
@@ -291,7 +316,7 @@ func TestPageDownloads(t *testing.T) {
 		!slices.Contains(args[:end], "--name=--reinstall") || !slices.Contains(args[:end], "--library=-lib") {
 		t.Errorf("args %q", args)
 	}
-	if got := a.pageScript(); got != "/* by the library */" {
+	if got := a.pageScript(); !strings.Contains(got, "location.hostname") {
 		t.Errorf("script %q, log %q", got, a.log)
 	}
 }
@@ -342,7 +367,7 @@ func TestBundledCLI(t *testing.T) {
 }
 
 func TestCLIWords(t *testing.T) {
-	for _, a := range [][]string{{"link", "get"}, {"--help"}, {"--json", "table"}} {
+	for _, a := range [][]string{{"link", "get"}, {"--help"}, {"--json", "table"}, {"config", "show"}} {
 		if !isCLI(a) {
 			t.Errorf("%v is the CLI", a)
 		}

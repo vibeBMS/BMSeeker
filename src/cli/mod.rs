@@ -72,6 +72,16 @@ enum Command {
     #[cfg(not(target_arch = "wasm32"))]
     #[command(subcommand)]
     Event(event::Event),
+    /// The settings.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// The settings in effect: the settings file's (or the defaults) with
+    /// what the command line turns on, as one `config` record.
+    Show,
 }
 
 impl Cli {
@@ -92,7 +102,7 @@ impl Cli {
             r.cx.refused.earlier(h);
         }
         if r.cx.config.third_party {
-            r.out.note(THIRD_PARTY_NOTICE);
+            notice(&r.out, "third_party", THIRD_PARTY_NOTICE);
         }
         let told = |refusal: &Refusal| refused(&r.out, refusal);
         let guarded = Guarded::new(r.net, &r.cx).telling(&told);
@@ -107,6 +117,11 @@ impl Cli {
             Command::Library(c) => library::library(run, c),
             #[cfg(not(target_arch = "wasm32"))]
             Command::Event(c) => event::event(run, c),
+            Command::Config(ConfigCommand::Show) => {
+                let v = serde_json::json!({ "config": run.config() });
+                run.out.record(v.clone(), || format!("{:#}", v["config"]));
+                Ok(())
+            }
         };
         // (one a task kept from the last answer: MEGA's -4)
         guarded.tell();
@@ -115,10 +130,24 @@ impl Cli {
 }
 
 /// What the tool says once a run when third parties' copies are used
-/// (`--third-party`, the setting).
+/// (`--third-party`, the setting): with `--json` the `text` of a
+/// `{"notice": "third_party"}` record, else a note.
 pub const THIRD_PARTY_NOTICE: &str = "bmseeker: third-party sources are on (other people's \
 copies: mirrors, Ginger, Konmai, the community archive); keeping to their sites' terms and to \
 the copyright holders' rights is up to you";
+
+/// What a person is told once a run, whatever the command (`what`: which
+/// notice, for a program): with `--json` a `notice` record (`{"notice":
+/// what, "text"}`), else a note.
+fn notice(out: &Out, what: &str, text: &str) {
+    match out.json {
+        true => out.record(
+            serde_json::json!({"notice": what, "text": text}),
+            String::new,
+        ),
+        false => out.note(text),
+    }
+}
 
 /// A service that refused: a `refused` record (`{"refused": host,
 /// "code", "status"?, "error"}`), and a note.
@@ -226,6 +255,137 @@ mod tests {
         let refused: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
         assert_eq!(refused["refused"], "mega.nz");
         assert_eq!(refused["code"], "rate_limited");
+    }
+
+    /// The protocol as the window reads it: `testdata/records.jsonl`, each
+    /// line a run (its command line, the lines it wrote in order, its exit
+    /// code), which `gui/gui_test.go` replays as the CLI. Its runs are the
+    /// window's: the settings, a table's missing charts, those chosen
+    /// downloaded (one into the library, one a page, one whose source
+    /// refuses), a run after a refusal and with third parties' sources, and
+    /// the script a page's window runs. The commands must write them as the
+    /// file has them; `BMSEEKER_BLESS=1 cargo test --features cli records`
+    /// writes it anew (a change of the protocol, which the window's test
+    /// then reads). (Not on Windows: a path's separator there is `\`.)
+    #[cfg(unix)]
+    #[test]
+    fn the_records_the_window_reads() {
+        use crate::install::md5_hex;
+        use crate::net::job::Served;
+        const TABLE: &str = "https://t.example/table.json";
+        const SONG_A: &str = "#TITLE Song A\n#ARTIST x\n#WAV01 01.wav\n#00111:01\n";
+        let (a, b, c) = (md5_hex(SONG_A.as_bytes()), "b".repeat(32), "c".repeat(32));
+        let data = serde_json::json!([
+            {"md5": a, "title": "Song A", "artist": "x", "level": "1",
+                "url": "https://a.example/a.zip", "url_diff": ""},
+            {"md5": b, "title": "Song B", "artist": "y", "level": "2",
+                "url": "https://b.example/b", "url_diff": ""},
+            {"md5": c, "title": "Song C", "artist": "z", "level": "2", "url": "", "url_diff": ""},
+        ]);
+        struct Hosts(Vec<u8>, Vec<u8>);
+        impl Driver for Hosts {
+            fn perform(&self, effect: Effect) -> Fed {
+                match effect {
+                    Effect::Http(r) => Fed::Http(match r.url() {
+                        TABLE => {
+                            Ok(br#"{"name":"Fixture","symbol":"F","data_url":"data.json"}"#
+                                .to_vec())
+                        }
+                        "https://t.example/data.json" => Ok(self.0.clone()),
+                        u if crate::net::host(u) == "api.bmssearch.net" => {
+                            Err(NetError::Status(403))
+                        }
+                        _ => Err(NetError::Status(404)),
+                    }),
+                    Effect::Download { target, .. } => Fed::Downloaded(match target.url.as_str() {
+                        "https://a.example/a.zip" => Ok(Served::bytes(self.1.clone(), None, None)),
+                        "https://b.example/b" => {
+                            Ok(Served::bytes(b"<html>a page</html>".to_vec(), None, None))
+                        }
+                        _ => Err(NetError::Status(404).into()),
+                    }),
+                    Effect::Sleep(_) => Fed::Woke,
+                }
+            }
+        }
+        let net = Hosts(
+            data.to_string().into_bytes(),
+            crate::testkit::zip(&[("Song A/a.bms", SONG_A), ("Song A/01.wav", "RIFF")]),
+        );
+        // the defaults, but a user agent no version changes, the sources the
+        // hosts here answer, and their table
+        let config = Config {
+            user_agent: "BMSeeker/fixture".into(),
+            sources: ["table", "bmssearch"].map(String::from).to_vec(),
+            tables: vec![TABLE.into()],
+            ..Config::default()
+        };
+        let fs: Arc<crate::fs::Mem> = Arc::default();
+        let md5s = [&a, &b, &c].map(|m| format!("--md5={m}"));
+        let get = ["--json", "table", "missing", "--library=/lib", "--get"]
+            .into_iter()
+            .chain(md5s.iter().map(String::as_str))
+            .chain(["--", TABLE])
+            .collect::<Vec<_>>();
+        let runs: [&[&str]; 5] = [
+            &["--json", "config", "show"],
+            &["--json", "table", "missing", "--library=/lib", "--", TABLE],
+            &get,
+            &[
+                "--json",
+                "--third-party",
+                "--skip-host=bmssearch.net",
+                "library",
+                "pending",
+                "--library=/lib",
+            ],
+            &["--json", "link", "page-script"],
+        ];
+        let mut file = String::new();
+        for args in runs {
+            let lines: Rc<RefCell<Vec<serde_json::Value>>> = Rc::default();
+            let sink = lines.clone();
+            let cli = Cli::try_parse_from(std::iter::once(&"bmseeker").chain(args)).unwrap();
+            let run = Run {
+                out: Out::new(cli.json, move |l| {
+                    sink.borrow_mut().push(match l {
+                        Line::Record(r) => serde_json::json!({"record": serde_json::from_str::<serde_json::Value>(r).unwrap()}),
+                        Line::Note(n) => serde_json::json!({"note": n}),
+                    })
+                }),
+                cx: Context::new(cli.settings(config.clone())),
+                fs: fs.clone(),
+                net: &net,
+            };
+            // (as the binary ends)
+            let exit = match cli.run(&run) {
+                Ok(()) => 0,
+                Err(e) => {
+                    run.out.note(format!("bmseeker: {e}"));
+                    1
+                }
+            };
+            let run = serde_json::json!({"args": args, "lines": *lines.borrow(), "exit": exit});
+            file.push_str(&format!("{run}\n"));
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/records.jsonl");
+        if std::env::var_os("BMSEEKER_BLESS").is_some() {
+            std::fs::write(path, &file).unwrap();
+        }
+        let kept = std::fs::read_to_string(path).unwrap_or_default();
+        for (i, (now, then)) in file.lines().zip(kept.lines()).enumerate() {
+            assert_eq!(
+                now,
+                then,
+                "testdata/records.jsonl, run {}: the protocol changed (BMSEEKER_BLESS=1 writes it)",
+                i + 1
+            );
+        }
+        assert_eq!(
+            file.lines().count(),
+            kept.lines().count(),
+            "testdata/records.jsonl: runs"
+        );
     }
 
     /// The window's command lines (`gui/app.go`): an option's value

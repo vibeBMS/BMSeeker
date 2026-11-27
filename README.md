@@ -35,6 +35,7 @@ library place <chart> -L library         the song folders a separate chart may g
 library pending -L library               separate charts waiting for their songs
 library install <link>... -L library     a song (or its separate chart) from its links, then the sources'
 event works | check                      an event's works and their links (JSON Lines)
+config show                              the settings in effect
 ```
 
 For example:
@@ -121,6 +122,8 @@ bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, 
 - **Browser**: links that only give a page (OneDrive ...), opened in a web view (a OneDrive share's Download button
   is pressed for you).
 - **Settings**: the BMS folder, third-party sources (asked once before they are on), the difficulty tables.
+
+The window starts from the CLI's settings (`config show`: its `tables`, its downloads folder, `third_party`).
 
 ## Web page
 

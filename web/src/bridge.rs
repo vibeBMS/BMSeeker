@@ -298,10 +298,15 @@ mod tests {
         assert!(!records
             .iter()
             .any(|r| r["state"] == "page" && r["link"].as_str().unwrap().contains("refusing")));
-        // the third-party notice, once
-        let notice = notes
+        // the third-party notice, once, as a record
+        let notice = records
             .iter()
-            .filter(|n| n.as_str() == bmseeker::cli::THIRD_PARTY_NOTICE);
-        assert_eq!(notice.count(), 1, "{notes:?}");
+            .filter(|r| r["notice"] == "third_party")
+            .filter(|r| r["text"] == bmseeker::cli::THIRD_PARTY_NOTICE);
+        assert_eq!(notice.count(), 1, "{records:?}");
+        assert!(
+            !notes.iter().any(|n| n.contains("third-party")),
+            "{notes:?}"
+        );
     }
 }

@@ -244,8 +244,9 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
             let job = install::job::Install::new(r.fs.clone(), downloads, lib, q, links, &r.cx);
             let done = crate::net::job::run_job(&mut job.sources(sources), r.net).done;
             for d in &done {
-                r.out
-                    .record(done_record(&song.title, d), || done_text(&song.title, d));
+                r.out.record(done_record(&song.title, &song.md5, d), || {
+                    done_text(&song.title, d)
+                });
             }
             if install::got(&done) {
                 Ok(())
@@ -266,18 +267,27 @@ fn located_record(chart: &Path, l: &Located) -> Value {
     }
 }
 
-/// What came of a song's download, as a record.
-pub(super) fn done_record(title: &str, d: &Done) -> Value {
+/// What came of a song's download, as a record (`md5`: the chart's it was
+/// for, when one was given).
+pub(super) fn done_record(title: &str, md5: &str, d: &Done) -> Value {
+    let mut v = json!({"title": title});
+    if !md5.is_empty() {
+        v["md5"] = md5.into();
+    }
+    v["state"] = d.state().into();
     match d {
-        Done::Added(dir, n) => json!({"title": title, "state": "added", "path": dir, "files": n}),
-        Done::Owned(dir) => json!({"title": title, "state": "owned", "path": dir}),
-        Done::Placed(p) => json!({"title": title, "state": "placed", "path": p}),
-        Done::Waiting(p) => json!({"title": title, "state": "waiting", "path": p}),
-        Done::Page(u) => json!({"title": title, "state": "page", "link": u}),
+        Done::Added(dir, n) => {
+            v["path"] = json!(dir);
+            v["files"] = json!(n);
+        }
+        Done::Owned(p) | Done::Placed(p) | Done::Waiting(p) => v["path"] = json!(p),
+        Done::Page(u) => v["link"] = json!(u),
         Done::Failed(e) => {
-            json!({"title": title, "state": "failed", "code": e.code(), "error": e.to_string()})
+            v["code"] = e.code().into();
+            v["error"] = e.to_string().into();
         }
     }
+    v
 }
 
 pub(super) fn done_text(title: &str, d: &Done) -> String {
