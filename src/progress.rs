@@ -101,6 +101,12 @@ impl Progress {
         }
     }
 
+    /// Where it is looking or downloading from ("": not said), as
+    /// [`Progress::set_at`] was last told.
+    pub fn at(&self) -> String {
+        self.at.lock().unwrap().clone()
+    }
+
     /// `host` refused BMSeeker (or refused it earlier): it is skipped.
     pub fn refused(&self, host: &str) {
         let mut all = self.refused.lock().unwrap();
@@ -114,9 +120,12 @@ impl Progress {
         self.refused.lock().unwrap().clone()
     }
 
-    /// A short line for a person: "12.3 / 40.0 MB · pixeldrain.net",
-    /// "Finding the file… (ginger)", "Unpacking…"; while finding, the
-    /// services that refused: "· api.bmssearch.net refused, skipped".
+    /// A short line for a person, in English: "12.3 / 40.0 MB ·
+    /// pixeldrain.net", "Finding the file… (ginger)", "Unpacking…"; while
+    /// finding, the services that refused: "· api.bmssearch.net refused,
+    /// skipped". A front end in another language writes its own from
+    /// [`Progress::stage`], [`Progress::bytes`], [`Progress::at`] and
+    /// [`Progress::refusals`].
     pub fn label(&self) -> String {
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
         let at = self.at.lock().unwrap();
@@ -170,6 +179,62 @@ mod tests {
             p.label(),
             "Finding the file… (ginger) · bmssearch.net refused, skipped"
         );
+    }
+
+    /// The line from the parts a front end reads, as one would write it
+    /// in its own words.
+    fn line_of(p: &Progress) -> String {
+        let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+        let (at, refused) = (p.at(), p.refusals());
+        let skipped = match refused.is_empty() {
+            true => String::new(),
+            false => format!(" · {} refused, skipped", refused.join(", ")),
+        };
+        match p.stage() {
+            Stage::Waiting => "Waiting…".into(),
+            Stage::Finding if at.is_empty() => format!("Finding the file…{skipped}"),
+            Stage::Finding => format!("Finding the file… ({at}){skipped}"),
+            Stage::Downloading => {
+                let size = match p.bytes() {
+                    (got, Some(t)) => format!("{:.1} / {:.1} MB", mb(got), mb(t)),
+                    (got, None) => format!("{:.1} MB", mb(got)),
+                };
+                match at.is_empty() {
+                    true => size,
+                    false => format!("{size} · {at}"),
+                }
+            }
+            Stage::Unpacking => "Unpacking…".into(),
+            Stage::Adding => "Adding to the library…".into(),
+        }
+    }
+
+    /// The parts are all the line is made of: in every stage, with a
+    /// place or none, refusals or none, a size known or not.
+    #[test]
+    fn the_line_from_its_parts() {
+        let mut seen = std::collections::HashSet::new();
+        for at in ["", "pixeldrain.net"] {
+            for refused in [&[][..], &["api.bmssearch.net", "mega.nz"]] {
+                for total in [None, Some(40 << 20)] {
+                    for stage in STAGES {
+                        let p = Progress::new();
+                        p.start_file(total);
+                        p.add(12_900_000);
+                        p.set_stage(stage);
+                        p.set_at(at);
+                        for h in refused {
+                            p.refused(h);
+                        }
+                        assert_eq!(p.at(), at);
+                        assert_eq!(line_of(&p), p.label());
+                        seen.insert(p.label());
+                    }
+                }
+            }
+        }
+        // (each kind of line was made)
+        assert_eq!(seen.len(), 11);
     }
 
     #[test]
