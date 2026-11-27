@@ -13,7 +13,7 @@ import (
 
 // A chart a table lists that the library lacks.
 type missing struct {
-	Label, Level, Title, Artist, MD5, URL, URLDiff string
+	Label, Level, Title, Artist, MD5, SHA256, URL, URLDiff string
 }
 
 // A link that needs a person in a browser.
@@ -32,12 +32,14 @@ type app struct {
 	tab      int
 
 	// Tables
-	table    string
-	level    string
-	missing  []missing
-	rows     ui.ListState
-	row      int
-	newTable string
+	table string
+	level string
+	// The charts the library lacks, of the table missingFrom.
+	missing     []missing
+	missingFrom string
+	rows        ui.ListState
+	row         int
+	newTable    string
 
 	// Link
 	link, title, artist string
@@ -56,6 +58,9 @@ type app struct {
 
 	// Asking before third-party sources are turned on
 	askThirdParty bool
+	// Third-party sources are on in the CLI's settings file: on whatever
+	// the window says.
+	configThirdParty bool
 
 	// Hosts that refused BMSeeker in this session: the CLI skips them
 	// (--skip-host) in every later run.
@@ -69,17 +74,43 @@ type app struct {
 }
 
 func newApp(library string) *app {
-	a := &app{settings: defaultSettings(), busy: map[string]bool{}}
-	if library != "" {
-		a.settings.Library = library
-	}
-	if len(a.settings.Tables) > 0 {
-		a.table = a.settings.Tables[0]
-	}
+	a := &app{settings: Settings{Library: library}, busy: map[string]bool{}}
 	a.rows.Selected = &a.row
 	a.prows.Selected = &a.prow
 	a.logRows.FollowEnd = true
 	return a
+}
+
+// readSettings takes what the window starts from from the CLI's settings
+// in effect (`config show`): the tables, the downloads folder, whether
+// third-party sources are on.
+func (a *app) readSettings() {
+	a.job("Reading the settings", func() error {
+		return a.cli([]string{"config", "show"}, func(r Record) {
+			c, ok := r["config"].(map[string]any)
+			if !ok {
+				return
+			}
+			var tables []string
+			list, _ := c["tables"].([]any)
+			for _, t := range list {
+				if t, ok := t.(string); ok {
+					tables = append(tables, t)
+				}
+			}
+			downloads, _ := c["downloads"].(string)
+			on, _ := c["third_party"].(bool)
+			a.update(func() {
+				if a.settings.Tables == nil {
+					a.settings.Tables = tables
+				}
+				if a.table == "" && len(a.settings.Tables) > 0 {
+					a.table = a.settings.Tables[0]
+				}
+				a.settings.Downloads, a.configThirdParty = downloads, on
+			})
+		})
+	})
 }
 
 // update changes the state from another goroutine.
@@ -115,7 +146,8 @@ func (a *app) job(name string, f func() error) {
 
 // cli runs a command, noting what it says in the log. A host that refuses
 // BMSeeker (a `refused` record) is noted and skipped for the rest of the
-// session; its record does not go to onRecord.
+// session; a `notice` record is noted (the third-party sources' not: the
+// window asked when they were turned on). Neither goes to onRecord.
 //
 // What a table, a server or a file's name says goes into args only as an
 // option's value attached to it ("--title="+title) or after "--" (links,
@@ -142,15 +174,16 @@ func (a *app) cli(args []string, onRecord func(Record)) error {
 			a.say("%s", r.S("error"))
 			return
 		}
+		if notice := r.S("notice"); notice != "" {
+			if notice != "third_party" {
+				a.say("%s", r.S("text"))
+			}
+			return
+		}
 		if onRecord != nil {
 			onRecord(r)
 		}
-	}, func(note string) {
-		// (asked already, when it was turned on)
-		if !strings.HasPrefix(note, thirdPartyNotice) {
-			a.say("%s", note)
-		}
-	})
+	}, func(note string) { a.say("%s", note) })
 }
 
 func (a *app) view(c *ui.Context) {
@@ -263,38 +296,50 @@ func (a *app) loadMissing() {
 		err := a.cli([]string{"table", "missing", "--library=" + lib, "--", url}, func(r Record) {
 			got = append(got, missing{
 				Label: r.S("label"), Level: r.S("level"), Title: r.S("title"), Artist: r.S("artist"),
-				MD5: r.S("md5"), URL: r.S("url"), URLDiff: r.S("url_diff"),
+				MD5: r.S("md5"), SHA256: r.S("sha256"), URL: r.S("url"), URLDiff: r.S("url_diff"),
 			})
 		})
 		a.update(func() {
-			a.missing, a.level, a.row = got, "", 0
+			a.missing, a.missingFrom, a.level, a.row = got, url, "", 0
 		})
 		return err
 	})
 }
 
-// download installs each chart's song, then its separate chart, one after
-// another.
+// download installs the charts ms of the table the list is of, as the CLI
+// does a table's (`table missing --get` of their MD5s, or SHA-256s where the
+// table gives no MD5, one run: each song,
+// then its separate chart, or the chart first when the library has its
+// song; each file downloaded once). A chart whose download brought it in,
+// or found it in the library, leaves the list.
 func (a *app) download(ms []missing) {
-	lib := a.settings.Library
-	ms = append([]missing(nil), ms...)
-	a.job("Downloading", func() error {
-		for i, m := range ms {
-			a.say("(%d/%d) %s", i+1, len(ms), m.Title)
-			var own []string
-			if m.URL != "" {
-				own = []string{m.URL}
-			}
-			got := a.install(m.Title, installArgs(lib, m.Title, m.Artist, m.MD5, nil, own...))
-			if m.URLDiff != "" {
-				a.install(m.Title, installArgs(lib, m.Title, m.Artist, m.MD5, []string{"--diff"}, m.URLDiff))
-			}
-			if got {
-				done := m
-				a.update(func() { a.forget(done) })
-			}
+	lib, url := a.settings.Library, a.missingFrom
+	args := []string{"table", "missing", "--library=" + lib, "--get"}
+	for _, m := range ms {
+		switch {
+		case m.MD5 != "":
+			args = append(args, "--md5="+m.MD5)
+		case m.SHA256 != "":
+			args = append(args, "--sha256="+m.SHA256)
+		default:
+			// (the CLI lists none: a table's entry without a hash is no chart to it)
+			a.say("%s: the table gives no hash for it: download it from the Link tab", m.Title)
 		}
-		return nil
+	}
+	if len(args) == 4 {
+		return
+	}
+	args = append(args, "--", url)
+	a.job("Downloading", func() error {
+		return a.cli(args, func(r Record) {
+			if a.outcome(r.S("title"), r) {
+				hash := r.S("md5")
+				if hash == "" {
+					hash = r.S("sha256")
+				}
+				a.update(func() { a.forget(hash) })
+			}
+		})
 	})
 }
 
@@ -307,33 +352,30 @@ func installArgs(lib, title, artist, md5 string, flags []string, links ...string
 	return append(args, links...)
 }
 
-// install runs one `library install`; links that need a browser go to the
-// Browser tab. Whether it brought something in.
-func (a *app) install(title string, args []string) bool {
-	got := false
-	_ = a.cli(args, func(r Record) {
-		switch r.S("state") {
-		case "added", "placed", "waiting":
-			got = true
-			a.say("%s: %s %s", title, r.S("state"), r.S("path"))
-		case "page":
-			link := r.S("link")
-			a.say("%s: needs a browser: %s", title, link)
-			a.update(func() { a.pages = append(a.pages, page{Title: title, Link: link}) })
-		case "failed":
-			a.say("%s: %s", title, r.S("error"))
-		}
-	})
-	return got
+// outcome notes what a download came to (a record's "state"); a link that
+// needs a browser goes to the Browser tab. Whether it brought the song or
+// its chart in, or found it in the library.
+func (a *app) outcome(title string, r Record) bool {
+	switch r.S("state") {
+	case "added", "owned", "placed", "waiting":
+		a.say("%s: %s %s", title, r.S("state"), r.S("path"))
+		return true
+	case "page":
+		link := r.S("link")
+		a.say("%s: needs a browser: %s", title, link)
+		a.update(func() { a.pages = append(a.pages, page{Title: title, Link: link}) })
+	case "failed":
+		a.say("%s: %s", title, r.S("error"))
+	}
+	return false
 }
 
-func (a *app) forget(m missing) {
-	for i, x := range a.missing {
-		if x == m {
-			a.missing = append(a.missing[:i], a.missing[i+1:]...)
-			return
-		}
-	}
+// forget takes the chart of this hash off the list: its MD5, else (a table
+// that gives none) its SHA-256.
+func (a *app) forget(hash string) {
+	a.missing = slices.DeleteFunc(a.missing, func(m missing) bool {
+		return hash != "" && (m.MD5 == hash || m.MD5 == "" && m.SHA256 == hash)
+	})
 }
 
 func (a *app) linkView(c *ui.Context) {
@@ -351,7 +393,10 @@ func (a *app) linkView(c *ui.Context) {
 			name = link
 		}
 		a.job("Downloading", func() error {
-			a.install(name, installArgs(lib, title, artist, "", []string{"--own-links"}, link))
+			// (a link that brought nothing has said why)
+			_ = a.cli(installArgs(lib, title, artist, "", []string{"--own-links"}, link), func(r Record) {
+				a.outcome(name, r)
+			})
 			return nil
 		})
 	}
@@ -394,11 +439,14 @@ func (a *app) waitingView(c *ui.Context) {
 func (a *app) settingsView(c *ui.Context) {
 	a.libraryView(c)
 	ui.Text(c, "Downloads").Bold()
-	on := a.settings.ThirdParty
+	on := a.settings.ThirdParty || a.configThirdParty
 	if ui.Checkbox(c, &on, "Third-party sources (mirrors, Ginger, Konmai, the community archive)").Changed() {
-		if on && !thirdPartyAcknowledged() {
+		switch {
+		case a.configThirdParty:
+			a.say("third-party sources are on in bmseeker's settings file (config.json): they are turned off there")
+		case on && !thirdPartyAcknowledged():
 			a.askThirdParty = true
-		} else {
+		default:
 			a.settings.ThirdParty = on
 		}
 	}

@@ -4,7 +4,7 @@
 //
 //	bmseeker-gui                 the window
 //	bmseeker-gui <BMS folder>    the window, with that library
-//	bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, --help ...)
+//	bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, config, --help ...)
 package main
 
 import (
@@ -29,6 +29,7 @@ func main() {
 	}
 	a := newApp(library)
 	a.connect()
+	a.readSettings()
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     name(),

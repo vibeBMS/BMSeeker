@@ -28,13 +28,15 @@ link resolve <link>...                   what a link leads to, without downloadi
 link get <link>... [-o folder|file]      download from the links in turn
 song find [-t -a --md5] [--diff]         the links the sources know for a song
 table show <URL>                         a difficulty table and its charts per level
-table missing <URL> -L library [--get]   the charts the library lacks (--get: download them)
+table missing <URL> -L library [--get]   the charts the library lacks (--get: download them; -l level,
+                                         --md5, --sha256: only those)
 table export lr2|bmt <URL> <folder>      an LR2 custom folder / a beatoraja table cache
 library import <file> -L library         a downloaded file into the library
 library place <chart> -L library         the song folders a separate chart may go into
 library pending -L library               separate charts waiting for their songs
 library install <link>... -L library     a song (or its separate chart) from its links, then the sources'
 event works | check                      an event's works and their links (JSON Lines)
+config show                              the settings in effect
 ```
 
 For example:
@@ -121,6 +123,8 @@ bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, 
 - **Browser**: links that only give a page (OneDrive ...), opened in a web view (a OneDrive share's Download button
   is pressed for you).
 - **Settings**: the BMS folder, third-party sources (asked once before they are on), the difficulty tables.
+
+The window starts from the CLI's settings (`config show`: its `tables`, its downloads folder, `third_party`).
 
 ## Web page
 

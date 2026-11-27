@@ -504,19 +504,30 @@ pub(crate) fn dice(a: &str, b: &str) -> f64 {
     2.0 * overlap as f64 / (x.len() + y.len()) as f64
 }
 
-/// A chart's title and artist as compared ([`title_key`], [`artist_key`]).
+/// A chart's title and artist as compared ([`title_key`], [`artist_key`]):
+/// what decides whether two charts are one song's for the downloads
+/// ([`Library::has_song`](crate::library::Library::has_song), which a
+/// table's entry's order of downloads follows) and for placing a chart.
+/// Made once per chart, it is compared with others cheaply.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) struct Song {
+pub struct Song {
     pub(crate) title: String,
     pub(crate) artist: String,
 }
 
 impl Song {
-    pub(crate) fn of(title: &str, artist: &str) -> Song {
+    pub fn of(title: &str, artist: &str) -> Song {
         Song {
             title: title_key(title),
             artist: artist_key(artist),
         }
+    }
+
+    /// Whether `other` is a chart of the same song ([`same_song`]): the
+    /// same artist (its credits left out: `feat.`, `obj:`), the titles
+    /// alike (a chart's name such as `[ANOTHER]` cut first).
+    pub fn same_song(&self, other: &Song) -> bool {
+        same_song(self, other)
     }
 }
 

@@ -56,6 +56,10 @@ func (a *app) openPage(p page) {
 	}
 	lib := a.settings.Library
 	dir := a.settings.downloads()
+	if dir == "" {
+		a.log = append(a.log, "the CLI's settings are not read: no downloads folder to keep a page's download in")
+		return
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		a.log = append(a.log, err.Error())
 		return

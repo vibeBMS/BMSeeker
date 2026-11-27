@@ -54,7 +54,8 @@ pub struct Config {
     /// per first letter, of `Title (by Artist).rar`): the `bmslibrary`
     /// source.
     pub bms_library: String,
-    /// Difficulty tables to use when none is given.
+    /// Difficulty tables to choose from (the window's list): by default
+    /// those of [`DEFAULT_TABLES`](crate::table::DEFAULT_TABLES).
     pub tables: Vec<String>,
     /// The folder (in a library) downloads are kept in until imported.
     pub downloads: String,
@@ -246,12 +247,10 @@ impl Default for Config {
             chart_mirrors: vec!["https://darksabun.club/mirror/absolute/bms/".into()],
             bms_library:
                 "https://drive.google.com/drive/folders/1mTcWY9jYMsnEzbVfvGkjfepBpN4Tj786".into(),
-            tables: [
-                "https://darksabun.club/table/archive/insane1/",
-                "https://darksabun.club/table/archive/normal1/",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tables: crate::table::DEFAULT_TABLES
+                .iter()
+                .map(|(_, url)| url.to_string())
+                .collect(),
             downloads: ".bmseeker".into(),
             min_coverage: 0.99,
             reinstall: false,

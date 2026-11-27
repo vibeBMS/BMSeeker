@@ -30,7 +30,7 @@ hosts          Host strategies (a link -> a file, other links, or a page), Resol
 sources        Source strategies (a chart's MD5, a song's title and artist -> links)
 unpack         archives (zip, 7z, rar, lzh, tar, tar.gz; nested) into an fs::Store, capped; read: chosen members into a Sink; the archive name rules
 package        a staged download as packages, each classified against the library
-install        Done / Failure (code()); plan (nothing written), apply, take; Entry, EntryJob, Batch
+install        Done (state()) / Failure (code()); plan (nothing written), apply, take; Entry, EntryJob, Batch
 library        the library's song folders, their files, the charts' hashes, titles and artists
 placement      which song folder a chart of its own belongs in; the smart overwrite (clash)
 titles         titles and artists as the BeMusicSeeker fork compares them; same_song
@@ -97,7 +97,11 @@ would. The jobs of a download, in `install::job`:
   separate chart first when the library has its song, else the song then
   the chart), then add-ons, each an `Install`. The sources are asked only
   with the chart's MD5, and only for the song step or, with the song in the
-  library, the chart step; never for an add-on.
+  library, the chart step; never for an add-on. What of the entry's
+  links (and add-ons) is no web link is dropped before the steps are
+  made. `Entry::from_table_in` takes a table's entry's links from several
+  `Links` lists in turn (`Links::song_links_in`, `chart_links_in`: as the
+  lists made one, without making it).
 
 A run's sources share a memo of their GETs (`net::Memo`: successes and
 404s, 4 MiB at most), so a request several sources make is asked once.
@@ -405,7 +409,9 @@ anything but the music removed (`/ obj:`, `feat.`, `BGA:`, `差分`; not
 `remix`, `作曲`)). A chart needs it to go into a folder without asking
 (two such folders: it waits). It is the one test of "the same song"
 everywhere: reusing a song's folder, whether the library has a table
-entry's song, and what a download found by name must hold. A folder's
+entry's song, and what a download found by name must hold; a player
+asks it as `placement::SongKey` (`SongKey::of(title, artist)`, made once
+a chart, then `same_song`). A folder's
 charts are one package when their normalized titles and artists are
 equal, as the fork splits packages.
 
@@ -453,7 +459,7 @@ JSON file over the defaults (`--config`, `$BMSEEKER_CONFIG`,
 | `sources` | which sources, in order (Sources, above) |
 | `third_party` | the third-party sources on (`--third-party`); off by default |
 | `ginger`, `konmai`, `uploaders`, `chart_mirrors`, `bms_library` | the third-party sources' addresses |
-| `tables` | difficulty tables |
+| `tables` | difficulty tables to choose from (the window's list; by default `table::DEFAULT_TABLES`) |
 | `downloads` | the folder in a library where downloads wait |
 | `min_coverage` | the share of a chart's sounds a song's folder must hold |
 | `reinstall` | newer files over those there too (`--reinstall`); a song's folder found by name alone has its files replaced |
@@ -487,8 +493,12 @@ song find [-t -a --md5] [--diff] [--table URL]... [--list FILE|URL]...
                                                      the links the sources know for the song (--diff: its separate
                                                      chart)
 table show <URL>                                     a difficulty table and its charts per level
-table missing <URL> -L library [-l level] [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
-                                                     the charts the library lacks (--get: download them)
+table missing <URL> -L library [-l level] [--md5 MD5]... [--sha256 SHA256]... [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
+                                                     the charts the library lacks (-l: of that level only; --md5,
+                                                     --sha256: of those charts only, named by either hash;
+                                                     --get: download them, each song, then its separate chart,
+                                                     the chart first when the library has its song; each file
+                                                     once)
 table export lr2|bmt <URL> <folder>                  an LR2 custom folder / a beatoraja table cache
 library import <file> -L library [--name NAME] [--reinstall]
                                                      a downloaded file into the library, and the waiting
@@ -505,6 +515,8 @@ event works <manbow event number> [--overrides FILE|-]
                                                      mirror (JSON Lines)
 event check [works FILE|-] [--known FILE] [--days N] [--minutes M] [--search]
                                                      each work's links downloaded and looked into (JSON Lines)
+config show                                          the settings in effect: the settings file's (or the defaults)
+                                                     with what the command line turns on
 ```
 
 With `--json`, every command writes JSON Lines (one record a line, as it
@@ -534,9 +546,27 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
         "size","charts","title"?,"code"?,"error"?,"at","num"?,"source"?,"mirrored"?}
 link   {"link","state":"file|page|gone|error","host","url"?,"code"?,"error"?}
 got    {"file","name","format","link","errors":[...]}
-done   {"title","state":"added|owned|placed|waiting|page|failed","path"?,"link"?,"code"?,"error"?}
+missing {"level","label","title","artist","md5","sha256","url","url_diff"}
+done   {"title","md5"?,"sha256"?,"state":"added|owned|placed|waiting|page|failed","path"?,"files"?,"link"?,"code"?,"error"?}
 refused {"refused": host,"code":"status|files|challenge|rate_limited|earlier","status"?,"error"}
+notice {"notice":"third_party","text"}
+config {"config":{<every setting, as in the settings file (Config, above)>}}
 ```
+
+A `done` record's `state` is `install::Done::state` (the first four are
+what `install::got` counts as brought in or there already); its `md5` is
+the chart's it was for (`table missing --get`; `library install --md5`),
+else its `sha256` (`table missing --get` of a table that gives no MD5).
+A `missing` record's hash it has not is `""` (a table's entry has one at
+least: one with neither is no chart, and is not read).
+`notice`: what a person is told once a run (with `--json` a record in
+place of the note; `third_party`: third parties' sources are on).
+
+`testdata/records.jsonl` holds the window's runs as the commands write
+them (the command line, the lines in order, the exit code): a test of
+`cli` checks them (`BMSEEKER_BLESS=1 cargo test --features cli records`
+writes it anew), and `gui/gui_test.go` replays them as the CLI, so a
+record the window reads cannot change with both sides' tests green.
 
 `"error"` is for a person; `"code"` for a program: `status`, `stalled`,
 `cancelled`, `gone`, `refused`, `other` (the download), `not_the_chart`,
@@ -560,9 +590,15 @@ The CLI it carries is unpacked into the user's cache folder on first use,
 for its user alone, and run from there only as the bytes it was built
 with (its hash, each start); without a cache folder (no home) it is not
 unpacked at all (`$BMSEEKER_CLI` if set; a development build without it
-uses `bmseeker` on the PATH). A host that refused BMSeeker (a `refused` record) is noted
+uses `bmseeker` on the PATH). What it starts from is the CLI's settings
+(`config show`: the tables to choose from, the downloads folder, whether
+third-party sources are on in the settings file); the charts chosen in a
+table are downloaded by one run of `table missing --get --md5 …` (each
+named by its MD5, else its SHA-256: `--sha256`; the library's order and
+batch). A host that refused BMSeeker (a `refused` record) is noted
 in the log and skipped by every later run while the window is open
-(`--skip-host`). Turning third-party sources on asks first, once; the OK is
+(`--skip-host`). Turning third-party sources on asks first, once (the
+CLI's `third_party` notice is then not repeated in the log); the OK is
 remembered in `<config folder>/bmseeker/third-party-acknowledged` (in a
 web page, the browser's `localStorage`).
 

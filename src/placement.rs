@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 pub(crate) use crate::chart::{class_of, Class};
 pub use crate::chart::{is_chart, ChartInfo};
 // (vibeBMS's song select asks these whether a table's song is in its
-// library, until it asks `titles::same_song` as the downloads do)
-pub use crate::titles::{same_artist, same_name, same_title};
+// library, until it asks `SongKey::same_song` as the downloads do)
+pub use crate::titles::{same_artist, same_name, same_title, Song as SongKey};
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Placement {
@@ -878,6 +878,64 @@ mod tests {
             dir: dir.into(),
             files: files.iter().map(|s| s.to_string()).collect(),
             charts,
+        }
+    }
+
+    /// One song or two, as the downloads decide (`SongKey`), against the
+    /// prefix matchers (title by its start, `same_title`; by its brackets
+    /// alone, `same_name`): (a chart, a table's or a work's song, prefix,
+    /// name, key).
+    #[test]
+    fn song_keys_against_the_matchers() {
+        let x = |t| (t, "x");
+        let rows = [
+            (
+                x("Mirage Garden [ANOTHER]"),
+                x("Mirage Garden"),
+                true,
+                true,
+                true,
+            ),
+            (x("Arcadia -★1-"), x("Arcadia"), true, false, true),
+            (
+                x("Engraved Mark -ANOTHER-"),
+                x("Engraved Mark"),
+                true,
+                false,
+                true,
+            ),
+            // a title another starts with
+            (x("Airborne"), x("Air"), true, false, false),
+            (x("Love Story"), x("Love"), true, false, false),
+            // the same, but short
+            (x("AA"), x("AA"), false, true, true),
+            (x("灼熱 [A]"), x("灼熱"), false, true, true),
+            // alike
+            (x("Hello Worlds"), x("Hello World"), true, false, true),
+            (x("Blue Sky II"), x("Blue Sky"), true, false, true),
+            (x("Colourful"), x("Colorful"), false, false, true),
+            (x("Ｓｏｎｇ　Ａ"), x("Song A"), false, false, true),
+            // artists
+            (("Song A", "x feat. y"), x("Song A"), true, true, true),
+            (("Song A", "x / obj: y"), x("Song A"), true, true, true),
+            (
+                ("Song A", "DJ Noriken"),
+                ("Song A", "DJ"),
+                true,
+                true,
+                false,
+            ),
+            (("Song A", "x vs y"), x("Song A"), true, true, false),
+            (("Song A", ""), ("Song A", ""), true, true, true),
+            (x(""), x(""), false, false, false),
+        ];
+        for ((a, aa), (b, ba), prefix, name, key) in rows {
+            let row = (a, aa, b, ba);
+            assert_eq!(same_title(a, b) && same_artist(aa, ba), prefix, "{row:?}");
+            assert_eq!(same_name(a, b) && same_artist(aa, ba), name, "{row:?}");
+            let k = SongKey::of(a, aa);
+            assert_eq!(k.same_song(&SongKey::of(b, ba)), key, "{row:?}");
+            assert_eq!(SongKey::of(b, ba).same_song(&k), key, "{row:?}");
         }
     }
 

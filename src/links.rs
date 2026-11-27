@@ -168,15 +168,21 @@ impl Links {
     }
 
     /// `own` (if usable), then the other links in `pick` of the chart's
-    /// pairs, then `own` if it is to a dead uploader (the uploader's mirrors
-    /// may have its file: `hosts::uploader`).
-    fn all(&self, own: &str, md5: &str, pick: fn(&(String, String)) -> &String) -> Vec<String> {
+    /// pairs in each of `lists` in turn (a link once), then `own` if it is
+    /// to a dead uploader (the uploader's mirrors may have its file:
+    /// `hosts::uploader`).
+    fn all(
+        lists: &[&Links],
+        own: &str,
+        md5: &str,
+        pick: fn(&(String, String)) -> &String,
+    ) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let own = own.trim();
         if usable(own) {
             out.push(own.to_string());
         }
-        for p in self.known(md5) {
+        for p in lists.iter().flat_map(|l| l.known(md5)) {
             let u = pick(p);
             if !u.is_empty() && !out.contains(u) {
                 out.push(u.clone());
@@ -190,12 +196,26 @@ impl Links {
 
     /// Every link known for `e`'s song, its own first.
     pub fn song_links(&self, e: &TableEntry) -> Vec<String> {
-        self.all(&e.url, &e.md5, |p| &p.0)
+        Links::song_links_in(&[self], e)
     }
 
     /// Every link known for `e`'s separate chart, its own first.
     pub fn chart_links(&self, e: &TableEntry) -> Vec<String> {
-        self.all(&e.url_diff, &e.md5, |p| &p.1)
+        Links::chart_links_in(&[self], e)
+    }
+
+    /// Every link `lists` know for `e`'s song, its own first, then each
+    /// list's in turn: what [`song_links`](Links::song_links) of the lists
+    /// made one with [`and`](Links::and) gives, without making it (a
+    /// player keeps the tables' links and a large list apart).
+    pub fn song_links_in(lists: &[&Links], e: &TableEntry) -> Vec<String> {
+        Links::all(lists, &e.url, &e.md5, |p| &p.0)
+    }
+
+    /// Every link `lists` know for `e`'s separate chart, as
+    /// [`song_links_in`](Links::song_links_in).
+    pub fn chart_links_in(lists: &[&Links], e: &TableEntry) -> Vec<String> {
+        Links::all(lists, &e.url_diff, &e.md5, |p| &p.1)
     }
 
     /// `e`'s links, filled where missing or dead: (url, url_diff).
@@ -320,5 +340,61 @@ mod tests {
         assert!(Links::default().song_links(&archived).is_empty());
         assert!(to_dead_uploader("https://www.gnqg.rosx.net/a"));
         assert!(!to_dead_uploader("https://notgnqg.rosx.net.example/a"));
+    }
+
+    /// Looked up in several lists, the links are those of the lists made
+    /// one ([`Links::and`]), the first list's first.
+    #[test]
+    fn links_in_several_lists() {
+        let (a, b, c) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        let e = |md5: &str, url: &str, url_diff: &str| TableEntry {
+            md5: md5.into(),
+            url: url.into(),
+            url_diff: url_diff.into(),
+            ..Default::default()
+        };
+        let table = DifficultyTable {
+            entries: vec![
+                e(&a, "https://t/a1.zip", ""),
+                e(&a, "https://t/a2.zip", "https://t/a2.bms"),
+                e(&b, "", "https://t/b.bms"),
+            ],
+            ..Default::default()
+        };
+        let tables = Links::from_tables([&table]);
+        let stella = Links::from_stella(
+            format!(
+                r#"[{{"md5":"{a}","url":"https://s/a.zip","url_diff":""}},
+                    {{"md5":"{a}","url":"https://t/a1.zip","url_diff":"https://s/a.bms"}},
+                    {{"md5":"{c}","url":"https://s/c.zip","url_diff":"https://s/c.bms"}}]"#
+            )
+            .as_bytes(),
+        );
+        let one = tables.clone().and(stella.clone());
+        let lists = [&tables, &stella];
+        let dead = "http://gnqg.rosx.net/upload/upload.cgi?get=1";
+        for md5 in [&a, &b, &c, &"d".repeat(32)] {
+            for own in ["", "https://own/x.zip", dead, "not a link"] {
+                for x in [e(md5, own, ""), e(md5, "", own)] {
+                    assert_eq!(Links::song_links_in(&lists, &x), one.song_links(&x));
+                    assert_eq!(Links::chart_links_in(&lists, &x), one.chart_links(&x));
+                }
+            }
+        }
+        let x = e(&a, "https://own/x.zip", "");
+        assert_eq!(
+            Links::song_links_in(&lists, &x),
+            [
+                "https://own/x.zip",
+                "https://t/a1.zip",
+                "https://t/a2.zip",
+                "https://s/a.zip"
+            ]
+        );
+        assert_eq!(
+            Links::chart_links_in(&[&stella, &tables], &x),
+            ["https://s/a.bms", "https://t/a2.bms"]
+        );
+        assert_eq!(Links::song_links_in(&[], &x), ["https://own/x.zip"]);
     }
 }
