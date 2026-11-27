@@ -1284,7 +1284,7 @@ fn charts_keep_to_their_songs_folders() {
 /// Where the file system takes names in another case (Windows), or in
 /// another Unicode form too (macOS), as one, a song's folder spelled
 /// otherwise in its download is the song's folder; elsewhere it is
-/// another.
+/// another (a song's new to the library).
 #[test]
 fn a_songs_folder_spelled_otherwise() {
     let m = store(&[
@@ -1311,8 +1311,9 @@ fn a_songs_folder_spelled_otherwise() {
     let one = cfg!(any(windows, target_os = "macos"));
     let over = into.over_at(Path::new("bms/Pack/songx/02.ogg"));
     assert_eq!(over, if one { Over::Newer } else { Over::Keep });
+    // (elsewhere a song's folder new to the library)
     let placed = (into.moves.iter()).any(|(_, to)| to == Path::new("bms/Pack/songx/new.bms"));
-    assert_eq!(placed, one, "{items:?}");
+    assert!(placed, "{items:?}");
 }
 
 /// Names compared as a file system does: exactly; in any case; in any
@@ -1507,4 +1508,64 @@ fn a_songs_download_brings_its_files_by_another_extension() {
     ];
     take_zip(&m, &files, &req(Role::Song), &mut lib(&m));
     assert_eq!(text(&m, "bms/Pack/X/01.wav").as_deref(), Some("new"));
+}
+
+/// A pack's download that adds a song (`Z`) beside the one the library
+/// has, as one package (a stray folder, a chart at its top): the new song's
+/// chart goes into its new folder with its sounds. One laid out in another
+/// song's folder (a folder new below it too) or at the pack's top still
+/// waits.
+#[test]
+fn a_pack_adds_a_new_song_beside() {
+    let z = "#TITLE Z\n#ARTIST zeta\n#WAV01 z01.wav\n";
+    let stray = [
+        ("X/x.bms", PACK_X),
+        ("Z/z.bms", z),
+        ("Z/z01.ogg", "z's"),
+        ("omake/wall.png", "img"),
+        ("Y/sub/planted.bms", "#TITLE Planted\n#ARTIST delta\n"),
+    ];
+    let top = [
+        ("x.bms", PACK_TOP),
+        ("X/x.bms", PACK_X),
+        ("Z/z.bms", z),
+        ("Z/z01.ogg", "z's"),
+        ("Y/01.ogg", "pack's"),
+        ("Y/sub/planted.bms", "#TITLE Planted\n#ARTIST delta\n"),
+    ];
+    for files in [&stray[..], &top[..]] {
+        for role in [Role::Song, Role::Diff, Role::Any] {
+            let m = packs();
+            let mut l = lib(&m);
+            let mut done = take_zip(&m, files, &req(role), &mut l);
+            done.sort_by_key(|d| format!("{d:?}"));
+            let at = format!("{:?}, {role:?}: {done:?}", files[0].0);
+            assert!(text(&m, "bms/Pack/Z/z.bms").is_some(), "{at}");
+            assert_eq!(
+                text(&m, "bms/Pack/Z/z01.ogg").as_deref(),
+                Some("z's"),
+                "{at}"
+            );
+            let waiting: Vec<&Path> = (done.iter())
+                .filter_map(|d| match d {
+                    Done::Waiting(p) => Some(p.as_path()),
+                    _ => None,
+                })
+                .collect();
+            let mut expected = vec![Path::new("dl/planted.bms")];
+            if files[0].0 == "x.bms" {
+                expected.push(Path::new("dl/x.bms"));
+            }
+            assert_eq!(waiting, expected, "{at}");
+            assert!(text(&m, "bms/Pack/Y/sub/planted.bms").is_none(), "{at}");
+            assert!(text(&m, "bms/Pack/x.bms").is_none(), "{at}");
+            assert_eq!(
+                text(&m, "bms/Pack/Y/01.ogg").as_deref(),
+                Some("Y's"),
+                "{at}"
+            );
+            assert!(l.lists(&m, Path::new("bms/Pack/Z")), "{at}");
+            no_stage(&m);
+        }
+    }
 }

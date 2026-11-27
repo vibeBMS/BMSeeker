@@ -581,9 +581,11 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
 /// `item`, the other songs' folders below its song's (`songs`: the
 /// library's, in order) or on the way to its files in it, and what it
 /// would put outside its song's folders: the charts waiting in the
-/// downloads instead, the other files in another song's folder left out
-/// (a file there it lacks may be one its charts would play).
-fn charts_to_songs(songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
+/// downloads instead (but those in a folder not there yet, in no other
+/// song's: a song new to the library), the other files in another song's
+/// folder left out (a file there it lacks may be one its charts would
+/// play).
+fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
     let dest = match &item.outcome {
         Outcome::Into(d) | Outcome::Owned(d) => d.clone(),
         _ => return vec![item],
@@ -614,14 +616,18 @@ fn charts_to_songs(songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
     others.dedup();
     item.others = others;
     let theirs = |to: &Path| item.others.iter().any(|o| below_as(to, o, SPELLING));
+    let new = |to: &Path| {
+        let dir = to.parent().map(|d| fs.read_dir(d));
+        dir.is_none_or(|d| d.map_or(true, |e| e.is_empty()))
+    };
     let mut astray = Vec::new();
     let mut moves = Vec::new();
     for (from, to) in std::mem::take(&mut item.moves) {
         match (item.covers(&to), is_chart(&to)) {
             (true, _) => moves.push((from, to)),
-            (false, true) => astray.push((from, to)),
-            (false, false) if !theirs(&to) => moves.push((from, to)),
-            (false, false) => {}
+            (false, true) if !new(&to) || theirs(&to) => astray.push((from, to)),
+            (false, _) if !theirs(&to) => moves.push((from, to)),
+            (false, _) => {}
         }
     }
     item.moves = moves;
@@ -845,7 +851,7 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
         false => BTreeSet::new(),
     };
     let mut items: Vec<Item> = (items.into_iter())
-        .flat_map(|i| charts_to_songs(&songs, i))
+        .flat_map(|i| charts_to_songs(fs, &songs, i))
         .collect();
     if !new.is_empty() {
         items.push(new_item(fs, s, lib, &new, &packages, req));

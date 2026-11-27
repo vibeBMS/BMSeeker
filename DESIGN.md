@@ -348,7 +348,10 @@ then places the separate charts that waited for what came in.
   folder). Its charts go only into the folders of its song (those, a
   table's `org_md5`'s, or those its sounds were found in): one it lays
   out anywhere else (beside them, in the pack's folder) waits as a
-  separate chart whose song is not known; its other files in another
+  separate chart whose song is not known, but for one in a folder the
+  library does not have yet and in no other song's folder (a pack's
+  update that adds a song): that is a new song's folder, and the chart
+  goes there with its files; its other files in another
   song's folder stay out (one that song lacks may be one its charts
   would play). A folder found by its charts' titles and artists, its
   name, its sounds or a table's `org_md5` takes only the files it lacks
