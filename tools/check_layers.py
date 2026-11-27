@@ -38,9 +38,6 @@ UPWARD = [
     ("refusal", "hosts", ["Context", "Link", "NOT_WEB", "DRIVE_QUOTA", "drive_quota", "service_of"],
      "a run's refusals live in its hosts::Context, which Guarded keeps to; a refusal is charged to "
      "a host's service, and the guard holds back what the hosts' rules refuse (no web link, Drive's quota)"),
-    ("refusal", "install::job", ["Driver", "Effect", "Fed"],
-     "Guarded wraps a driver; the job model is still in install/job.rs"),
-    ("hosts", "unpack", ["HEAD"], "the bytes of a download's head unpack needs to tell its format"),
     ("hosts::drive", "unpack", ["is_archive"], "the archive formats' names, beside the formats unpack reads"),
     ("hosts::mega", "unpack", ["is_archive"], "the same"),
     ("sources", "unpack", ["is_archive"], "the same"),

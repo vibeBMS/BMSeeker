@@ -7,14 +7,14 @@
 
 use super::{safe_name, unique, Done, Failure};
 use crate::chart::{is_chart, md5_hex, md5_key, ChartInfo};
-use crate::fs::{file_name, move_file, Fs, Store};
+use crate::fs::{file_name, move_file, Blob, Fs, Store};
 use crate::hosts::Want;
 use crate::library::Library;
 use crate::net::NetError;
 use crate::package::{classify, split, Package, PackageKind, Role, Staged};
 use crate::placement::{self, Keys, Located, Names, Rules};
 use crate::progress::Progress;
-use crate::unpack::{unpack_watched, Blob, Member, BUDGET};
+use crate::unpack::{unpack_watched, Member, BUDGET};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;

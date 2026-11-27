@@ -5,12 +5,13 @@
 //! ([`SLOW`]). Redirects are followed here, one at a time, each kept to
 //! what the first address is kept to ([`Rules`]).
 
-use crate::hosts::{Link, Target, NOT_WEB, STALL_MS};
-use crate::install::job::{Served, Unserved};
+use crate::fs::Blob;
+use crate::hosts::{Link, NOT_WEB, STALL_MS};
+use crate::net::job::{Served, Target, Unserved, HEAD};
 use crate::net::{disposition_name, Answer, NetError, Request};
 use crate::progress::Progress;
 use crate::refusal::Refusals;
-use crate::unpack::{Blob, BUDGET, HEAD};
+use crate::unpack::BUDGET;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;

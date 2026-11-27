@@ -311,8 +311,8 @@ mod tests {
         );
         let cx = crate::hosts::Context::default();
         let mut job =
-            crate::install::job::TaskJob::new(Lookup::new(&md5, &w, &cx.config.bmssearch_api));
-        let found = crate::install::job::run_job(&mut job, &crate::native::Native::new(&cx));
+            crate::net::job::TaskJob::new(Lookup::new(&md5, &w, &cx.config.bmssearch_api));
+        let found = crate::net::job::run_job(&mut job, &crate::native::Native::new(&cx));
         println!("{found:?}");
     }
 }

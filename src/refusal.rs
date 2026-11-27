@@ -27,7 +27,7 @@
 //! the command-line tool, written as a `refused` record.
 
 use crate::hosts::{Context, Link, NOT_WEB};
-use crate::install::job::{Driver, Effect, Fed};
+use crate::net::job::{Driver, Effect, Fed};
 use crate::net::{Kind, NetError};
 pub use crate::net::{Refusal, Why};
 use crate::progress::Progress;
@@ -426,8 +426,7 @@ impl Driver for Guarded<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hosts::Target;
-    use crate::install::job::{Served, Unserved};
+    use crate::net::job::{Served, Target, Unserved};
     use crate::net::Request;
     use std::cell::RefCell;
 

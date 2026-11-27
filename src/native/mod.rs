@@ -5,7 +5,8 @@
 pub(crate) mod http;
 
 use crate::hosts::{Context, Fetch, Want};
-use crate::install::job::{run_job, Acquire, Driver, Effect, Fed, FileLink, Files, Got, Missed};
+use crate::install::job::{Acquire, FileLink, Files, Got, Missed};
+use crate::net::job::{run_job, Driver, Effect, Fed};
 use crate::net::NetError;
 use crate::progress::Progress;
 use crate::refusal::Guarded;

@@ -242,7 +242,7 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
             let downloads = library.join(&r.config().downloads);
             let lib = crate::library::Library::new(&library);
             let job = install::job::Install::new(r.fs.clone(), downloads, lib, q, links, &r.cx);
-            let done = install::job::run_job(&mut job.sources(sources), r.net).done;
+            let done = crate::net::job::run_job(&mut job.sources(sources), r.net).done;
             for d in &done {
                 r.out
                     .record(done_record(&song.title, d), || done_text(&song.title, d));

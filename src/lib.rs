@@ -28,7 +28,7 @@
 //! memory). Whatever reads the network is a [`net::Task`] (it asks for
 //! requests and is fed the answers): [`hosts::Resolver`] (a link through
 //! its hosts' strategies), [`table::TableLoader`], BMS SEARCH's lookup. A
-//! download is an [`install::job::Job`] (requests, files downloaded, waits
+//! download is a [`net::job::Job`] (requests, files downloaded, waits
 //! as effects a platform's driver does): [`install::job::Acquire`] takes a
 //! link to its file. Natively `native::Native` drives both, kept to the
 //! run's refusals by [`refusal::Guarded`]; a web page's driver builds on

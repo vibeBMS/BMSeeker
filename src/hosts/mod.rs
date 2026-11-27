@@ -25,6 +25,8 @@ mod mega;
 mod uploader;
 mod venues;
 
+// (an app names it here too)
+pub use crate::net::job::Target;
 pub use browser::PRESS_DOWNLOAD_JS;
 pub(crate) use key::DownloadKey;
 #[cfg(test)]
@@ -65,36 +67,6 @@ impl From<String> for Fetch {
 pub struct Want {
     pub title: String,
     pub artist: String,
-}
-
-/// The file a link leads to.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Target {
-    pub url: String,
-    /// A MEGA file's 32-byte key: the bytes come encrypted ([`MegaCipher`]).
-    pub mega_key: Option<Vec<u8>>,
-    /// Its name where the host tells it (a folder's listing, MEGA, the
-    /// mirror), made one file name; else the server's or the URL's.
-    pub name: Option<String>,
-}
-
-impl Target {
-    pub fn url(url: impl Into<String>) -> Target {
-        Target {
-            url: url.into(),
-            mega_key: None,
-            name: None,
-        }
-    }
-
-    /// With the name a host told (whatever text it is): one file name of
-    /// it, no path.
-    fn named(url: impl Into<String>, name: Option<String>) -> Target {
-        Target {
-            name: name.as_deref().and_then(crate::text::safe_file_name),
-            ..Target::url(url)
-        }
-    }
 }
 
 /// What a host makes of a link.
@@ -514,7 +486,7 @@ pub(crate) const DRIVE_QUOTA: &str =
 /// answered 403: "Too many users have viewed or downloaded this file
 /// recently").
 pub(crate) fn drive_quota(head: &[u8]) -> bool {
-    let head = String::from_utf8_lossy(&head[..head.len().min(crate::unpack::HEAD)]);
+    let head = String::from_utf8_lossy(&head[..head.len().min(crate::net::job::HEAD)]);
     head.contains("<title>Google Drive")
         && (head.contains("Quota exceeded")
             || head.contains("Too many users have viewed or downloaded this file recently"))
