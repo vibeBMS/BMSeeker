@@ -127,7 +127,7 @@
     run(args, each) {
       const file = args.includes("{file}") ? picked : undefined;
       if (file) picked = null;
-      return ask({ op: "run", args, file }, each, (n) => each("note", n)).then((r) => {
+      return ask({ op: "run", args, proxy: PROXY, file }, each, (n) => each("note", n)).then((r) => {
         set({ files: r.files });
         return r.code;
       });

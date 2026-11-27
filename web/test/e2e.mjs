@@ -132,6 +132,25 @@ try {
   await seeker.waitForTimeout(1500);
   await seeker.screenshot({ path: `${shots}/1-bmseeker.png` });
 
+  // the settings need no target: a worker asked before one is opened (as
+  // a folder waiting for the user's permission leaves it) answers
+  const early = await seeker.evaluate(async (proxy) => {
+    const src = [...document.scripts].find((s) => /bmseeker\.js$/.test(s.src)).src;
+    const w = new Worker(new URL("worker.js", src), { type: "module" });
+    const records = [];
+    const done = await new Promise((resolve) => {
+      w.onmessage = (e) => {
+        if (e.data.kind === "record") records.push(JSON.parse(e.data.line));
+        else if (e.data.ok !== undefined) resolve(e.data);
+      };
+      w.postMessage({ id: 1, op: "run", args: ["--json", "config", "show"], stdin: "", proxy });
+    });
+    w.terminate();
+    const config = records.find((r) => r.config);
+    return { ok: done.ok, error: done.error, tables: config ? config.config.tables.length : 0 };
+  }, `${base}/proxy/`);
+  check(early.ok && early.tables > 0, `the settings are read before any target is opened (${JSON.stringify(early)})`);
+
   let vibe = null;
   if (vibeDir) {
     vibe = await ctx.newPage();

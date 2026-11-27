@@ -4,7 +4,7 @@
 // changed to the target.
 //
 // In:  {id, op: "open", kind, proxy, dir?}   kind: "vibe" | "folder" | "zip"
-//      {id, op: "run", args, file?}           file: one the user downloaded,
+//      {id, op: "run", args, proxy, file?}    file: one the user downloaded,
 //                                             put in the downloads folder for "{file}" in args
 //      {id, op: "zip"}
 // Out: {id, line, kind}                       a command's line ("record" / "note")
@@ -235,8 +235,15 @@ async function handle(id, m) {
       return { library: session.library, files: session.count() };
     }
     case "run": {
-      // the player's library is listed again: it may have changed it
-      if (target.kind === "vibe") await relist(say);
+      if (!target) {
+        // none opened yet (a folder waiting for the user's permission): a
+        // session of no files, for what needs none (`config show`)
+        await ready;
+        session ??= new Session("zip", m.proxy);
+      } else if (target.kind === "vibe") {
+        // the player's library is listed again: it may have changed it
+        await relist(say);
+      }
       let args = m.args;
       if (m.file) {
         const at = session.put(m.file.name, new Uint8Array(await m.file.arrayBuffer()));
@@ -244,7 +251,7 @@ async function handle(id, m) {
       }
       const code = session.run(args, (kind, line) => postMessage({ id, kind, line }));
       // (a zip's files stay here until it is downloaded)
-      if (target.root) await flush(say);
+      if (target?.root) await flush(say);
       return { code, files: session.count() };
     }
     case "zip":
