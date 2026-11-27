@@ -148,7 +148,8 @@ use bmseeker::unpack::Blob::Bytes as _;
 use bmseeker::unpack::Blob::File as _;
 use bmseeker::unpack::Error as _;
 use bmseeker::unpack::Error::TooMany as _;
-use bmseeker::unpack::Format::Zip as _;
+use bmseeker::unpack::Format as _;
+use bmseeker::unpack::Format::Rar as _;
 use bmseeker::unpack::Limits as _;
 use bmseeker::unpack::Member as _;
 use bmseeker::unpack::Sink as _;
@@ -372,6 +373,18 @@ fn _fields_16(v: bmseeker::unpack::Limits) {
         bmseeker::unpack::Limits {
             bytes: _,
             members: _,
+            ..
+        }
+    );
+}
+
+fn _fields_17(v: bmseeker::unpack::Member) {
+    let _ = matches!(
+        v,
+        bmseeker::unpack::Member {
+            mtime: _,
+            rel: _,
+            size: _,
             ..
         }
     );
