@@ -6,13 +6,17 @@ Every .rs file under src is a module (a/b.rs and a/b/mod.rs are a::b), in
 the layer of the longest prefix of its path that LAYERS names. Its paths
 from `crate::`, `super::` or `self::` (`bmseeker::` in src/bin) are read
 with comments, strings and tests left out (tests.rs files; a file from its
-`#[cfg(test)] mod` on); the target is the longest prefix that is a module,
-the rest the item. A use whose target's layer is higher than its own fails,
-unless UPWARD lists it; a use UPWARD lists that no longer exists fails too,
-so the list is shortened when one goes. What a value's method reaches
-without naming its type is not seen.
+`#[cfg(test)]` items); the target is the longest prefix that is a module
+(lib.rs's own items: the crate's root), the rest the item. A use whose
+target's layer is higher than its own fails, unless UPWARD lists it; a use
+UPWARD lists that no longer exists fails too, so the list is shortened when
+one goes. What a value's method reaches without naming its type is not
+seen; nor is what the script cannot place, so that fails too: a module
+declared with `#[path]` (it would be read in its file's layer, not its
+`mod`'s), and a path a macro builds from a token (`crate::$m::…`).
 """
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -66,14 +70,21 @@ def uses(src):
     files = [os.path.join(r, n) for r, _, ns in os.walk(src) for n in ns if n.endswith(".rs")]
     modules = {module_of(src, f) for f in files}
     found = defaultdict(list)
+    unread = []
     for f in sorted(files):
+        text = blank(open(f, encoding="utf-8").read())
+        at = lambda m: "%s:%d" % (os.path.relpath(f, src), text.count("\n", 0, m.start()) + 1)  # noqa: E731
+        unread += ["%s: a module's #[path] (keep each module in its own file)" % at(m)
+                   for m in re.finditer(r"#!?\[[^\]]*\bpath\s*=", text)]
+        unread += ["%s: a path a macro builds from a token (crate::$…; name the module)" % at(m)
+                   for m in re.finditer(r"\bcrate\s*::\s*\$", text)]
         if os.path.basename(f) == "tests.rs":
             continue
         mod = module_of(src, f)
         roots = ["crate", "super", "self"]
         if mod.split("::")[0] == "bin":
             roots.append("bmseeker")
-        text = cut_tests(blank(open(f, encoding="utf-8").read()))
+        text = cut_tests(text)
         for line, p in paths(text, roots):
             segs = p.split("::")
             here = mod.split("::") if mod else []
@@ -86,28 +97,28 @@ def uses(src):
                 while k < len(segs) and segs[k] == "super":
                     k += 1
                 target = here[: len(here) - k] + segs[k:]
-            for k in range(len(target), 0, -1):
+            for k in range(len(target), -1, -1):
                 if "::".join(target[:k]) in modules:
                     to = "::".join(target[:k])
                     item = "::".join(target[k:]) or "(module)"
                     if to != mod:
                         found[(mod, to, item.split("::")[0])].append("%s:%d" % (os.path.relpath(f, src), line))
                     break
-    return modules, found
+    return modules, found, unread
 
 
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, "src")
-    modules, found = uses(src)
-    bad = ["%s: no layer (add it to LAYERS in tools/check_layers.py)" % m
-           for m in sorted(modules) if layer_of(m) is None]
+    modules, found, bad = uses(src)
+    bad += ["%s: no layer (add it to LAYERS in tools/check_layers.py)" % m
+            for m in sorted(modules) if layer_of(m) is None]
     listed = {(a, b, i) for a, b, items, _ in UPWARD for i in items}
     upward = {k: at for k, at in found.items() if layer_of(k[1]) > layer_of(k[0])}
     for (a, b, i), at in sorted(upward.items()):
         if (a, b, i) not in listed:
             bad.append("%s (%s) uses %s::%s (%s), a higher layer: %s"
-                       % (a, LAYERS[layer_of(a)][0], b, i, LAYERS[layer_of(b)][0], " ".join(at)))
+                       % (a, LAYERS[layer_of(a)][0], b or "crate", i, LAYERS[layer_of(b)][0], " ".join(at)))
     for a, b, i in sorted(listed - upward.keys()):
         bad.append("%s no longer uses %s::%s: take it out of UPWARD in tools/check_layers.py" % (a, b, i))
     for line in bad:
