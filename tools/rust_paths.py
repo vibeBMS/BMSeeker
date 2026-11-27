@@ -45,10 +45,50 @@ def blank(text):
     return "".join(out)
 
 
+# `#[cfg(test)]`, or `all(…)` with `test` among its own terms (not in a
+# `not(test)`)
+_TEST = re.compile(r"#\[cfg\((?:test|all\((?:[^()]|\([^()]*\))*?\btest\b(?:[^()]|\([^()]*\))*\))\)\]")
+
+
+def item_end(text, i):
+    """Where the item starting at `i` ends: after its `;`, or its `{ … }`;
+    or before a `,` or a closing bracket of what holds it (a field, a
+    variant, a match arm, an argument)."""
+    depth, angle, n = 0, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and c == "<":
+            angle += 1
+        elif depth == 0 and c == ">" and angle and text[i - 1] not in "-=":
+            angle -= 1
+        elif depth == 0 and c == ";":
+            return i + 1
+        elif depth == 0 and c == "}" or depth == 0 and angle == 0 and c == ",":
+            return i
+        elif depth == 0 and c == "{":
+            level = 0
+            while i < n:
+                level += {"{": 1, "}": -1}.get(text[i], 0)
+                if level == 0:
+                    return i + 1
+                i += 1
+        i += 1
+    return n
+
+
 def cut_tests(text):
-    """`text` up to its `#[cfg(test)] mod …` (a file's tests come last)."""
-    m = re.search(r"#\[cfg\(test\)\]\s*(pub(\([a-z]+\))?\s+)?mod\s+\w+\s*[{;]", text)
-    return text[: m.start()] if m else text
+    """Blanked `text` with each item under `#[cfg(test)]` (or `all(test,
+    …)`) as spaces, newlines kept."""
+    for m in reversed(list(_TEST.finditer(text))):
+        j = item_end(text, m.end())
+        text = text[: m.start()] + re.sub(r"[^\n]", " ", text[m.start() : j]) + text[j:]
+    return text
 
 
 def expand(path):

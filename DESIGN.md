@@ -342,18 +342,35 @@ then places the separate charts that waited for what came in.
   copy of a chart the library holds elsewhere (at the pack's or the
   library's top) opens no folder unless it is where the package goes;
   nor does a song's folder open the songs' folders below it (a chart
-  kept right in a pack's folder: the pack's songs keep their files). On
+  kept right in a pack's folder: the pack's songs keep their files). A
+  folder on the way to a file that holds a chart is a song's of its own,
+  whether the library lists it or not (a name starting with `.`, deeper
+  than the library's walks, charts not read yet): only the folders on
+  that path are looked at, not the whole library. On
   Windows a path there spelled in another case, on macOS in another case
   or Unicode form, is that folder's (on other systems it is another
-  folder). Its charts go only into the folders of its song (those, a
+  folder), unless the library lists a song's folder of that spelling
+  apart (a volume set to tell cases apart): then a file of that
+  spelling, or below a folder the library lists so spelled, is that
+  other song's. Its charts go only into the folders of its song (those, a
   table's `org_md5`'s, or those its sounds were found in): one it lays
   out anywhere else (beside them, in the pack's folder) waits as a
-  separate chart whose song is not known; its other files there come in
-  only where none of their names is. A folder found by its charts'
-  titles and artists, its name, its sounds or a table's `org_md5` takes
-  only the files it lacks (a chart of a name there beside it, `name_.bms`),
-  unless brought in again (`--reinstall`: newer files replace those
-  there; a song's folder of its name has them all replaced). A file's
+  separate chart whose song is not known, but for one in a folder the
+  library does not have yet and in no other song's folder (a pack's
+  update that adds a song): that is a new song's folder, and the chart
+  goes there with its files; its other files in another
+  song's folder stay out (one that song lacks may be one its charts
+  would play). A folder found by its charts' titles and artists, its
+  name, its sounds or a table's `org_md5` takes only the files it lacks
+  (a chart of a name there beside it, `name_.bms`), unless brought in
+  again (`--reinstall`: newer files replace those there; a song's folder
+  of its name has them all replaced). Wherever a file is not to replace
+  one, a file of its kind (a sound, an image, a movie) whose name is the
+  same but for the extension counts as there too: a player that does not
+  find `01.wav` plays `01.ogg`, so a `01.wav` brought beside it would
+  change what the song plays. In the folders of the song a download is
+  (by its charts' hashes) its new files come in as before, `bg.png`
+  beside an older `bg.bmp` too. A file's
   time more than a day to come (an archive gives its files any; a day,
   as a zip's local times are read as UTC) is newer than none.
 - **Which song's folder**, in this order:
