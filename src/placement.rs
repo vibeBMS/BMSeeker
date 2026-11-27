@@ -208,7 +208,7 @@ impl Needs {
 
 /// The share of `sounds` that `files` (paths in a song's folder) hold
 /// ([`Keys::coverage`]).
-#[cfg(any(test, all(feature = "tools", not(target_arch = "wasm32"))))]
+#[cfg(any(test, all(feature = "cli", not(target_arch = "wasm32"))))]
 pub(crate) fn coverage(files: &[String], sounds: &[String]) -> f32 {
     let names = Names::default();
     Keys::of(&names, files).coverage(&names, sounds)

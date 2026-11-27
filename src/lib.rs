@@ -19,7 +19,7 @@
 //! - [`links`]: links for a table's songs whose own are missing or dead;
 //! - [`sources`]: where else a song's links are looked for, in order (BMS
 //!   SEARCH among them);
-//! - with the feature `tools` (the command-line tool's): `export` (a table
+//! - with the feature `cli` (the command-line tool's): `export` (a table
 //!   as LR2 custom folders or a beatoraja table cache), `probe` and an
 //!   event's works (`manbow`).
 //!
@@ -42,7 +42,7 @@ mod chart;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
-#[cfg(feature = "tools")]
+#[cfg(feature = "cli")]
 pub mod export;
 pub mod fs;
 pub mod hosts;
@@ -59,7 +59,7 @@ pub mod net;
 mod package;
 pub mod placement;
 // downloads and unpacks to a disk
-#[cfg(all(feature = "tools", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod probe;
 pub mod progress;
 pub mod refusal;

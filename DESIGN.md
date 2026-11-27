@@ -13,9 +13,9 @@ web/                    the web page: bmseeker-web (the CLI's commands in a work
 .github/workflows/      CI; releases build the CLI, then the GUI around it
 ```
 
-Features: `cli` (the command-line tool: clap, and `tools`), `tools` (what
-only the tool does: an event's works, probing a link, exporting a table),
-`testkit` (archives, folders and a local server for tests, a player's too).
+Features: `cli` (the command-line tool: clap, and what only the tool does:
+an event's works, probing a link, exporting a table), `testkit` (archives,
+folders and a local server for tests, a player's too).
 
 ## Layers
 
