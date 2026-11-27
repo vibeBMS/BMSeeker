@@ -217,6 +217,9 @@ pub struct EntryJob {
     steps: VecDeque<(EntryStep, bool)>,
     sources: Sources,
     have_song: bool,
+    /// The first of its links dropped for being written as no download
+    /// reads one (`https://user@host/…`): said when nothing else is.
+    dropped: Option<String>,
     /// Where the last step's outcomes start in `done`.
     last: usize,
     done: Vec<Done>,
@@ -227,7 +230,11 @@ impl EntryJob {
     /// `downloads`). What of `e`'s links is no web link (an empty cell, a
     /// table's note, `file:` or `javascript:`; as a download reads one:
     /// http or https, plainly written) is dropped, not tried: a step left
-    /// without links is one for the sources, or none.
+    /// without links is one for the sources, or none. An http(s) link
+    /// dropped for how it is written is said ([`NOT_WEB`]) when the chart
+    /// is still missing and nothing but "no link" was found.
+    ///
+    /// [`NOT_WEB`]: crate::hosts::NOT_WEB
     pub fn new(
         store: Arc<dyn Store + Send + Sync>,
         downloads: PathBuf,
@@ -236,6 +243,13 @@ impl EntryJob {
         sources: Sources,
         cx: &Context,
     ) -> EntryJob {
+        let web = |u: &String| {
+            let u = u.trim().to_ascii_lowercase();
+            u.starts_with("http://") || u.starts_with("https://")
+        };
+        let dropped = (e.song.iter().chain(&e.chart))
+            .find(|u| web(u) && !is_link(u))
+            .cloned();
         e.song.retain(|u| is_link(u));
         e.chart.retain(|u| is_link(u));
         let have_song = has_song(&e, &lib);
@@ -252,6 +266,7 @@ impl EntryJob {
             steps,
             sources,
             have_song,
+            dropped,
             last: 0,
             done: Vec::new(),
         }
@@ -311,6 +326,13 @@ impl EntryJob {
         let page = done.iter().any(|d| matches!(d, Done::Page(_)));
         if self.have_song && !done.is_empty() && !page && !cancelled(&done) && !got(&done) {
             done = vec![Done::Failed(Failure::NoChartLink)];
+        }
+        let no_link = |d: &Done| matches!(d, Done::Failed(Failure::NoLink | Failure::NoChartLink));
+        if let Some(u) = &self.dropped {
+            if !self.e.owned(&self.install.lib) && done.iter().all(no_link) {
+                let why = format!("{u}: {}", crate::hosts::NOT_WEB);
+                done = vec![Done::Failed(Failure::Other(why))];
+            }
         }
         Step::Done(self.install.installed(done))
     }
@@ -711,6 +733,17 @@ mod tests {
         )
         .addons(["--help".to_string(), "mailto:a@b".into()]);
         assert!(job.is_empty());
+        // the http(s) link dropped for how it is written is said, nothing
+        // asked for
+        let d = Canned::default();
+        let (out, _) = entry_job(&m, &e, &[], &cx, &d);
+        let why = format!("https://user@e/a.zip: {}", crate::hosts::NOT_WEB);
+        assert!(downloads(&d).is_empty());
+        assert!(
+            matches!(&out.done[..], [Done::Failed(Failure::Other(w))] if *w == why),
+            "{:?}",
+            out.done
+        );
         // the links among them, and only those
         e.song.push("HTTPS://e/song.zip".into());
         e.chart.push("https://e/x.bms".into());
