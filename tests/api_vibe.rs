@@ -16,6 +16,7 @@ use bmseeker::config::user_agent_with as _;
 use bmseeker::config::Config as _;
 use bmseeker::config::HTTP_CLIENT as _;
 use bmseeker::config::USER_AGENT as _;
+use bmseeker::fs::device_name as _;
 use bmseeker::fs::file_name as _;
 use bmseeker::fs::Disk as _;
 use bmseeker::fs::Entry as _;
@@ -135,14 +136,28 @@ use bmseeker::testkit::tar_gz as _;
 use bmseeker::testkit::zip as _;
 #[cfg(feature = "testkit")]
 use bmseeker::testkit::SONG_RAR as _;
+use bmseeker::unpack::archive_folder as _;
+use bmseeker::unpack::is_archive as _;
+use bmseeker::unpack::member_path as _;
+use bmseeker::unpack::read as _;
 use bmseeker::unpack::sniff as _;
 use bmseeker::unpack::unpack as _;
 use bmseeker::unpack::unpack_bytes as _;
 use bmseeker::unpack::Blob as _;
 use bmseeker::unpack::Blob::Bytes as _;
 use bmseeker::unpack::Blob::File as _;
+use bmseeker::unpack::Error as _;
+use bmseeker::unpack::Error::TooMany as _;
 use bmseeker::unpack::Format::Zip as _;
+use bmseeker::unpack::Limits as _;
+use bmseeker::unpack::Member as _;
+use bmseeker::unpack::Sink as _;
+use bmseeker::unpack::Take as _;
+use bmseeker::unpack::Take::Skip as _;
+use bmseeker::unpack::Take::Stop as _;
+use bmseeker::unpack::Take::Write as _;
 use bmseeker::unpack::BUDGET as _;
+use bmseeker::unpack::HEAD as _;
 use bmseeker::web::proxied as _;
 use bmseeker::web::sends_cors as _;
 use bmseeker::web::served as _;
@@ -346,6 +361,17 @@ fn _fields_15(v: bmseeker::table::TableHeader) {
         bmseeker::table::TableHeader {
             name: _,
             symbol: _,
+            ..
+        }
+    );
+}
+
+fn _fields_16(v: bmseeker::unpack::Limits) {
+    let _ = matches!(
+        v,
+        bmseeker::unpack::Limits {
+            bytes: _,
+            members: _,
             ..
         }
     );

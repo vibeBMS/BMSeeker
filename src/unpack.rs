@@ -36,6 +36,15 @@ pub const BUDGET: u64 = if cfg!(target_arch = "wasm32") {
 /// files, whatever their size.
 const MEMBERS: usize = 250_000;
 
+/// What reading an archive may take ([`read`]): the bytes it decodes in
+/// all, and the members it offers. (A struct: two numbers side by side at a
+/// call would be swapped without a word.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limits {
+    pub bytes: u64,
+    pub members: usize,
+}
+
 /// Folders a member's path may have (a song's files are a few deep).
 const DEPTH: usize = 32;
 
@@ -196,15 +205,20 @@ pub fn is_archive(p: &Path) -> bool {
         .is_some_and(|n| archive_stem(&n.to_string_lossy()).is_some())
 }
 
-/// The folder an archive called `name` is unpacked into beside it when it
-/// is found in another ([`unpack`]): its [`archive_stem`] as one name every
-/// file system holds (as each part of [`member_path`]), `archive` when
-/// nothing is left of it (`...zip`, whose stem is `..`; a name with no
-/// archive extension).
+/// The folder an archive called `name` (another party's name) is unpacked
+/// into: beside it when it is found in another ([`unpack`]), or where an
+/// app unpacks one it is given. Its [`archive_stem`] (a name with no
+/// archive extension: without its last one, `notes.txt`: `notes`), no dot
+/// or space at either end (a folder whose name begins with a dot is
+/// hidden: `..hidden.7z`: `hidden`), as one name every file system holds
+/// (as each part of [`member_path`]); `archive` when nothing is left of it
+/// (`...zip`, whose stem is `..`; `. .zip`).
 pub fn archive_folder(name: &str) -> String {
-    archive_stem(name)
-        .and_then(safe_part)
-        .unwrap_or_else(|| "archive".into())
+    let dot_or_space = |c: char| c == '.' || c.is_whitespace();
+    // (as Windows reads it: `Song.zip.` is `Song.zip`)
+    let name = name.trim_end_matches(dot_or_space);
+    let stem = archive_stem(name).unwrap_or_else(|| name.rsplit_once('.').map_or(name, |s| s.0));
+    safe_part(stem.trim_matches(dot_or_space)).unwrap_or_else(|| "archive".into())
 }
 
 /// A file unpacked: its path below the folder, size, and time in the
@@ -364,14 +378,11 @@ fn zip_time<R: std::io::Read>(e: &zip::read::ZipFile<'_, R>) -> Option<i64> {
     ))
 }
 
-/// Entries a zip's directory may list (its folders too): the zip reader
-/// holds each in memory before the first member is counted.
-const ZIP_ENTRIES: u64 = 2 * MEMBERS as u64;
-
 /// The most entries an end record in the last 64 KiB of the zip `r` says
 /// its directory has (the reader tries each, from the last; a zip64 one's
-/// count where its locator says, the zip read from its first byte).
-fn zip_entries(r: &mut dyn ReadSeek) -> io::Result<u64> {
+/// count where its locator says, the zip read from its first byte), and
+/// whether one is a zip64 one.
+fn zip_entries(r: &mut dyn ReadSeek) -> io::Result<(u64, bool)> {
     use std::io::SeekFrom;
     let len = r.seek(SeekFrom::End(0))?;
     // (the record, 22 bytes, then a comment of 64 KiB at most)
@@ -381,7 +392,7 @@ fn zip_entries(r: &mut dyn ReadSeek) -> io::Result<u64> {
     let at = |b: &[u8], i: usize, n: usize| -> u64 {
         (b.get(i..i + n)).map_or(0, |x| x.iter().rev().fold(0, |v, &d| v << 8 | u64::from(d)))
     };
-    let mut most = 0;
+    let (mut most, mut any64) = (0, false);
     for i in (0..tail.len()).filter(|&i| tail[i..].starts_with(b"PK\x05\x06")) {
         let zip64 = at(&tail, i + 10, 2) == 0xffff
             || at(&tail, i + 12, 4) == 0xffff_ffff
@@ -391,6 +402,7 @@ fn zip_entries(r: &mut dyn ReadSeek) -> io::Result<u64> {
             .filter(|&l| tail[l..].starts_with(b"PK\x06\x07"));
         let n = match locator {
             Some(l) if zip64 => {
+                any64 = true;
                 let mut record = [0; 40];
                 r.seek(SeekFrom::Start(at(&tail, l + 8, 8)))?;
                 match r.read_exact(&mut record) {
@@ -402,26 +414,33 @@ fn zip_entries(r: &mut dyn ReadSeek) -> io::Result<u64> {
         };
         most = most.max(n);
     }
-    Ok(most)
+    Ok((most, any64))
 }
 
 /// The zip `r`, refused when a member's local header names another file,
 /// or another method or encryption, than the central directory does: a
 /// tool that reads the local headers would unpack other files than these.
 /// (zip's own check refuses a Shift_JIS name with a `\` byte, as in `ソ`,
-/// beside its UTF-8 name.)
+/// beside its UTF-8 name.) `zip64`: its end record is a zip64 one.
 fn zip_checked(
     r: Box<dyn ReadSeek + Send>,
+    zip64: bool,
 ) -> Result<zip::ZipArchive<Box<dyn ReadSeek + Send>>, String> {
-    // (from its first byte, as `sniff` found it: no other records looked
-    // for than those `zip_entries` reads)
-    let open = |r| {
-        let from_start = zip::read::Config {
-            archive_offset: zip::read::ArchiveOffset::Known(0),
-        };
-        zip::ZipArchive::with_config(from_start, r).map_err(|e| e.to_string())
+    use zip::read::ArchiveOffset;
+    let open = |r, at| {
+        let config = zip::read::Config { archive_offset: at };
+        zip::ZipArchive::with_config(config, r).map_err(|e| e.to_string())
     };
-    let z = open(r)?;
+    // where its records say, after bytes before it if it has them (a
+    // self-extracting archive's, a file's put before it); a zip64 one from
+    // its first byte, as the reader would look for its record elsewhere
+    // than `zip_entries` reads it
+    let start = match zip64 {
+        true => ArchiveOffset::Known(0),
+        false => ArchiveOffset::Detect,
+    };
+    let z = open(r, start)?;
+    let offset = z.offset();
     let at = (0..z.len())
         .map(|i| {
             let e = z.by_index_data(i)?;
@@ -440,7 +459,7 @@ fn zip_checked(
             ));
         }
     }
-    open(r)
+    open(r, ArchiveOffset::Known(offset))
 }
 
 /// What a zip member's local and central headers must agree on.
@@ -486,20 +505,20 @@ fn zip_header(r: &mut dyn ReadSeek, at: u64, central: bool) -> std::io::Result<Z
 }
 
 /// Unpack the archive `r` of `format` into `sink`, with at most what is
-/// `left` in all (`limit`: the whole's bytes).
+/// `left` in all (`limits`: the whole's).
 fn members(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
-    limit: u64,
+    limits: Limits,
     left: &mut Left,
     sink: &mut dyn Sink,
 ) -> Result<(), Error> {
     let why = Cell::new(None);
-    match each_member(r, format, limit, left, sink, &why) {
+    match each_member(r, format, limits, left, sink, &why) {
         Ok(()) => Ok(()),
         Err(e) => match why.get() {
-            Some(Stopped::TooLarge) => Err(Error::TooLarge(limit)),
-            Some(Stopped::TooMany) => Err(Error::TooMany(MEMBERS)),
+            Some(Stopped::TooLarge) => Err(Error::TooLarge(limits.bytes)),
+            Some(Stopped::TooMany) => Err(Error::TooMany(limits.members)),
             Some(Stopped::Cancelled) => Err(Error::Cancelled),
             Some(Stopped::Ended) => Ok(()),
             None => Err(Error::Other(e)),
@@ -543,7 +562,7 @@ fn put(
     };
     if left.members == 0 {
         why.set(Some(Stopped::TooMany));
-        return Err(Error::TooMany(MEMBERS).to_string());
+        return Err("too many files".into());
     }
     left.members -= 1;
     let r = {
@@ -582,7 +601,7 @@ fn put(
 fn each_member(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
-    limit: u64,
+    limits: Limits,
     left: &mut Left,
     sink: &mut dyn Sink,
     why: &Cell<Option<Stopped>>,
@@ -590,11 +609,14 @@ fn each_member(
     match format {
         Format::Zip => {
             let mut r = r;
-            if zip_entries(&mut r).map_err(|e| e.to_string())? > ZIP_ENTRIES {
+            let (entries, zip64) = zip_entries(&mut r).map_err(|e| e.to_string())?;
+            // (its folders too: the zip reader holds each entry in memory
+            // before the first member is counted)
+            if entries > (limits.members as u64).saturating_mul(2) {
                 why.set(Some(Stopped::TooMany));
-                return Err(Error::TooMany(MEMBERS).to_string());
+                return Err("too many files".into());
             }
-            let mut z = zip_checked(r)?;
+            let mut z = zip_checked(r, zip64)?;
             for i in 0..z.len() {
                 let mut e = z.by_index(i).map_err(|e| e.to_string())?;
                 // a link is not unpacked (as a file, its target would be its data)
@@ -729,7 +751,7 @@ fn each_member(
                 Box::new(Within {
                     // (gzip members one after another are one stream)
                     r: flate2::read::MultiGzDecoder::new(r),
-                    left: limit.saturating_mul(2),
+                    left: limits.bytes.saturating_mul(2),
                     why,
                 })
             } else {
@@ -994,13 +1016,17 @@ pub(crate) fn unpack_from(
     budget: u64,
     stop: Option<&Progress>,
 ) -> Result<Vec<Member>, Error> {
-    let mut left = Left {
+    let limits = Limits {
         bytes: budget,
         members: MEMBERS,
+    };
+    let mut left = Left {
+        bytes: limits.bytes,
+        members: limits.members,
         stop,
     };
     let mut sink = Into::new(store, dest);
-    members(r, format, budget, &mut left, &mut sink)?;
+    members(r, format, limits, &mut left, &mut sink)?;
     let mut out: Vec<Member> = sink.members().collect();
     let charts = out.iter().any(|m| crate::chart::is_chart(&m.rel));
     let nested: Vec<usize> = (0..out.len())
@@ -1021,7 +1047,7 @@ pub(crate) fn unpack_from(
         let was = (left.bytes, left.members);
         let read = reader(Blob::File(at.clone()), store)
             .map_err(Error::Other)
-            .and_then(|(format, r)| members(r, format, budget, &mut left, &mut sink));
+            .and_then(|(format, r)| members(r, format, limits, &mut left, &mut sink));
         match read {
             Ok(()) => {
                 // (it goes: what it took is free again)
@@ -1091,7 +1117,11 @@ fn unpack_within(
         put,
         n: 0,
     };
-    read(Box::new(Cursor::new(bytes)), format, limit, &mut sink)?;
+    let limits = Limits {
+        bytes: limit,
+        members: MEMBERS,
+    };
+    read(Box::new(Cursor::new(bytes)), format, limits, &mut sink)?;
     Ok(sink.n)
 }
 
@@ -1099,11 +1129,13 @@ fn unpack_within(
 /// into `sink`, which is asked of each member in the archive's order
 /// (files only: no folder, no link) and writes it, passes it by, or ends
 /// the reading ([`Take`]); nothing is written anywhere else. An archive in
-/// it is a member like any other (not read). Within what [`unpack`] keeps
-/// to: at most `budget` bytes decoded in all, at most 250,000 members
-/// offered (a zip whose directory lists more than twice as many is refused
-/// before it is read), paths of 32 folders at most, a zip refused when a
-/// local header differs from its central directory, a 7z's decoder within
+/// it is a member like any other (not read). Within `limits` ([`unpack`]
+/// keeps to [`BUDGET`] and 250,000 members): at most its bytes decoded in
+/// all, at most its members offered (a zip whose directory lists more than
+/// twice as many is refused before it is read, as [`Error::TooMany`] of
+/// its members); and, as [`unpack`]: paths of 32 folders at most, a zip
+/// refused when a local header differs from its central directory (one
+/// with bytes before it read where its records say), a 7z's decoder within
 /// its bound of memory.
 ///
 /// What a member passed by costs: in a zip, an LZH and a tar, nothing is
@@ -1115,20 +1147,26 @@ fn unpack_within(
 pub fn read(
     r: Box<dyn ReadSeek + Send>,
     format: Format,
-    budget: u64,
+    limits: Limits,
     sink: &mut dyn Sink,
 ) -> Result<(), Error> {
     let mut left = Left {
-        bytes: budget,
-        members: MEMBERS,
+        bytes: limits.bytes,
+        members: limits.members,
         stop: None,
     };
-    members(r, format, budget, &mut left, sink)
+    members(r, format, limits, &mut left, sink)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What [`unpack`] keeps to.
+    const LIMITS: Limits = Limits {
+        bytes: BUDGET,
+        members: MEMBERS,
+    };
 
     /// `BMSEEKER_UNPACK=FILE cargo test -p bmseeker unpack_file -- --ignored`
     #[test]
@@ -1428,7 +1466,7 @@ mod tests {
             let mem = crate::fs::Mem::default();
             let mut sink = Into::new(&mem, Path::new("d"));
             let z = Box::new(Cursor::new(crate::testkit::zip(&files)));
-            let r = members(z, Format::Zip, BUDGET, &mut left, &mut sink);
+            let r = members(z, Format::Zip, LIMITS, &mut left, &mut sink);
             (r, sink.members().count())
         };
         assert_eq!(unpacked(5), (Ok(()), 5));
@@ -1995,10 +2033,21 @@ mod tests {
         // the folder a nested archive goes into
         for (name, folder) in [
             ("Song.tar.gz", "Song"),
+            ("Song_ogg.ZIP", "Song_ogg"),
             ("Song..zip", "Song"),
+            ("Song.zip. ", "Song"),
+            ("notes.txt", "notes"),
             ("CON.7z", "_CON"),
+            ("con .zip", "_con"),
+            ("a. .zip", "a"),
+            (". .x.zip", "x"),
+            ("..hidden.7z", "hidden"),
+            ("x/../..zip", "x_.._"),
             ("...zip", "archive"),
-            ("notes.txt", "archive"),
+            (". .zip", "archive"),
+            (" . .zip", "archive"),
+            ("..", "archive"),
+            ("", "archive"),
         ] {
             assert_eq!(archive_folder(name), folder, "{name}");
         }
@@ -2046,10 +2095,23 @@ mod tests {
         }
     }
 
-    /// `bytes` read into `sink` within `budget`.
+    /// `bytes` read into `sink` within `budget` and 250,000 members.
     fn read_into(bytes: &[u8], budget: u64, sink: &mut dyn Sink) -> Result<(), Error> {
-        let format = sniff(bytes).unwrap();
-        read(Box::new(Cursor::new(bytes.to_vec())), format, budget, sink)
+        let limits = Limits {
+            bytes: budget,
+            ..LIMITS
+        };
+        read_within(bytes, sniff(bytes).unwrap(), limits, sink)
+    }
+
+    /// `bytes` (of `format`) read into `sink` within `limits`.
+    fn read_within(
+        bytes: &[u8],
+        format: Format,
+        limits: Limits,
+        sink: &mut dyn Sink,
+    ) -> Result<(), Error> {
+        read(Box::new(Cursor::new(bytes.to_vec())), format, limits, sink)
     }
 
     /// In every format: the first chart taken, what came before it passed
@@ -2218,7 +2280,7 @@ mod tests {
                 dir: Some(out.clone()),
                 ..FirstChart::default()
             };
-            read(r, sniff(&bytes).unwrap(), BUDGET, &mut sink).unwrap();
+            read(r, sniff(&bytes).unwrap(), LIMITS, &mut sink).unwrap();
             let rel = &sink.took[0].0.rel;
             let mut left = Vec::new();
             let mut dirs = vec![out.clone()];
@@ -2240,5 +2302,82 @@ mod tests {
             std::fs::remove_dir_all(&out).unwrap();
             std::fs::remove_file(&a).unwrap();
         }
+    }
+
+    /// The members read are the caller's number: past it the reading
+    /// ends, and a zip's directory listing more than twice as many is
+    /// refused before any is offered; the error says the number.
+    #[test]
+    fn read_within_the_callers_number_of_files() {
+        struct Count(usize);
+        impl Sink for Count {
+            fn open(&mut self, _: &Member) -> Result<Take<'_>, String> {
+                self.0 += 1;
+                Ok(Take::Skip)
+            }
+            fn close(&mut self, _: Member) {}
+            fn drop_partial(&mut self, _: &Path) {}
+        }
+        let names: Vec<String> = (0..66_000).map(|i| format!("{i}")).collect();
+        let files: Vec<(&str, &[u8])> = (names.iter()).map(|n| (n.as_str(), &b""[..])).collect();
+        let z = zip(&files);
+        let read = |z: &[u8], members| {
+            let mut sink = Count(0);
+            let limits = Limits { members, ..LIMITS };
+            (read_within(z, Format::Zip, limits, &mut sink), sink.0)
+        };
+        assert_eq!(read(&z, 66_000), (Ok(()), 66_000));
+        assert_eq!(read(&z, 33_000), (Err(Error::TooMany(33_000)), 33_000));
+        assert_eq!(read(&z, 32_999), (Err(Error::TooMany(32_999)), 0));
+        // a directory said to list 600,000: more than 250,000 files may
+        // hold, not more than 1,000,000
+        let at = z.windows(4).rposition(|w| w == b"PK\x06\x06").unwrap();
+        let mut many = z.clone();
+        for i in [at + 24, at + 32] {
+            many[i..i + 8].copy_from_slice(&600_000u64.to_le_bytes());
+        }
+        assert_eq!(read(&many, MEMBERS), (Err(Error::TooMany(MEMBERS)), 0));
+        let (e, _) = read(&many, 1_000_000);
+        assert!(!matches!(e, Err(Error::TooMany(_))), "{e:?}");
+    }
+
+    /// A zip with bytes before it (a self-extracting archive's program,
+    /// another zip) is read where its records say, its local headers
+    /// checked there; a zip64 one is not (its end record is looked for
+    /// from the file's first byte).
+    #[test]
+    fn a_zip_with_bytes_before_it() {
+        let files: [(&str, &[u8]); 2] = [("song/01.ogg", b"ogg"), ("song/a.bms", b"#TITLE A")];
+        let z = zip(&files);
+        for before in [
+            b"MZ\x90\x00 a program".repeat(100),
+            zip(&[("x.txt", &b"x"[..])]),
+        ] {
+            let mut prefixed = before.clone();
+            prefixed.extend(&z);
+            let mut sink = FirstChart::default();
+            read_within(&prefixed, Format::Zip, LIMITS, &mut sink).unwrap();
+            let (m, b) = &sink.took[0];
+            assert_eq!(
+                (&m.rel, &b[..]),
+                (&PathBuf::from("song/a.bms"), &b"#TITLE A"[..])
+            );
+            let differs = renamed(&prefixed, b"song/a.bms", b"song/c.bms", true);
+            let e = read_within(&differs, Format::Zip, LIMITS, &mut FirstChart::default());
+            assert!(e.unwrap_err().to_string().contains("local header"));
+        }
+        // (one a player finds by its first bytes)
+        let mut prefixed = zip(&[("x.txt", &b"x"[..])]);
+        prefixed.extend(&z);
+        assert_eq!(
+            names(prefixed).unwrap(),
+            [PathBuf::from("song/01.ogg"), "song/a.bms".into()]
+        );
+        let names: Vec<String> = (0..66_000).map(|i| format!("{i}")).collect();
+        let files: Vec<(&str, &[u8])> = (names.iter()).map(|n| (n.as_str(), &b""[..])).collect();
+        let mut prefixed = b"MZ".to_vec();
+        prefixed.extend(zip(&files));
+        let e = read_within(&prefixed, Format::Zip, LIMITS, &mut FirstChart::default());
+        assert!(matches!(e, Err(Error::Other(_))), "{e:?}");
     }
 }
