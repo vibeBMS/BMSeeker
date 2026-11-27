@@ -5,9 +5,11 @@
 //! `python3 tools/api_vibe.py <vibeBMS checkout> > tests/api_vibe.rs`
 //! (it names; it does not check signatures).
 #![allow(unused_imports)]
+// (a field named in a pattern as `_`, beside `..`, is named all the same)
+#![allow(clippy::unneeded_wildcard_pattern)]
 
-// (only their types: with type parameters of their own, they cannot be
-// named without a call) bmseeker::library::Library::from_catalog
+// (only their types: with type parameters of their own or of their
+// type, they cannot be named without a call) bmseeker::hosts::Target::url, bmseeker::install::job::TaskJob::new, bmseeker::library::Library::from_catalog, bmseeker::links::Links::from_tables
 
 use bmseeker::config::native_user_agent as _;
 use bmseeker::config::user_agent_with as _;
@@ -22,6 +24,8 @@ use bmseeker::fs::ReadSeek as _;
 use bmseeker::fs::Store as _;
 use bmseeker::hosts::Context as _;
 use bmseeker::hosts::Fetch as _;
+use bmseeker::hosts::Fetch::Failed as _;
+use bmseeker::hosts::Fetch::Page as _;
 use bmseeker::hosts::Target as _;
 use bmseeker::hosts::Want as _;
 use bmseeker::hosts::PRESS_DOWNLOAD_JS as _;
@@ -29,17 +33,31 @@ use bmseeker::hosts::STALL_MS as _;
 use bmseeker::import::import as _;
 use bmseeker::import::unpack_into as _;
 use bmseeker::import::Imported as _;
+use bmseeker::import::Imported::Ask as _;
+use bmseeker::import::Imported::Other as _;
+use bmseeker::import::Imported::Owned as _;
+use bmseeker::import::Imported::Placed as _;
+use bmseeker::import::Imported::Unpacked as _;
+use bmseeker::import::Imported::Waiting as _;
 use bmseeker::install::got as _;
 use bmseeker::install::job::run_job as _;
 use bmseeker::install::job::Driver as _;
 use bmseeker::install::job::Effect as _;
+use bmseeker::install::job::Effect::Download as _;
+use bmseeker::install::job::Effect::Http as _;
+use bmseeker::install::job::Effect::Sleep as _;
 use bmseeker::install::job::Fed as _;
+use bmseeker::install::job::Fed::Downloaded as _;
+use bmseeker::install::job::Fed::Http as _;
+use bmseeker::install::job::Fed::Woke as _;
 use bmseeker::install::job::FileLink as _;
 use bmseeker::install::job::Files as _;
 use bmseeker::install::job::Installed as _;
 use bmseeker::install::job::Job as _;
 use bmseeker::install::job::Missed as _;
 use bmseeker::install::job::Step as _;
+use bmseeker::install::job::Step::Do as _;
+use bmseeker::install::job::Step::Done as _;
 use bmseeker::install::job::TaskJob as _;
 use bmseeker::install::job::Unserved as _;
 use bmseeker::install::md5_hex as _;
@@ -47,8 +65,17 @@ use bmseeker::install::request as _;
 use bmseeker::install::safe_name as _;
 use bmseeker::install::take as _;
 use bmseeker::install::Done as _;
+use bmseeker::install::Done::Added as _;
+use bmseeker::install::Done::Failed as _;
+use bmseeker::install::Done::Owned as _;
+use bmseeker::install::Done::Page as _;
+use bmseeker::install::Done::Placed as _;
+use bmseeker::install::Done::Waiting as _;
 use bmseeker::install::Entry as _;
 use bmseeker::install::Failure as _;
+use bmseeker::install::Failure::Net as _;
+use bmseeker::install::Failure::NoChartLink as _;
+use bmseeker::install::Failure::NotTheChart as _;
 use bmseeker::library::Library as _;
 use bmseeker::library::Owned as _;
 use bmseeker::links::Links as _;
@@ -59,9 +86,16 @@ use bmseeker::native::Native as _;
 use bmseeker::net::too_large as _;
 use bmseeker::net::Answer as _;
 use bmseeker::net::Kind as _;
+use bmseeker::net::Kind::Header as _;
+use bmseeker::net::Kind::Page as _;
 use bmseeker::net::NetError as _;
 use bmseeker::net::NetError::Cancelled as _;
+use bmseeker::net::NetError::Other as _;
+use bmseeker::net::NetError::Stalled as _;
+use bmseeker::net::NetError::Status as _;
 use bmseeker::net::Request as _;
+use bmseeker::net::Request::Get as _;
+use bmseeker::net::Request::Post as _;
 use bmseeker::placement::bring as _;
 use bmseeker::placement::chart_info as _;
 use bmseeker::placement::is_chart as _;
@@ -71,9 +105,16 @@ use bmseeker::placement::same_name as _;
 use bmseeker::placement::same_title as _;
 use bmseeker::placement::ChartInfo as _;
 use bmseeker::placement::Located as _;
+use bmseeker::placement::Located::Ask as _;
+use bmseeker::placement::Located::Here as _;
+use bmseeker::placement::Located::Move as _;
+use bmseeker::placement::Located::NoSong as _;
 use bmseeker::placement::Rules as _;
 use bmseeker::progress::Progress as _;
 use bmseeker::progress::Stage as _;
+use bmseeker::progress::Stage::Adding as _;
+use bmseeker::progress::Stage::Downloading as _;
+use bmseeker::progress::Stage::Finding as _;
 use bmseeker::progress::Stage::Unpacking as _;
 use bmseeker::progress::CANCELLED as _;
 use bmseeker::refusal::Refusals as _;
@@ -111,13 +152,203 @@ use bmseeker::web::PROXY as _;
 
 fn _associated() {
     let _ = bmseeker::config::Config::default;
+    let _ = bmseeker::hosts::Context::default;
+    let _ = bmseeker::hosts::Context::new;
     let _ = bmseeker::install::EntryJob::new;
     let _ = bmseeker::install::Request::default;
+    let _ = bmseeker::install::job::Files::new;
+    let _ = bmseeker::install::job::Files::slot;
+    let _ = bmseeker::links::Links::from_stella;
     #[cfg(not(target_arch = "wasm32"))]
     let _ = bmseeker::native::Native::new;
+    let _ = bmseeker::placement::Rules::default;
+    let _ = bmseeker::progress::Progress::new;
     let _ = bmseeker::refusal::Guarded::new;
     let _ = bmseeker::sources::Sources::from_config;
     let _ = bmseeker::table::TableLoader::new;
+}
+
+fn _fields_0(v: bmseeker::config::Config) {
+    let _ = matches!(
+        v,
+        bmseeker::config::Config {
+            folder_naming: _,
+            third_party: _,
+            user_agent: _,
+            ..
+        }
+    );
+}
+
+fn _fields_1(v: bmseeker::fs::Entry) {
+    let _ = matches!(
+        v,
+        bmseeker::fs::Entry {
+            is_dir: _,
+            path: _,
+            ..
+        }
+    );
+}
+
+fn _fields_2(v: bmseeker::hosts::Context) {
+    let _ = matches!(
+        v,
+        bmseeker::hosts::Context {
+            failures_are_pages: _,
+            ..
+        }
+    );
+}
+
+fn _fields_3(v: bmseeker::hosts::Target) {
+    let _ = matches!(v, bmseeker::hosts::Target { mega_key: _, .. });
+}
+
+fn _fields_4(v: bmseeker::hosts::Want) {
+    let _ = matches!(
+        v,
+        bmseeker::hosts::Want {
+            artist: _,
+            title: _,
+            ..
+        }
+    );
+}
+
+fn _fields_5(v: bmseeker::install::Entry) {
+    let _ = matches!(
+        v,
+        bmseeker::install::Entry {
+            chart: _,
+            md5: _,
+            org_md5: _,
+            song: _,
+            want: _,
+            ..
+        }
+    );
+}
+
+fn _fields_6(v: bmseeker::install::job::Effect) {
+    let _ = matches!(
+        v,
+        bmseeker::install::job::Effect::Download {
+            slot: _,
+            target: _,
+            ..
+        }
+    );
+}
+
+fn _fields_7(v: bmseeker::install::job::FileLink) {
+    let _ = matches!(
+        v,
+        bmseeker::install::job::FileLink {
+            plain: _,
+            url: _,
+            ..
+        }
+    );
+}
+
+fn _fields_8(v: bmseeker::install::job::Unserved) {
+    let _ = matches!(
+        v,
+        bmseeker::install::job::Unserved {
+            at: _,
+            error: _,
+            ..
+        }
+    );
+}
+
+fn _fields_9(v: bmseeker::library::Owned) {
+    let _ = matches!(
+        v,
+        bmseeker::library::Owned {
+            artist: _,
+            md5: _,
+            path: _,
+            sha256: _,
+            title: _,
+            ..
+        }
+    );
+}
+
+fn _fields_10(v: bmseeker::net::Request) {
+    let _ = matches!(
+        v,
+        bmseeker::net::Request::Post {
+            body: _,
+            url: _,
+            ..
+        }
+    );
+}
+
+fn _fields_11(v: bmseeker::sources::Query) {
+    let _ = matches!(
+        v,
+        bmseeker::sources::Query {
+            diff: _,
+            md5: _,
+            want: _,
+            ..
+        }
+    );
+}
+
+fn _fields_12(v: bmseeker::table::Course) {
+    let _ = matches!(
+        v,
+        bmseeker::table::Course {
+            md5: _,
+            name: _,
+            trophy: _,
+            ..
+        }
+    );
+}
+
+fn _fields_13(v: bmseeker::table::DifficultyTable) {
+    let _ = matches!(
+        v,
+        bmseeker::table::DifficultyTable {
+            entries: _,
+            fetched_at: _,
+            header: _,
+            source_url: _,
+            ..
+        }
+    );
+}
+
+fn _fields_14(v: bmseeker::table::TableEntry) {
+    let _ = matches!(
+        v,
+        bmseeker::table::TableEntry {
+            artist: _,
+            level: _,
+            md5: _,
+            title: _,
+            url: _,
+            url_diff: _,
+            ..
+        }
+    );
+}
+
+fn _fields_15(v: bmseeker::table::TableHeader) {
+    let _ = matches!(
+        v,
+        bmseeker::table::TableHeader {
+            name: _,
+            symbol: _,
+            ..
+        }
+    );
 }
 
 fn _trait_0<T: bmseeker::fs::Fs + ?Sized>() {
