@@ -97,7 +97,11 @@ would. The jobs of a download, in `install::job`:
   separate chart first when the library has its song, else the song then
   the chart), then add-ons, each an `Install`. The sources are asked only
   with the chart's MD5, and only for the song step or, with the song in the
-  library, the chart step; never for an add-on.
+  library, the chart step; never for an add-on. What of the entry's
+  links (and add-ons) is no web link is dropped before the steps are
+  made. `Entry::from_table_in` takes a table's entry's links from several
+  `Links` lists in turn (`Links::song_links_in`, `chart_links_in`: as the
+  lists made one, without making it).
 
 A run's sources share a memo of their GETs (`net::Memo`: successes and
 404s, 4 MiB at most), so a request several sources make is asked once.
@@ -405,7 +409,9 @@ anything but the music removed (`/ obj:`, `feat.`, `BGA:`, `差分`; not
 `remix`, `作曲`)). A chart needs it to go into a folder without asking
 (two such folders: it waits). It is the one test of "the same song"
 everywhere: reusing a song's folder, whether the library has a table
-entry's song, and what a download found by name must hold. A folder's
+entry's song, and what a download found by name must hold; a player
+asks it as `placement::SongKey` (`SongKey::of(title, artist)`, made once
+a chart, then `same_song`). A folder's
 charts are one package when their normalized titles and artists are
 equal, as the fork splits packages.
 

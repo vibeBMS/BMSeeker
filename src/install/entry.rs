@@ -36,6 +36,15 @@ impl Entry {
     /// The table's entry `e`, its links those `links` knows (its own
     /// first).
     pub fn from_table(e: &crate::table::TableEntry, links: &crate::links::Links) -> Entry {
+        Entry::from_table_in(e, &[links])
+    }
+
+    /// The table's entry `e`, its links those `lists` know (its own first,
+    /// then each list's in turn: [`Links::song_links_in`]).
+    ///
+    /// [`Links::song_links_in`]: crate::links::Links::song_links_in
+    pub fn from_table_in(e: &crate::table::TableEntry, lists: &[&crate::links::Links]) -> Entry {
+        use crate::links::Links;
         Entry {
             md5: e.md5.clone(),
             sha256: e.sha256.clone(),
@@ -44,8 +53,8 @@ impl Entry {
                 artist: e.artist.clone(),
             },
             org_md5: e.org_md5.clone(),
-            song: links.song_links(e),
-            chart: links.chart_links(e),
+            song: Links::song_links_in(lists, e),
+            chart: Links::chart_links_in(lists, e),
         }
     }
 
@@ -215,15 +224,20 @@ pub struct EntryJob {
 
 impl EntryJob {
     /// `e` from its links and then `sources` into `lib` (natively through
-    /// `downloads`).
+    /// `downloads`). What of `e`'s links is no web link (an empty cell, a
+    /// table's note, `file:` or `javascript:`; as a download reads one:
+    /// http or https, plainly written) is dropped, not tried: a step left
+    /// without links is one for the sources, or none.
     pub fn new(
         store: Arc<dyn Store + Send + Sync>,
         downloads: PathBuf,
         lib: Library,
-        e: Entry,
+        mut e: Entry,
         sources: Sources,
         cx: &Context,
     ) -> EntryJob {
+        e.song.retain(|u| is_link(u));
+        e.chart.retain(|u| is_link(u));
         let have_song = has_song(&e, &lib);
         let steps = entry_steps(&e, &lib)
             .into_iter()
@@ -250,15 +264,20 @@ impl EntryJob {
     }
 
     /// Then each of `links` on its own, as the chart's, while the library
-    /// lacks the chart.
+    /// lacks the chart (what is no web link dropped, as [`EntryJob::new`]
+    /// drops it).
     pub fn addons(mut self, links: impl IntoIterator<Item = String>) -> EntryJob {
         let step = |l| EntryStep {
             links: vec![l],
             role: Role::Diff,
             when: When::Missing,
         };
-        self.steps
-            .extend(links.into_iter().map(|l| (step(l), false)));
+        self.steps.extend(
+            links
+                .into_iter()
+                .filter(|l| is_link(l))
+                .map(|l| (step(l), false)),
+        );
         self
     }
 
@@ -313,6 +332,11 @@ impl EntryJob {
 /// the song in the library.
 fn asks(e: &Entry, role: Role, lib: &Library) -> bool {
     md5_key(&e.md5).is_some() && (role == Role::Song || has_song(e, lib))
+}
+
+/// Whether a download could try `u` (`hosts::Link`'s rule).
+fn is_link(u: &str) -> bool {
+    crate::hosts::Link::parse(u, 0).is_some()
 }
 
 fn cancelled(done: &[Done]) -> bool {
@@ -656,6 +680,51 @@ mod tests {
             &Context::default(),
         );
         assert!(job.is_empty());
+    }
+
+    /// What is no web link is not tried, as a link nor as a step: an entry
+    /// of none (and no MD5 for the sources) is nothing to try.
+    #[test]
+    fn only_web_links_tried() {
+        let (m, _) = library();
+        let m = Arc::new(m);
+        let mut e = entry("Another [X]", &["", "javascript:alert(1)"]);
+        e.md5.clear();
+        e.song = [
+            "",
+            " ",
+            "not a link",
+            "file:///x.zip",
+            "https://user@e/a.zip",
+        ]
+        .map(String::from)
+        .to_vec();
+        let lib = Library::scan(&*m, Path::new("bms"));
+        let cx = Context::default();
+        let job = EntryJob::new(
+            m.clone(),
+            "dl".into(),
+            lib,
+            e.clone(),
+            Sources::default(),
+            &cx,
+        )
+        .addons(["--help".to_string(), "mailto:a@b".into()]);
+        assert!(job.is_empty());
+        // the links among them, and only those
+        e.song.push("HTTPS://e/song.zip".into());
+        e.chart.push("https://e/x.bms".into());
+        let d = Canned::default();
+        let (out, _) = entry_job(&m, &e, &["--help", "https://e/addon.zip"], &cx, &d);
+        assert_eq!(
+            downloads(&d),
+            [
+                "download HTTPS://e/song.zip",
+                "download https://e/x.bms",
+                "download https://e/addon.zip"
+            ]
+        );
+        assert!(!out.done.is_empty() && !got(&out.done), "{:?}", out.done);
     }
 
     /// The chart waits for its song: the song next, the chart into its
