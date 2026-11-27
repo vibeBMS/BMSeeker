@@ -3,7 +3,6 @@
 use super::library::{done_record, scan};
 use super::link::fetch_list;
 use super::Run;
-use crate::chart::md5_key;
 use crate::export;
 use crate::install::{self, Batch, Entry, EntryJob};
 use crate::links::Links;
@@ -18,8 +17,8 @@ use std::path::{Path, PathBuf};
 pub(super) enum Table {
     /// A table's name and its levels, with how many charts each.
     Show { url: String },
-    /// The table's charts a library lacks (-l, --md5: of a level, of
-    /// those charts only); --get downloads them.
+    /// The table's charts a library lacks (-l, --md5, --sha256: of a
+    /// level, of those charts only); --get downloads them.
     Missing {
         url: String,
         #[arg(short = 'L', long)]
@@ -30,6 +29,10 @@ pub(super) enum Table {
         /// These charts only (their MD5; more than once for more).
         #[arg(long = "md5", value_name = "MD5")]
         md5s: Vec<String>,
+        /// These charts only (their SHA-256, for a table that gives no MD5;
+        /// more than once for more).
+        #[arg(long = "sha256", value_name = "SHA256")]
+        sha256s: Vec<String>,
         /// Download them (each song, then its separate chart; with the song
         /// in the library, the chart first; each file once).
         #[arg(long)]
@@ -95,6 +98,7 @@ pub(super) fn table(r: &Run, c: Table) -> Result<(), String> {
             library,
             level,
             md5s,
+            sha256s,
             get,
             reinstall,
             links,
@@ -102,7 +106,11 @@ pub(super) fn table(r: &Run, c: Table) -> Result<(), String> {
             &super::library::reinstalling(r, reinstall),
             &url,
             &library,
-            &Chosen { level, md5s },
+            &Chosen {
+                level,
+                md5s,
+                sha256s,
+            },
             get,
             &links,
         ),
@@ -134,19 +142,23 @@ pub(super) fn table(r: &Run, c: Table) -> Result<(), String> {
     }
 }
 
-/// The entries of a table a command keeps: of one level, of these charts.
+/// The entries of a table a command keeps: of one level, of these charts
+/// (named by either hash: an entry is kept when one given is its own).
 struct Chosen {
     level: Option<String>,
     md5s: Vec<String>,
+    sha256s: Vec<String>,
 }
 
 impl Chosen {
     fn keeps(&self, e: &TableEntry) -> bool {
+        let named = |hash: &str, given: &[String]| {
+            !hash.is_empty() && given.iter().any(|g| g.trim().eq_ignore_ascii_case(hash))
+        };
         self.level.as_ref().is_none_or(|l| e.level == *l)
-            && (self.md5s.is_empty() || {
-                let md5 = md5_key(&e.md5);
-                md5.is_some() && self.md5s.iter().any(|m| md5_key(m) == md5)
-            })
+            && (self.md5s.is_empty() && self.sha256s.is_empty()
+                || named(&e.md5, &self.md5s)
+                || named(&e.sha256, &self.sha256s))
     }
 }
 
@@ -170,7 +182,7 @@ fn missing(
     for e in &missing {
         r.out.record(
             json!({"level": e.level, "label": t.label(&e.level), "title": e.title, "artist": e.artist,
-                "md5": e.md5, "url": e.url, "url_diff": e.url_diff}),
+                "md5": e.md5, "sha256": e.sha256, "url": e.url, "url_diff": e.url_diff}),
             || format!("{}\t{} — {}\t{}\t{}", t.label(&e.level), e.title, e.artist, e.url, e.url_diff),
         );
     }
@@ -207,9 +219,10 @@ fn missing(
         let out = run_job(&mut job.batch(batch), r.net);
         (have, batch) = (out.lib, out.batch);
         for d in &out.done {
-            r.out.record(done_record(&e.title, &e.md5, d), || {
-                super::library::done_text(&e.title, d)
-            });
+            r.out
+                .record(done_record(&e.title, &e.md5, &e.sha256, d), || {
+                    super::library::done_text(&e.title, d)
+                });
         }
     }
     Ok(())
@@ -266,8 +279,8 @@ fn load_filled(r: &Run, url: &str, args: &LinkArgs) -> Result<(DifficultyTable, 
 mod tests {
     use super::*;
 
-    /// A level and MD5s (in any case) choose; an entry without an MD5 is
-    /// no MD5's.
+    /// A level and hashes (in any case) choose; an entry without an MD5
+    /// is no MD5's.
     #[test]
     fn entries_chosen() {
         let e = |md5: &str, level: &str| TableEntry {
@@ -276,16 +289,25 @@ mod tests {
             ..Default::default()
         };
         let (a, b) = ("a".repeat(32), "b".repeat(32));
-        let entries = [e(&a, "1"), e(&b, "1"), e(&a, "2"), e("", "1")];
+        let mut by_sha = e("", "1");
+        by_sha.sha256 = "d".repeat(64);
+        let entries = [e(&a, "1"), e(&b, "1"), e(&a, "2"), by_sha];
         let kept = |c: Chosen| entries.iter().filter(|x| c.keeps(x)).count();
-        let chosen = |level: Option<&str>, md5s: &[&str]| Chosen {
+        let list = |v: &[&str]| v.iter().map(|m| m.to_string()).collect();
+        let chosen = |level: Option<&str>, md5s: &[&str], sha256s: &[&str]| Chosen {
             level: level.map(String::from),
-            md5s: md5s.iter().map(|m| m.to_string()).collect(),
+            md5s: list(md5s),
+            sha256s: list(sha256s),
         };
-        assert_eq!(kept(chosen(None, &[])), 4);
-        assert_eq!(kept(chosen(Some("1"), &[])), 3);
-        assert_eq!(kept(chosen(None, &[&a.to_uppercase()])), 2);
-        assert_eq!(kept(chosen(Some("1"), &[&a, &b])), 2);
-        assert_eq!(kept(chosen(None, &["", "not an md5"])), 0);
+        let d = "D".repeat(64);
+        assert_eq!(kept(chosen(None, &[], &[])), 4);
+        assert_eq!(kept(chosen(Some("1"), &[], &[])), 3);
+        assert_eq!(kept(chosen(None, &[&a.to_uppercase()], &[])), 2);
+        assert_eq!(kept(chosen(Some("1"), &[&a, &b], &[])), 2);
+        // by its SHA-256 (in any case), beside MD5s
+        assert_eq!(kept(chosen(None, &[], &[&d])), 1);
+        assert_eq!(kept(chosen(Some("1"), &[&b], &[&format!(" {d}")])), 2);
+        // an empty hash names nothing (the entry's MD5 is empty)
+        assert_eq!(kept(chosen(None, &["", "not an md5"], &[""])), 0);
     }
 }

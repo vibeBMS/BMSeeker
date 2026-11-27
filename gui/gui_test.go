@@ -103,7 +103,8 @@ func fakeApp(t *testing.T) *app {
 
 // The window on the fixture's runs: its settings, a table's missing
 // charts, those shown downloaded in one run (one into the library, one a
-// page for the Browser tab, one whose source refused), and a later run
+// page for the Browser tab, one whose source refused, one the table names
+// by its SHA-256 alone), and a later run
 // that skips the host that refused, with third-party sources on, whose
 // notice it does not repeat.
 func TestTablesToBrowser(t *testing.T) {
@@ -118,9 +119,9 @@ func TestTablesToBrowser(t *testing.T) {
 	if err := tt.Click("Missing charts"); err != nil {
 		t.Fatal(err)
 	}
-	until(t, func() bool { return len(a.missing) == 3 && len(a.busy) == 0 })
+	until(t, func() bool { return len(a.missing) == 4 && len(a.busy) == 0 })
 	tt.Frame()
-	if !tt.HasText("Song A") || !tt.HasText("3 missing") {
+	if !tt.HasText("Song A") || !tt.HasText("4 missing") || a.missing[3].MD5 != "" || a.missing[3].SHA256 == "" {
 		t.Fatalf("texts %q", tt.Texts())
 	}
 	if err := tt.Click("Download all shown"); err != nil {
@@ -135,7 +136,7 @@ func TestTablesToBrowser(t *testing.T) {
 		t.Fatalf("texts %q", tt.Texts())
 	}
 	joined := strings.Join(a.log, "\n")
-	for _, said := range []string{"3 of 3 charts missing", "Song A: added /lib/Song A",
+	for _, said := range []string{"4 of 4 charts missing", "Song A: added /lib/Song A", "Song D: added /lib/Song D",
 		"Song B: needs a browser: https://b.example/b", "bmssearch.net refused BMSeeker (HTTP 403)", "Song C: no link"} {
 		if !strings.Contains(joined, said) {
 			t.Fatalf("%q not in the log %q", said, joined)
@@ -230,10 +231,11 @@ func TestSaidValuesAreNoOptions(t *testing.T) {
 	t.Setenv("BMSEEKER_CLI", filepath.Join(bin, "bmseeker"))
 	cliOnce = sync.Once{}
 	m := missing{Title: "-ERROR", Artist: "--reinstall", MD5: "--third-party", URL: "--config=/x.json", URLDiff: "-h"}
-	said := []string{m.Title, m.Artist, m.MD5, m.URL, m.URLDiff, "-x.evil.example", "--help"}
+	bySHA := missing{Title: "-V", SHA256: "--name-folders"}
+	said := []string{m.Title, m.Artist, m.MD5, m.URL, m.URLDiff, bySHA.Title, bySHA.SHA256, "-x.evil.example", "--help"}
 	a.refused = []string{"-x.evil.example"}
 	a.missingFrom = "--help"
-	a.download([]missing{m})
+	a.download([]missing{m, bySHA})
 	until(t, func() bool { return len(a.busy) == 0 })
 	args, _ := os.ReadFile(filepath.Join(bin, "args"))
 	cmds := strings.Split(strings.TrimSpace(string(args)), "\n\n")
@@ -242,7 +244,8 @@ func TestSaidValuesAreNoOptions(t *testing.T) {
 	if len(cmds) != 1 || end < 0 || !slices.Equal(words[end+1:], []string{"--help"}) {
 		t.Fatalf("not one command, its table after \"--\": %q", cmds)
 	}
-	if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--md5=--third-party") {
+	if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--md5=--third-party") ||
+		!slices.Contains(words[:end], "--sha256=--name-folders") {
 		t.Errorf("values not attached to their options: %q", words)
 	}
 	// the Link tab's command

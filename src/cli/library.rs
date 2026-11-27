@@ -244,9 +244,10 @@ pub(super) fn library(r: &Run, c: Library) -> Result<(), String> {
             let job = install::job::Install::new(r.fs.clone(), downloads, lib, q, links, &r.cx);
             let done = crate::net::job::run_job(&mut job.sources(sources), r.net).done;
             for d in &done {
-                r.out.record(done_record(&song.title, &song.md5, d), || {
-                    done_text(&song.title, d)
-                });
+                r.out
+                    .record(done_record(&song.title, &song.md5, "", d), || {
+                        done_text(&song.title, d)
+                    });
             }
             if install::got(&done) {
                 Ok(())
@@ -267,12 +268,14 @@ fn located_record(chart: &Path, l: &Located) -> Value {
     }
 }
 
-/// What came of a song's download, as a record (`md5`: the chart's it was
-/// for, when one was given).
-pub(super) fn done_record(title: &str, md5: &str, d: &Done) -> Value {
+/// What came of a song's download, as a record (`md5`, else `sha256`: the
+/// chart's it was for, when one is known).
+pub(super) fn done_record(title: &str, md5: &str, sha256: &str, d: &Done) -> Value {
     let mut v = json!({"title": title});
     if !md5.is_empty() {
         v["md5"] = md5.into();
+    } else if !sha256.is_empty() {
+        v["sha256"] = sha256.into();
     }
     v["state"] = d.state().into();
     match d {

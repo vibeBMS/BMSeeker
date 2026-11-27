@@ -28,7 +28,8 @@ link resolve <link>...                   what a link leads to, without downloadi
 link get <link>... [-o folder|file]      download from the links in turn
 song find [-t -a --md5] [--diff]         the links the sources know for a song
 table show <URL>                         a difficulty table and its charts per level
-table missing <URL> -L library [--get]   the charts the library lacks (--get: download them)
+table missing <URL> -L library [--get]   the charts the library lacks (--get: download them; -l level,
+                                         --md5, --sha256: only those)
 table export lr2|bmt <URL> <folder>      an LR2 custom folder / a beatoraja table cache
 library import <file> -L library         a downloaded file into the library
 library place <chart> -L library         the song folders a separate chart may go into

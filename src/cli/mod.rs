@@ -262,7 +262,7 @@ mod tests {
     /// code), which `gui/gui_test.go` replays as the CLI. Its runs are the
     /// window's: the settings, a table's missing charts, those chosen
     /// downloaded (one into the library, one a page, one whose source
-    /// refuses), a run after a refusal and with third parties' sources, and
+    /// refuses, one the table names by its SHA-256 alone), a run after a refusal and with third parties' sources, and
     /// the script a page's window runs. The commands must write them as the
     /// file has them; `BMSEEKER_BLESS=1 cargo test --features cli records`
     /// writes it anew (a change of the protocol, which the window's test
@@ -274,15 +274,20 @@ mod tests {
         use crate::net::job::Served;
         const TABLE: &str = "https://t.example/table.json";
         const SONG_A: &str = "#TITLE Song A\n#ARTIST x\n#WAV01 01.wav\n#00111:01\n";
+        const SONG_D: &str = "#TITLE Song D\n#ARTIST w\n#WAV01 01.wav\n#00111:01\n";
         let (a, b, c) = (md5_hex(SONG_A.as_bytes()), "b".repeat(32), "c".repeat(32));
+        // (a table that gives this chart its SHA-256 alone)
+        let d = crate::chart::sha256_hex(SONG_D.as_bytes());
         let data = serde_json::json!([
             {"md5": a, "title": "Song A", "artist": "x", "level": "1",
                 "url": "https://a.example/a.zip", "url_diff": ""},
             {"md5": b, "title": "Song B", "artist": "y", "level": "2",
                 "url": "https://b.example/b", "url_diff": ""},
             {"md5": c, "title": "Song C", "artist": "z", "level": "2", "url": "", "url_diff": ""},
+            {"sha256": d, "title": "Song D", "artist": "w", "level": "2",
+                "url": "https://d.example/d.zip", "url_diff": ""},
         ]);
-        struct Hosts(Vec<u8>, Vec<u8>);
+        struct Hosts(Vec<u8>, Vec<u8>, Vec<u8>);
         impl Driver for Hosts {
             fn perform(&self, effect: Effect) -> Fed {
                 match effect {
@@ -299,6 +304,7 @@ mod tests {
                     }),
                     Effect::Download { target, .. } => Fed::Downloaded(match target.url.as_str() {
                         "https://a.example/a.zip" => Ok(Served::bytes(self.1.clone(), None, None)),
+                        "https://d.example/d.zip" => Ok(Served::bytes(self.2.clone(), None, None)),
                         "https://b.example/b" => {
                             Ok(Served::bytes(b"<html>a page</html>".to_vec(), None, None))
                         }
@@ -311,6 +317,7 @@ mod tests {
         let net = Hosts(
             data.to_string().into_bytes(),
             crate::testkit::zip(&[("Song A/a.bms", SONG_A), ("Song A/01.wav", "RIFF")]),
+            crate::testkit::zip(&[("Song D/d.bms", SONG_D), ("Song D/01.wav", "RIFF")]),
         );
         // the defaults, but a user agent no version changes, the sources the
         // hosts here answer, and their table
@@ -322,10 +329,11 @@ mod tests {
         };
         let fs: Arc<crate::fs::Mem> = Arc::default();
         let md5s = [&a, &b, &c].map(|m| format!("--md5={m}"));
+        let by_sha = format!("--sha256={d}");
         let get = ["--json", "table", "missing", "--library=/lib", "--get"]
             .into_iter()
             .chain(md5s.iter().map(String::as_str))
-            .chain(["--", TABLE])
+            .chain([by_sha.as_str(), "--", TABLE])
             .collect::<Vec<_>>();
         let runs: [&[&str]; 5] = [
             &["--json", "config", "show"],

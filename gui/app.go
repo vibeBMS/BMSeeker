@@ -13,7 +13,7 @@ import (
 
 // A chart a table lists that the library lacks.
 type missing struct {
-	Label, Level, Title, Artist, MD5, URL, URLDiff string
+	Label, Level, Title, Artist, MD5, SHA256, URL, URLDiff string
 }
 
 // A link that needs a person in a browser.
@@ -296,7 +296,7 @@ func (a *app) loadMissing() {
 		err := a.cli([]string{"table", "missing", "--library=" + lib, "--", url}, func(r Record) {
 			got = append(got, missing{
 				Label: r.S("label"), Level: r.S("level"), Title: r.S("title"), Artist: r.S("artist"),
-				MD5: r.S("md5"), URL: r.S("url"), URLDiff: r.S("url_diff"),
+				MD5: r.S("md5"), SHA256: r.S("sha256"), URL: r.S("url"), URLDiff: r.S("url_diff"),
 			})
 		})
 		a.update(func() {
@@ -307,7 +307,8 @@ func (a *app) loadMissing() {
 }
 
 // download installs the charts ms of the table the list is of, as the CLI
-// does a table's (`table missing --get` of their MD5s, one run: each song,
+// does a table's (`table missing --get` of their MD5s, or SHA-256s where the
+// table gives no MD5, one run: each song,
 // then its separate chart, or the chart first when the library has its
 // song; each file downloaded once). A chart whose download brought it in,
 // or found it in the library, leaves the list.
@@ -315,11 +316,15 @@ func (a *app) download(ms []missing) {
 	lib, url := a.settings.Library, a.missingFrom
 	args := []string{"table", "missing", "--library=" + lib, "--get"}
 	for _, m := range ms {
-		if m.MD5 == "" {
-			a.say("%s: the table gives no MD5 for it: download it from the Link tab", m.Title)
-			continue
+		switch {
+		case m.MD5 != "":
+			args = append(args, "--md5="+m.MD5)
+		case m.SHA256 != "":
+			args = append(args, "--sha256="+m.SHA256)
+		default:
+			// (the CLI lists none: a table's entry without a hash is no chart to it)
+			a.say("%s: the table gives no hash for it: download it from the Link tab", m.Title)
 		}
-		args = append(args, "--md5="+m.MD5)
 	}
 	if len(args) == 4 {
 		return
@@ -328,8 +333,11 @@ func (a *app) download(ms []missing) {
 	a.job("Downloading", func() error {
 		return a.cli(args, func(r Record) {
 			if a.outcome(r.S("title"), r) {
-				md5 := r.S("md5")
-				a.update(func() { a.forget(md5) })
+				hash := r.S("md5")
+				if hash == "" {
+					hash = r.S("sha256")
+				}
+				a.update(func() { a.forget(hash) })
 			}
 		})
 	})
@@ -362,9 +370,12 @@ func (a *app) outcome(title string, r Record) bool {
 	return false
 }
 
-// forget takes the chart of md5 off the list.
-func (a *app) forget(md5 string) {
-	a.missing = slices.DeleteFunc(a.missing, func(m missing) bool { return m.MD5 == md5 })
+// forget takes the chart of this hash off the list: its MD5, else (a table
+// that gives none) its SHA-256.
+func (a *app) forget(hash string) {
+	a.missing = slices.DeleteFunc(a.missing, func(m missing) bool {
+		return hash != "" && (m.MD5 == hash || m.MD5 == "" && m.SHA256 == hash)
+	})
 }
 
 func (a *app) linkView(c *ui.Context) {

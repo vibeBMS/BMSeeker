@@ -493,11 +493,12 @@ song find [-t -a --md5] [--diff] [--table URL]... [--list FILE|URL]...
                                                      the links the sources know for the song (--diff: its separate
                                                      chart)
 table show <URL>                                     a difficulty table and its charts per level
-table missing <URL> -L library [-l level] [--md5 MD5]... [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
-                                                     the charts the library lacks (-l, --md5: of that level, of
-                                                     those charts only; --get: download them, each song, then its
-                                                     separate chart, the chart first when the library has its
-                                                     song; each file once)
+table missing <URL> -L library [-l level] [--md5 MD5]... [--sha256 SHA256]... [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
+                                                     the charts the library lacks (-l: of that level only; --md5,
+                                                     --sha256: of those charts only, named by either hash;
+                                                     --get: download them, each song, then its separate chart,
+                                                     the chart first when the library has its song; each file
+                                                     once)
 table export lr2|bmt <URL> <folder>                  an LR2 custom folder / a beatoraja table cache
 library import <file> -L library [--name NAME] [--reinstall]
                                                      a downloaded file into the library, and the waiting
@@ -545,7 +546,8 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
         "size","charts","title"?,"code"?,"error"?,"at","num"?,"source"?,"mirrored"?}
 link   {"link","state":"file|page|gone|error","host","url"?,"code"?,"error"?}
 got    {"file","name","format","link","errors":[...]}
-done   {"title","md5"?,"state":"added|owned|placed|waiting|page|failed","path"?,"files"?,"link"?,"code"?,"error"?}
+missing {"level","label","title","artist","md5","sha256","url","url_diff"}
+done   {"title","md5"?,"sha256"?,"state":"added|owned|placed|waiting|page|failed","path"?,"files"?,"link"?,"code"?,"error"?}
 refused {"refused": host,"code":"status|files|challenge|rate_limited|earlier","status"?,"error"}
 notice {"notice":"third_party","text"}
 config {"config":{<every setting, as in the settings file (Config, above)>}}
@@ -553,7 +555,10 @@ config {"config":{<every setting, as in the settings file (Config, above)>}}
 
 A `done` record's `state` is `install::Done::state` (the first four are
 what `install::got` counts as brought in or there already); its `md5` is
-the chart's it was for (`table missing --get`; `library install --md5`).
+the chart's it was for (`table missing --get`; `library install --md5`),
+else its `sha256` (`table missing --get` of a table that gives no MD5).
+A `missing` record's hash it has not is `""` (a table's entry has one at
+least: one with neither is no chart, and is not read).
 `notice`: what a person is told once a run (with `--json` a record in
 place of the note; `third_party`: third parties' sources are on).
 
@@ -588,8 +593,9 @@ unpacked at all (`$BMSEEKER_CLI` if set; a development build without it
 uses `bmseeker` on the PATH). What it starts from is the CLI's settings
 (`config show`: the tables to choose from, the downloads folder, whether
 third-party sources are on in the settings file); the charts chosen in a
-table are downloaded by one run of `table missing --get --md5 …` (the
-library's order and batch). A host that refused BMSeeker (a `refused` record) is noted
+table are downloaded by one run of `table missing --get --md5 …` (each
+named by its MD5, else its SHA-256: `--sha256`; the library's order and
+batch). A host that refused BMSeeker (a `refused` record) is noted
 in the log and skipped by every later run while the window is open
 (`--skip-host`). Turning third-party sources on asks first, once (the
 CLI's `third_party` notice is then not repeated in the log); the OK is
