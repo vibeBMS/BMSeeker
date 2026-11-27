@@ -43,6 +43,8 @@ func main() {
 		a.connect()
 		a.readSettings()
 	})
+	// the CLI's downloads end with the window
+	mygo.App.OnQuit(stopCLIs)
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}

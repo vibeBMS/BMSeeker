@@ -96,6 +96,9 @@ func awaitLines(start func(each js.Value) js.Value, onLine func(kind, text strin
 	}
 }
 
+// stopCLIs: a page's commands end with the page.
+func stopCLIs() {}
+
 // runCLI runs `bmseeker --json args...` in the page, stdin what it reads
 // for "-": each record it writes goes to onRecord and each note to onNote,
 // as they come; then it returns how the command ended.

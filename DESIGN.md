@@ -619,7 +619,10 @@ run of `table missing --get --chosen -`, their hashes on its stdin (each
 named by its MD5, else its SHA-256; the library's order and batch; a
 command line could not hold thousands): the log says each chart's last
 record with its place in the run, and a chart leaves the list when that
-record's `have` says the library has it. A host that refused BMSeeker (a `refused` record) is noted
+record's `have` says the library has it. A CLI that ends otherwise than
+by its own codes 1 and 2 (a signal, a crash) is told as that, with what
+it said last; a line longer than the reader takes (16 MiB) ends the run.
+The window ends the CLI runs going on when it quits. A host that refused BMSeeker (a `refused` record) is noted
 in the log and skipped by every later run while the window is open
 (`--skip-host`). Turning third-party sources on asks first, once (the
 CLI's `third_party` notice is then not repeated in the log; when the

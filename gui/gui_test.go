@@ -351,6 +351,66 @@ func TestManyChartsOneCommandLine(t *testing.T) {
 	}
 }
 
+// A CLI that dies in a run is told as that (how it ended, its last note),
+// not as its last note; what it said came in before stays done.
+func TestTheCLIDiesInARun(t *testing.T) {
+	a := fakeApp(t)
+	md5 := strings.Repeat("a", 32)
+	fakeCLI(t, `#!/bin/sh
+echo "2 of 2 charts missing" >&2
+echo '{"title":"A","md5":"`+md5+`","state":"added","path":"/lib/A","have":true}'
+kill -9 $$
+`)
+	a.missing = []missing{{Title: "A", MD5: md5}, {Title: "B", MD5: strings.Repeat("b", 32)}}
+	a.download(a.missing)
+	until(t, a, func() bool { return len(a.busy) == 0 })
+	joined := strings.Join(a.log, "\n")
+	if len(a.missing) != 1 || !strings.Contains(joined, "Downloading: the CLI stopped (signal: killed); it last said: 2 of 2 charts missing") {
+		t.Fatalf("missing %v, log %q", a.missing, joined)
+	}
+}
+
+// A line too long to read ends the run with an error, not a job that
+// never ends.
+func TestALineTooLong(t *testing.T) {
+	fakeCLI(t, "#!/bin/sh\nexec head -c 17000000 /dev/zero\n")
+	done := make(chan error, 1)
+	go func() { done <- runCLI([]string{"config", "show"}, "", nil, nil) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "too long to read") {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the run did not end")
+	}
+}
+
+// The window quitting ends the CLI's runs.
+func TestQuittingEndsTheCLI(t *testing.T) {
+	fakeCLI(t, "#!/bin/sh\nexec sleep 60\n")
+	done := make(chan error, 1)
+	go func() { done <- runCLI([]string{"table", "missing"}, "", nil, nil) }()
+	for i := 0; i < 500; i++ {
+		running.Lock()
+		n := len(running.cmds)
+		running.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stopCLIs()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "killed") {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run did not end")
+	}
+}
+
 // Settings that could not be read are said, and read again when a job
 // starts; what they say of the downloads folder is taken as the CLI takes
 // it.
