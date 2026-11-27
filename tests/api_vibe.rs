@@ -135,6 +135,8 @@ use bmseeker::testkit::tar_gz as _;
 #[cfg(feature = "testkit")]
 use bmseeker::testkit::zip as _;
 #[cfg(feature = "testkit")]
+use bmseeker::testkit::SIZELESS_RAR as _;
+#[cfg(feature = "testkit")]
 use bmseeker::testkit::SONG_RAR as _;
 use bmseeker::unpack::archive_folder as _;
 use bmseeker::unpack::is_archive as _;
