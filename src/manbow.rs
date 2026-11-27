@@ -7,12 +7,15 @@
 //! then ogg over wav, a file over a folder, the latest full package over
 //! patches for earlier downloads), which are separate add-on archives
 //! (added charts, a BGA on its own), and which are mirrors of the same
-//! archive (kept as fallbacks).
+//! archive (kept as fallbacks). The event mirror's list of events and
+//! their indexes of works: [`mirror`].
 
 use crate::text::pattern::Pattern;
 use crate::text::unescape;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+
+pub mod mirror;
 
 // an event's works (the command-line tool's)
 #[cfg(feature = "cli")]

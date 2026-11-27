@@ -35,8 +35,9 @@ testkit = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-# (the command-line tool's works.json keeps its keys in order: `cli`)
-serde_json = "1"
+# (the command-line tool's works.json keeps its keys in order: `cli`; an
+# event list's entries are read one by one, as they are: raw_value)
+serde_json = { version = "1", features = ["raw_value"] }
 clap = { version = "4", features = ["derive"], optional = true }
 log = "0.4"
 encoding_rs = "0.8"

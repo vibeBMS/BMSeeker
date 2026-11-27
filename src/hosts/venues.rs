@@ -6,6 +6,7 @@
 
 use super::{get_then, Host, Link, Resolved, Target, Want};
 use crate::config::Config;
+use crate::manbow::mirror;
 use crate::net::{Answer, BoxTask, Kind, Next, Request, Task};
 
 /// A work on manbow (`event.cgi?action=More_def&num=N&event=E`).
@@ -32,10 +33,7 @@ impl Host for Manbow {
             link: link.url.clone(),
             catalog: config.mirror_catalog.clone(),
             state: match index {
-                Some((event, num)) => State::Catalog {
-                    event: event.into(),
-                    num: num.into(),
-                },
+                Some((event, num)) => State::Catalog { event, num },
                 None => State::Venue,
             },
         })
@@ -45,12 +43,12 @@ impl Host for Manbow {
 enum State {
     /// The mirror's list of events, for work `num` of manbow event `event`.
     Catalog {
-        event: u64,
-        num: u64,
+        event: u32,
+        num: u32,
     },
     /// An event's index, for its work `num`.
     Index {
-        num: u64,
+        num: u32,
     },
     /// The work's page on the venue.
     Venue,
@@ -85,7 +83,7 @@ impl Task for ManbowWork {
         let body = answer.as_deref().unwrap_or_default();
         match std::mem::replace(&mut self.state, State::Done) {
             State::Catalog { event, num } => {
-                let events: Vec<Event> = crate::json::objects_of(body);
+                let events = mirror::parse_catalog(body).unwrap_or_default();
                 let index = events
                     .into_iter()
                     .find(|e| e.venue == Some(event) && !e.index.is_empty());
@@ -98,8 +96,8 @@ impl Task for ManbowWork {
                 }
             }
             State::Index { num } => {
-                let works: Vec<Work> = crate::json::objects_of(body);
-                let work = works.into_iter().find(|w| w.num == Some(num));
+                let works = mirror::parse_index(body).unwrap_or_default();
+                let work = works.into_iter().find(|w| w.num == num);
                 let Some(work) = work else {
                     return self.venue();
                 };
@@ -133,39 +131,6 @@ impl Task for ManbowWork {
             State::Done => Next::Done(Resolved::Failed("nothing asked".into())),
         }
     }
-}
-
-/// An event of the mirror's list.
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct Event {
-    #[serde(deserialize_with = "crate::json::number")]
-    venue: Option<u64>,
-    #[serde(deserialize_with = "crate::json::text")]
-    index: String,
-}
-
-/// A work of an event's index: its mirrored files, its links as checked.
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct Work {
-    #[serde(deserialize_with = "crate::json::number")]
-    num: Option<u64>,
-    #[serde(deserialize_with = "crate::json::objects")]
-    files: Vec<File>,
-    #[serde(deserialize_with = "crate::json::texts")]
-    links: Vec<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct File {
-    #[serde(deserialize_with = "crate::json::text")]
-    name: String,
-    #[serde(deserialize_with = "crate::json::text")]
-    url: String,
-    #[serde(deserialize_with = "crate::json::text")]
-    original: String,
 }
 
 /// A venue work's manifest: its resources (links).
@@ -354,8 +319,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.name.as_deref(), Some("_tmp_.._song.zip"));
-        // the mirror out of reach, or the work not in it: the venue page
+        // the mirror out of reach, the work not in it, or an index one of
+        // whose works does not read: the venue page
         assert!(resolve(LINK, &[(LINK, PAGE)]).unwrap().url.contains("id=O"));
+        let bad: &[u8] =
+            br#"[{"num":94,"files":[{"name":"094.zip","url":"https://gh/094.zip"}]},{"num":"95"}]"#;
+        let t = resolve(
+            LINK,
+            &[
+                (CATALOG, catalog),
+                ("https://raw.example/boftt/index.json", bad),
+                (LINK, PAGE),
+            ],
+        );
+        assert!(t.unwrap().url.contains("id=O"));
         let t = resolve(
             LINK,
             &[

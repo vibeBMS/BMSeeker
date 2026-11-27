@@ -127,41 +127,6 @@ where
     d.deserialize_any(Any(R(PhantomData)))
 }
 
-/// A list's strings (what else it holds passed by; no list: none).
-pub(crate) fn texts<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-    struct Text(Option<String>);
-    impl<'de> Deserialize<'de> for Text {
-        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
-            struct R;
-            impl Read<'_> for R {
-                type Out = Text;
-                fn none(self) -> Text {
-                    Text(None)
-                }
-                fn text(self, v: String) -> Text {
-                    Text(Some(v))
-                }
-            }
-            d.deserialize_any(Any(R))
-        }
-    }
-    struct R;
-    impl<'de> Read<'de> for R {
-        type Out = Vec<String>;
-        fn none(self) -> Vec<String> {
-            Vec::new()
-        }
-        fn list<A: SeqAccess<'de>>(self, mut a: A) -> Result<Vec<String>, A::Error> {
-            let mut out = Vec::new();
-            while let Some(t) = a.next_element::<Text>()? {
-                out.extend(t.0);
-            }
-            Ok(out)
-        }
-    }
-    d.deserialize_any(Any(R))
-}
-
 /// An object as `T` (None: another value).
 pub(crate) struct Object<T>(pub(crate) Option<T>);
 
@@ -278,8 +243,6 @@ mod tests {
         bms: Inner,
         #[serde(deserialize_with = "objects")]
         files: Vec<Inner>,
-        #[serde(deserialize_with = "texts")]
-        links: Vec<String>,
     }
 
     /// The fields looked for, of the types looked for; anything else is
@@ -288,17 +251,15 @@ mod tests {
     fn the_fields_looked_for() {
         let w: Work = object_of(
             br#"{"title":"a","num":7,"x":[{"y":[1,{}]}],"bms":{"id":"b","z":null},
-                "files":[1,{"id":"c"},"s",[{"id":"no"}],{"id":5},null],"links":["l",2,["m"],"n"]}"#,
+                "files":[1,{"id":"c"},"s",[{"id":"no"}],{"id":5},null]}"#,
         );
         assert_eq!(w.title, "a");
         assert_eq!(w.num, Some(7));
         assert_eq!(w.bms.id, "b");
         let ids: Vec<&str> = w.files.iter().map(|f| &*f.id).collect();
         assert_eq!(ids, ["c", ""]);
-        assert_eq!(w.links, ["l", "n"]);
-        let odd: Work = object_of(
-            br#"{"title":1,"num":"7","bms":[{"id":"b"}],"files":{"id":"c"},"links":"l"}"#,
-        );
+        let odd: Work =
+            object_of(br#"{"title":1,"num":"7","bms":[{"id":"b"}],"files":{"id":"c"}}"#);
         assert_eq!(odd, Work::default());
         let odd: Work = object_of(br#"{"title":null,"num":-1,"bms":null,"files":null}"#);
         assert_eq!(odd, Work::default());
