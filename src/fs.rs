@@ -132,8 +132,10 @@ pub fn file_name(p: &Path) -> String {
 }
 
 /// Whether Windows keeps the file name `name` for a device, whatever
-/// comes after its first dot (`CON`, `nul.txt`, `COM1`, `LPT²`).
-pub(crate) fn device_name(name: &str) -> bool {
+/// comes after its first dot, in any case, spaces before it ignored
+/// (`CON`, `nul.txt`, `Aux .bmp`, `COM1`, `LPT²`, `CONIN$`): opened
+/// there, in any folder, it is the device, not a file.
+pub fn device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
     let stem = stem.to_ascii_uppercase();
     let numbered = |port: &str| {

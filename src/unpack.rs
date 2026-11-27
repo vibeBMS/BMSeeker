@@ -1,8 +1,9 @@
 //! Archives (.zip, .7z, .rar, .lzh, .tar, .tar.gz) unpacked: into a
-//! [`Store`] (a disk, a player's files: [`unpack`]) or handed over member
-//! by member ([`unpack_bytes`]). Members by their path (made safe:
-//! `safe_rel`), within a budget (an archive can claim, or expand to,
-//! anything), with the archive's file times.
+//! [`Store`] (a disk, a player's files: [`unpack`]), handed over member
+//! by member ([`unpack_bytes`]), or read for the members a [`Sink`] wants
+//! ([`read`]). Members by their path (made safe: [`member_path`]), within
+//! a budget (an archive can claim, or expand to, anything), with the
+//! archive's file times.
 
 use crate::fs::{safe_part, ReadSeek, Store};
 // (an app names them here too)
@@ -63,13 +64,15 @@ const TAR_NAME: u64 = 1 << 20;
 
 /// What unpacking fails with.
 #[derive(Debug, PartialEq)]
-pub(crate) enum Error {
+pub enum Error {
     /// More than the budget (bytes) unpacked.
     TooLarge(u64),
     /// More files than this.
     TooMany(usize),
     /// Stopped by whoever waits for it.
     Cancelled,
+    /// Anything else: an archive that cannot be read, a member that
+    /// cannot be written.
     Other(String),
 }
 
@@ -186,19 +189,45 @@ pub fn archive_stem(name: &str) -> Option<&str> {
     })
 }
 
-/// Whether a file is an archive by its name.
-pub(crate) fn is_archive(p: &Path) -> bool {
+/// Whether a file is an archive by its name ([`EXTS`], in any case;
+/// `.tar.gz` is not a name, `x.gz` no archive's).
+pub fn is_archive(p: &Path) -> bool {
     p.file_name()
         .is_some_and(|n| archive_stem(&n.to_string_lossy()).is_some())
 }
 
+/// The folder an archive called `name` is unpacked into beside it when it
+/// is found in another ([`unpack`]): its [`archive_stem`] as one name every
+/// file system holds (as each part of [`member_path`]), `archive` when
+/// nothing is left of it (`...zip`, whose stem is `..`; a name with no
+/// archive extension).
+pub fn archive_folder(name: &str) -> String {
+    archive_stem(name)
+        .and_then(safe_part)
+        .unwrap_or_else(|| "archive".into())
+}
+
 /// A file unpacked: its path below the folder, size, and time in the
-/// archive (seconds since 1970; None: not given).
+/// archive (seconds since 1970; None: not given). (Offered to a [`Sink`]:
+/// the size the archive gives it.)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Member {
     pub rel: PathBuf,
     pub size: u64,
     pub mtime: Option<i64>,
+}
+
+/// A member's name as stored in an archive (bytes: UTF-8, else Shift_JIS
+/// or EUC-KR, as BMS packs have) as the path it is unpacked to: relative,
+/// `/` and `\` both separators, no `.`, `..` or empty part, no part with
+/// a `:` (a drive's, or a Windows stream's), each part a name every file
+/// system holds (characters Windows refuses as `_`, no dot or space at its
+/// end, `_` before a device's name: `CON`, `nul.wav`). None: the member is
+/// not unpacked (nothing of its name is left, or it is more than 32
+/// folders deep). A 7z's and a RAR's names are Unicode already: they are
+/// made safe the same way, from their text.
+pub fn member_path(raw: &[u8]) -> Option<PathBuf> {
+    safe_rel(&crate::text::decode_text(raw))
 }
 
 /// `name` from an archive as a relative path that cannot leave its folder,
@@ -224,6 +253,8 @@ enum Stopped {
     TooLarge,
     TooMany,
     Cancelled,
+    /// The sink has what it wants ([`Take::Stop`]).
+    Ended,
 }
 
 /// What an unpacking may still take, and who may stop it.
@@ -261,13 +292,27 @@ impl<W: Write> Write for Capped<'_, W> {
     }
 }
 
-/// Where members go.
-trait Sink {
-    /// Somewhere to write the member `rel` to.
-    fn open(&mut self, rel: &Path, mtime: Option<i64>) -> Result<Box<dyn Write + '_>, String>;
-    /// The member written in full.
+/// What a [`Sink`] does with a member it is offered.
+pub enum Take<'a> {
+    /// Its bytes written here (within what is left of the budget).
+    Write(Box<dyn Write + 'a>),
+    /// Passed by: not written ([`read`] says what that costs).
+    Skip,
+    /// Nothing more read: the reading ends, as if the archive did.
+    Stop,
+}
+
+/// Where members go, asked of each in the archive's order.
+pub trait Sink {
+    /// What to do with the member `m`: its path ([`member_path`]), its
+    /// time, and its size as the archive gives it (0: not given; it may
+    /// lie: what is written is capped by the budget, not by this). An
+    /// error ends the reading with it.
+    fn open(&mut self, m: &Member) -> Result<Take<'_>, String>;
+    /// The member written in full: `m.size` is what was.
     fn close(&mut self, m: Member);
-    /// The member could not be written: what came of it goes.
+    /// The member could not be written in full (too large, or the archive
+    /// is damaged): what came of it goes. The reading ends with an error.
     fn drop_partial(&mut self, rel: &Path);
 }
 
@@ -450,29 +495,39 @@ fn members(
     sink: &mut dyn Sink,
 ) -> Result<(), Error> {
     let why = Cell::new(None);
-    each_member(r, format, limit, left, sink, &why).map_err(|e| match why.get() {
-        Some(Stopped::TooLarge) => Error::TooLarge(limit),
-        Some(Stopped::TooMany) => Error::TooMany(MEMBERS),
-        Some(Stopped::Cancelled) => Error::Cancelled,
-        None => Error::Other(e),
-    })
+    match each_member(r, format, limit, left, sink, &why) {
+        Ok(()) => Ok(()),
+        Err(e) => match why.get() {
+            Some(Stopped::TooLarge) => Err(Error::TooLarge(limit)),
+            Some(Stopped::TooMany) => Err(Error::TooMany(MEMBERS)),
+            Some(Stopped::Cancelled) => Err(Error::Cancelled),
+            Some(Stopped::Ended) => Ok(()),
+            None => Err(Error::Other(e)),
+        },
+    }
 }
 
-/// One member through the cap: written to `sink` as `to` (its path and
-/// time), kept or dropped; with no `to`, passed by (what an archive must
-/// decode to reach the next member counts as what it writes does).
+/// One member through the cap: `m` (its path, time and the size it is
+/// said to have; none: a name not kept) offered to `sink`, and written
+/// where it says, or passed by. `decoded`: the archive decodes what is
+/// passed by all the same (to reach the next member), which counts as
+/// what it writes does; else `copy` is not called for it.
 fn put(
     left: &mut Left,
     why: &Cell<Option<Stopped>>,
     sink: &mut dyn Sink,
-    to: Option<(PathBuf, Option<i64>)>,
+    m: Option<Member>,
+    decoded: bool,
     copy: &mut dyn FnMut(&mut dyn Write) -> Result<u64, String>,
 ) -> Result<(), String> {
     if left.stop.is_some_and(|p| p.cancelled()) {
         why.set(Some(Stopped::Cancelled));
         return Err(CANCELLED.into());
     }
-    let Some((rel, mtime)) = to else {
+    let passed = |left: &mut Left, copy: &mut dyn FnMut(&mut dyn Write) -> Result<u64, String>| {
+        if !decoded {
+            return Ok(());
+        }
         let mut capped = Capped {
             w: io::sink(),
             left: left.bytes,
@@ -481,7 +536,10 @@ fn put(
         };
         copy(&mut capped)?;
         left.bytes = capped.left;
-        return Ok(());
+        Ok(())
+    };
+    let Some(m) = m else {
+        return passed(left, copy);
     };
     if left.members == 0 {
         why.set(Some(Stopped::TooMany));
@@ -489,7 +547,14 @@ fn put(
     }
     left.members -= 1;
     let r = {
-        let mut w = sink.open(&rel, mtime)?;
+        let mut w = match sink.open(&m)? {
+            Take::Write(w) => w,
+            Take::Skip => return passed(left, copy),
+            Take::Stop => {
+                why.set(Some(Stopped::Ended));
+                return Err("stopped".into());
+            }
+        };
         let mut capped = Capped {
             w: &mut w,
             left: left.bytes,
@@ -503,11 +568,11 @@ fn put(
     match r {
         Ok((size, bytes)) => {
             left.bytes = bytes;
-            sink.close(Member { rel, size, mtime });
+            sink.close(Member { size, ..m });
             Ok(())
         }
         Err(e) => {
-            sink.drop_partial(&rel);
+            sink.drop_partial(&m.rel);
             Err(e)
         }
     }
@@ -536,12 +601,16 @@ fn each_member(
                 if e.is_dir() || e.is_symlink() {
                     continue;
                 }
-                // names in Shift_JIS / EUC-KR as BMS packs often have
-                let Some(rel) = safe_rel(&crate::text::decode_text(e.name_raw())) else {
+                let Some(rel) = member_path(e.name_raw()) else {
                     continue;
                 };
-                let mtime = zip_time(&e);
-                put(left, why, sink, Some((rel, mtime)), &mut |w| {
+                let m = Member {
+                    rel,
+                    size: e.size(),
+                    mtime: zip_time(&e),
+                };
+                // (read where it is: one passed by is not decompressed)
+                put(left, why, sink, Some(m), false, &mut |w| {
                     std::io::copy(&mut e, w).map_err(|e| e.to_string())
                 })?;
             }
@@ -562,28 +631,31 @@ fn each_member(
             if SMALL {
                 a.set_thread_count(1);
             }
+            use sevenz_rust2::EntryDecision;
             let mut err = None;
-            a.for_each_entries(|entry, r| {
-                // (stopped: the blocks after this one are not begun)
-                if err.is_some() {
-                    return Ok(false);
-                }
+            a.for_each_entries_with_decision(|entry, r| {
                 if entry.is_directory() {
-                    return Ok(true);
+                    return Ok(EntryDecision::Continue);
                 }
                 let mtime = entry
                     .has_last_modified_date
                     .then(|| nt_time(entry.last_modified_date().into()))
                     .flatten();
-                // (one whose name is not kept is decoded all the same)
-                let to = safe_rel(entry.name()).map(|rel| (rel, mtime));
-                match put(left, why, sink, to, &mut |w| {
+                let m = safe_rel(entry.name()).map(|rel| Member {
+                    rel,
+                    size: entry.size(),
+                    mtime,
+                });
+                // (one passed by is decoded all the same: the reader
+                // drains what is not read, to check it and reach the next)
+                match put(left, why, sink, m, true, &mut |w| {
                     std::io::copy(r, w).map_err(|e| e.to_string())
                 }) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => Ok(EntryDecision::Continue),
                     Err(e) => {
+                        // (the blocks after this one are not begun)
                         err = Some(e);
-                        Ok(false)
+                        Ok(EntryDecision::Stop)
                     }
                 }
             })
@@ -607,14 +679,16 @@ fn each_member(
                     .mtime
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64);
-                // one whose name is not kept: in a solid archive it is
-                // decoded for those after it
-                let to = safe_rel(&name).map(|rel| (rel, mtime));
-                if to.is_none() && !a.is_solid() {
-                    continue;
-                }
-                // capped as it comes (a small archive can expand to anything)
-                put(left, why, sink, to, &mut |w| {
+                let m = safe_rel(&name).map(|rel| Member {
+                    rel,
+                    size: info.unpacked_size.unwrap_or(0),
+                    mtime,
+                });
+                // one passed by: in a solid archive it is decoded for those
+                // after it; capped as it comes (a small archive can expand
+                // to anything)
+                let solid = a.is_solid();
+                put(left, why, sink, m, solid, &mut |w| {
                     a.by_index(i)
                         .and_then(|e| e.copy_to(w))
                         .map_err(|e| format!("{name}: {e}"))
@@ -628,11 +702,14 @@ fn each_member(
                 if !h.is_directory() {
                     let name = lzh_name(h);
                     let mtime = h.parse_last_modified().to_utc().map(|t| t.timestamp());
+                    let size = h.original_size;
                     if let Some(rel) = safe_rel(&name) {
-                        if !a.is_decoder_supported() {
-                            return Err(format!("{name}: a compression not supported"));
-                        }
-                        put(left, why, sink, Some((rel, mtime)), &mut |w| {
+                        let m = Member { rel, size, mtime };
+                        // (one passed by: its bytes are read past, not decoded)
+                        put(left, why, sink, Some(m), false, &mut |w| {
+                            if !a.is_decoder_supported() {
+                                return Err(format!("{name}: a compression not supported"));
+                            }
                             let n = std::io::copy(&mut a, w).map_err(|e| e.to_string())?;
                             a.crc_check().map_err(|e| format!("{name}: {e}"))?;
                             Ok(n)
@@ -718,10 +795,12 @@ fn each_member(
                 if raw.ends_with(b"/") {
                     continue;
                 }
-                let Some(rel) = safe_rel(&crate::text::decode_text(raw)) else {
+                let Some(rel) = member_path(raw) else {
                     continue;
                 };
-                put(left, why, sink, Some((rel, mtime)), &mut |w| {
+                let m = Member { rel, size, mtime };
+                // (one passed by is read past: a .tar.gz's decompressed)
+                put(left, why, sink, Some(m), false, &mut |w| {
                     std::io::copy(&mut e, w).map_err(|e| e.to_string())
                 })?;
             }
@@ -851,7 +930,8 @@ impl<'a> Into<'a> {
 }
 
 impl Sink for Into<'_> {
-    fn open(&mut self, rel: &Path, mtime: Option<i64>) -> Result<Box<dyn Write + '_>, String> {
+    fn open(&mut self, m: &Member) -> Result<Take<'_>, String> {
+        let rel = &m.rel;
         let p = self.dest.join(rel);
         // a path met before (a tar's file appended again, names alike once
         // made safe, or but for their case on a disk that does not tell
@@ -863,7 +943,8 @@ impl Sink for Into<'_> {
             }
         }
         self.store
-            .create(&p, mtime)
+            .create(&p, m.mtime)
+            .map(Take::Write)
             .map_err(|e| format!("{}: {e}", p.display()))
     }
     fn close(&mut self, m: Member) {
@@ -932,10 +1013,7 @@ pub(crate) fn unpack_from(
         let at = dest.join(&out[i].rel);
         let rel = &out[i].rel;
         // (one folder's name, whatever the stem: `...zip`'s is `..`)
-        let stem = (rel.file_name().map(|n| n.to_string_lossy()))
-            .and_then(|n| archive_stem(&n).and_then(safe_part))
-            .unwrap_or_else(|| "archive".into());
-        let into = rel.with_file_name(stem);
+        let into = rel.with_file_name(archive_folder(&crate::fs::file_name(rel)));
         let sub = dest.join(&into);
         // (a folder of its own, unless the archive has one of that name)
         let fresh = store.read_dir(&sub).is_err() && store.stamp(&sub).is_none();
@@ -982,9 +1060,9 @@ struct Handed<F> {
 }
 
 impl<F: FnMut(PathBuf, Vec<u8>)> Sink for Handed<F> {
-    fn open(&mut self, _: &Path, _: Option<i64>) -> Result<Box<dyn Write + '_>, String> {
+    fn open(&mut self, _: &Member) -> Result<Take<'_>, String> {
         self.buf.clear();
-        Ok(Box::new(&mut self.buf))
+        Ok(Take::Write(Box::new(&mut self.buf)))
     }
     fn close(&mut self, m: Member) {
         (self.put)(m.rel, std::mem::take(&mut self.buf));
@@ -1013,19 +1091,39 @@ fn unpack_within(
         put,
         n: 0,
     };
+    read(Box::new(Cursor::new(bytes)), format, limit, &mut sink)?;
+    Ok(sink.n)
+}
+
+/// Read the archive `r` of `format` ([`sniff`] its first [`HEAD`] bytes)
+/// into `sink`, which is asked of each member in the archive's order
+/// (files only: no folder, no link) and writes it, passes it by, or ends
+/// the reading ([`Take`]); nothing is written anywhere else. An archive in
+/// it is a member like any other (not read). Within what [`unpack`] keeps
+/// to: at most `budget` bytes decoded in all, at most 250,000 members
+/// offered (a zip whose directory lists more than twice as many is refused
+/// before it is read), paths of 32 folders at most, a zip refused when a
+/// local header differs from its central directory, a 7z's decoder within
+/// its bound of memory.
+///
+/// What a member passed by costs: in a zip, an LZH and a tar, nothing is
+/// decoded (a zip's is not read at all; an LZH's and a tar's bytes are
+/// read past, a .tar.gz's decompressed, which counts against twice the
+/// budget); in a 7z, and in a solid RAR, it is decoded all the same (each
+/// member is decoded from those before it) and counts against the budget;
+/// in a RAR that is not solid, nothing.
+pub fn read(
+    r: Box<dyn ReadSeek + Send>,
+    format: Format,
+    budget: u64,
+    sink: &mut dyn Sink,
+) -> Result<(), Error> {
     let mut left = Left {
-        bytes: limit,
+        bytes: budget,
         members: MEMBERS,
         stop: None,
     };
-    members(
-        Box::new(Cursor::new(bytes)),
-        format,
-        limit,
-        &mut left,
-        &mut sink,
-    )?;
-    Ok(sink.n)
+    members(r, format, budget, &mut left, sink)
 }
 
 #[cfg(test)]
@@ -1858,5 +1956,289 @@ mod tests {
             Error::TooLarge(4 << 20).to_string(),
             "larger than 4 MB unpacked"
         );
+    }
+
+    /// A member's raw name as the path it is unpacked to, or none.
+    #[test]
+    fn member_paths() {
+        let sjis: &[u8] = &[b's', b'/', 0x83, 0x5C, b'.', b'b', b'm', b's'];
+        let euc: &[u8] = &[b's', b'\\', 0xB0, 0xEE, b'.', b'o', b'g', b'g'];
+        for (raw, path) in [
+            // (`ソ` ends in the byte of `\`: decoded before it is split)
+            (sjis, Some("s/ソ.bms")),
+            (euc, Some("s/곡.ogg")),
+            ("曲/a.bms".as_bytes(), Some("曲/a.bms")),
+            (b"song\\bga\\a.bmp", Some("song/bga/a.bmp")),
+            (b"../../etc/passwd", Some("etc/passwd")),
+            (b"song/../a.bms", Some("song/a.bms")),
+            (b"/abs/./x.wav", Some("abs/x.wav")),
+            (b"C:\\Windows\\x.dll", Some("Windows/x.dll")),
+            (b"C:x.bms", None),
+            (b"a/x.bms:stream", Some("a")),
+            (b"a/CON", Some("a/_CON")),
+            (b"nul.wav", Some("_nul.wav")),
+            (b"COM1/lpt9 .bmp", Some("_COM1/_lpt9 .bmp")),
+            (b"console.wav", Some("console.wav")),
+            (b"song ./a.bms. . ", Some("song/a.bms")),
+            (b"a/x?y*.wav", Some("a/x_y_.wav")),
+            (b"", None),
+            (b"..", None),
+            (b"/", None),
+            (b" . /.", None),
+        ] {
+            let got = member_path(raw);
+            assert_eq!(got, path.map(PathBuf::from), "{raw:?}");
+        }
+        let deep = |folders: usize| ("d/".repeat(folders) + "a.bms").into_bytes();
+        assert!(member_path(&deep(32)).is_some());
+        assert!(member_path(&deep(33)).is_none());
+        // the folder a nested archive goes into
+        for (name, folder) in [
+            ("Song.tar.gz", "Song"),
+            ("Song..zip", "Song"),
+            ("CON.7z", "_CON"),
+            ("...zip", "archive"),
+            ("notes.txt", "archive"),
+        ] {
+            assert_eq!(archive_folder(name), folder, "{name}");
+        }
+        assert!(is_archive(Path::new("a/Song.LZH")) && !is_archive(Path::new("a.gz")));
+    }
+
+    /// A sink that takes the first chart, passes the rest by and stops at
+    /// the member after it, in memory or in a folder; what it was asked.
+    #[derive(Default)]
+    struct FirstChart {
+        dir: Option<PathBuf>,
+        asked: Vec<PathBuf>,
+        buf: Vec<u8>,
+        took: Vec<(Member, Vec<u8>)>,
+        dropped: Vec<PathBuf>,
+    }
+
+    impl Sink for FirstChart {
+        fn open(&mut self, m: &Member) -> Result<Take<'_>, String> {
+            self.asked.push(m.rel.clone());
+            if !self.took.is_empty() {
+                return Ok(Take::Stop);
+            }
+            if m.rel.extension().is_none_or(|e| e != "bms") {
+                return Ok(Take::Skip);
+            }
+            self.buf.clear();
+            Ok(Take::Write(match &self.dir {
+                Some(d) => {
+                    let p = d.join(&m.rel);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    Box::new(std::fs::File::create(p).unwrap())
+                }
+                None => Box::new(&mut self.buf),
+            }))
+        }
+        fn close(&mut self, m: Member) {
+            self.took.push((m, std::mem::take(&mut self.buf)));
+        }
+        fn drop_partial(&mut self, rel: &Path) {
+            self.dropped.push(rel.to_path_buf());
+            if let Some(d) = &self.dir {
+                let _ = std::fs::remove_file(d.join(rel));
+            }
+        }
+    }
+
+    /// `bytes` read into `sink` within `budget`.
+    fn read_into(bytes: &[u8], budget: u64, sink: &mut dyn Sink) -> Result<(), Error> {
+        let format = sniff(bytes).unwrap();
+        read(Box::new(Cursor::new(bytes.to_vec())), format, budget, sink)
+    }
+
+    /// In every format: the first chart taken, what came before it passed
+    /// by, nothing asked past the member it stopped at.
+    #[test]
+    fn read_the_first_chart() {
+        let files: [(&str, &[u8]); 4] = [
+            ("song/01.ogg", b"ogg"),
+            ("song/a.bms", b"#TITLE A"),
+            ("song/b.bms", b"#TITLE B"),
+            ("song/c.bms", b"#TITLE C"),
+        ];
+        let asked = ["song/01.ogg", "song/a.bms", "song/b.bms"].map(PathBuf::from);
+        use crate::testkit::{tar, tar_gz, SONG_RAR};
+        for (name, bytes) in [
+            ("zip", zip(&files)),
+            ("tar", tar(&files)),
+            ("tar.gz", tar_gz(&files)),
+        ] {
+            let mut sink = FirstChart::default();
+            read_into(&bytes, BUDGET, &mut sink).unwrap();
+            assert_eq!(sink.asked, asked, "{name}");
+            let (m, b) = &sink.took[0];
+            assert_eq!((&m.rel, m.size, &b[..]), (&asked[1], 8, &b"#TITLE A"[..]));
+            assert_eq!(sink.took.len(), 1, "{name}");
+        }
+        // 7z, RAR (solid: `x:y` not offered), LZH
+        for (name, bytes, asked) in [
+            ("7z", &SEVEN[..], &["song/01.ogg", "song/a.bms"][..]),
+            ("rar", &SONG_RAR[..], &["song/a.bms", "song/01.ogg"]),
+            ("solid rar", &SOLID[..], &["a.bms", "b.bms"]),
+            ("lzh", &LZH[..], &["song/a.bms", "song/ソ.ogg"]),
+        ] {
+            let mut sink = FirstChart::default();
+            read_into(bytes, BUDGET, &mut sink).unwrap();
+            let asked: Vec<PathBuf> = asked.iter().map(PathBuf::from).collect();
+            assert_eq!(sink.asked, asked, "{name}");
+            assert!(sink.took[0].0.rel.ends_with("a.bms"), "{name}");
+            assert_eq!(sink.took.len(), 1, "{name}");
+            assert!(sink.took[0].1.starts_with(b"#TITLE A"), "{name}");
+        }
+    }
+
+    /// A zip's member passed by is not read: one that is damaged (its
+    /// bytes not what its checksum says) or larger than the budget costs
+    /// nothing; taken, it fails, and what came of it goes.
+    #[test]
+    fn a_zip_member_passed_by_is_not_read() {
+        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        z.start_file("song/x.wav", stored).unwrap();
+        z.write_all(b"RIFFxxxx").unwrap();
+        z.start_file("song/big.wav", stored).unwrap();
+        z.write_all(&[0; 64 << 10]).unwrap();
+        z.start_file("song/a.bms", stored).unwrap();
+        z.write_all(b"#TITLE A").unwrap();
+        let z = z.finish().unwrap().into_inner();
+        let z = renamed(&z, b"RIFFxxxx", b"RIFFyyyy", true);
+        let mut sink = FirstChart::default();
+        read_into(&z, 1 << 10, &mut sink).unwrap();
+        assert_eq!(sink.took[0].1, b"#TITLE A");
+        // all of it taken
+        let mut got = Vec::new();
+        let e = unpack_within(z, BUDGET, |p, _| got.push(p)).unwrap_err();
+        assert!(e.contains("checksum"), "{e}");
+        assert!(got.is_empty());
+    }
+
+    /// What a 7z decodes for a member passed by counts against the budget
+    /// (its reader decodes it all the same): 11 bytes in all.
+    #[test]
+    fn a_7z_member_passed_by_is_decoded() {
+        struct Nothing;
+        impl Sink for Nothing {
+            fn open(&mut self, _: &Member) -> Result<Take<'_>, String> {
+                Ok(Take::Skip)
+            }
+            fn close(&mut self, _: Member) {}
+            fn drop_partial(&mut self, _: &Path) {}
+        }
+        assert_eq!(read_into(&SEVEN, 11, &mut Nothing), Ok(()));
+        assert_eq!(
+            read_into(&SEVEN, 10, &mut Nothing),
+            Err(Error::TooLarge(10))
+        );
+        // a zip's and a tar's cost nothing
+        let files: [(&str, &[u8]); 1] = [("big.bin", &[0; 64 << 10])];
+        assert_eq!(read_into(&zip(&files), 10, &mut Nothing), Ok(()));
+        let t = crate::testkit::tar(&files);
+        assert_eq!(read_into(&t, 10, &mut Nothing), Ok(()));
+    }
+
+    /// The limits of unpacking stop a hostile archive read: too many
+    /// entries in a zip's directory (before any is offered), more bytes
+    /// than the budget (what was begun goes), a local header that differs,
+    /// a 7z's decoder that asks for too much, a tar's name of megabytes.
+    #[test]
+    fn read_within_the_limits() {
+        let names: Vec<String> = (0..66_000).map(|i| format!("{i}")).collect();
+        let files: Vec<(&str, &[u8])> = (names.iter()).map(|n| (n.as_str(), &b""[..])).collect();
+        let mut many = zip(&files);
+        let at = many.windows(4).rposition(|w| w == b"PK\x06\x06").unwrap();
+        for i in [at + 24, at + 32] {
+            many[i..i + 8].copy_from_slice(&600_000u64.to_le_bytes());
+        }
+        let mut sink = FirstChart::default();
+        let e = read_into(&many, BUDGET, &mut sink);
+        assert_eq!(e, Err(Error::TooMany(MEMBERS)));
+        assert!(sink.asked.is_empty());
+
+        let big = vec![0u8; 64 << 10];
+        let z = zip(&[("big.bms", &big[..])]);
+        let mut sink = FirstChart::default();
+        assert_eq!(
+            read_into(&z, 1 << 10, &mut sink),
+            Err(Error::TooLarge(1 << 10))
+        );
+        assert_eq!(sink.dropped, [PathBuf::from("big.bms")]);
+        assert!(sink.took.is_empty());
+
+        let z = crate::testkit::zip(&[("song/a.bms", "#TITLE A"), ("song/b.bms", "#TITLE B")]);
+        let z = renamed(&z, b"song/b.bms", b"song/c.bms", true);
+        let e = read_into(&z, BUDGET, &mut FirstChart::default()).unwrap_err();
+        assert!(e.to_string().contains("local header"), "{e}");
+
+        let large = sevenz_header(&SEVEN, &[93, 0, 16, 0, 0], &[93, 0, 0, 0, 64]);
+        let e = read_into(&large, BUDGET, &mut FirstChart::default()).unwrap_err();
+        assert!(e.to_string().contains("MB of memory"), "{e}");
+
+        let mut t = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::GNULongName);
+        h.set_size(TAR_NAME + 1);
+        h.set_path("././@LongLink").unwrap();
+        h.set_cksum();
+        t.append(&h, &vec![b'x'; TAR_NAME as usize + 1][..])
+            .unwrap();
+        let t = t.into_inner().unwrap();
+        let e = read_into(&t, BUDGET, &mut FirstChart::default()).unwrap_err();
+        assert!(e.to_string().contains("a name longer"), "{e}");
+    }
+
+    /// Read from a file into a folder and stopped: the folder holds what
+    /// the sink wrote, nothing else (no file begun, none of the archive's
+    /// own).
+    #[test]
+    fn read_and_stopped_leaves_no_files() {
+        let d = crate::testkit::tmp("read-stop");
+        let files: [(&str, &[u8]); 3] = [
+            ("song/01.ogg", b"ogg"),
+            ("song/a.bms", b"#TITLE A"),
+            ("song/b.bms", b"#TITLE B"),
+        ];
+        let out = d.join("out");
+        for (name, bytes) in [
+            ("p.zip", zip(&files)),
+            ("p.tar.gz", crate::testkit::tar_gz(&files)),
+            ("p.7z", SEVEN.to_vec()),
+            ("p.rar", SOLID.to_vec()),
+        ] {
+            let a = d.join(name);
+            std::fs::write(&a, &bytes).unwrap();
+            let r = Box::new(io::BufReader::new(std::fs::File::open(&a).unwrap()));
+            let mut sink = FirstChart {
+                dir: Some(out.clone()),
+                ..FirstChart::default()
+            };
+            read(r, sniff(&bytes).unwrap(), BUDGET, &mut sink).unwrap();
+            let rel = &sink.took[0].0.rel;
+            let mut left = Vec::new();
+            let mut dirs = vec![out.clone()];
+            while let Some(dir) = dirs.pop() {
+                for e in std::fs::read_dir(dir).unwrap().flatten() {
+                    match e.file_type().unwrap().is_dir() {
+                        true => dirs.push(e.path()),
+                        false => left.push(e.path()),
+                    }
+                }
+            }
+            assert_eq!(left, [out.join(rel)], "{name}");
+            let names: Vec<_> = std::fs::read_dir(&*d)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect();
+            assert_eq!(names.len(), 2, "{name}: {names:?}");
+            std::fs::remove_dir_all(&out).unwrap();
+            std::fs::remove_file(&a).unwrap();
+        }
     }
 }
