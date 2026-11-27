@@ -13,6 +13,7 @@ GENERATE = os.path.join(TOOLS, "api_vibe.py")
 APP = """\
 use bmseeker::install::job::{Effect, Fed, Unserved};
 use bmseeker::install;
+use bmseeker::links::{self, Kind};
 use bmseeker::library::Library as Lib;
 use bmseeker::testkit::zip;
 pub use bmseeker::placement::Located;
@@ -80,6 +81,11 @@ class Generated(unittest.TestCase):
         self.assertIn("bmseeker::install::job::Unserved {\n            at: _,\n            error: _,", self.out)
         # (an impl's block is no struct's fields)
         self.assertNotIn("Effect { ", self.out)
+
+    def test_a_module_named_in_a_group(self):
+        self.assertIn("use bmseeker::links as _;", self.out)
+        self.assertIn("use bmseeker::links::Kind as _;", self.out)
+        self.assertNotIn("self", self.out)
 
     def test_modules_aliases_and_functions(self):
         self.assertIn("use bmseeker::install::take as _;", self.out)

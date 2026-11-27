@@ -183,7 +183,8 @@ def named(vibe):
         return segs if segs[0] == "bmseeker" else None
 
     def record(segs, f):
-        segs = segs[1:]
+        # (`use a::b::{self, C}` names the module `a::b`)
+        segs = segs[1:-1] if segs[-1] == "self" else segs[1:]
         for k in range(len(segs), 0, -1):
             if "::".join(segs[:k]) in mods:
                 return out[("::".join(segs[:k]), "::".join(segs[k:]))].add(os.path.relpath(f, vibe)) or True

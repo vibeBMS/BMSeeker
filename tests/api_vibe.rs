@@ -42,7 +42,6 @@ use bmseeker::import::Imported::Unpacked as _;
 use bmseeker::import::Imported::Waiting as _;
 use bmseeker::install::got as _;
 use bmseeker::install::job::run_job as _;
-use bmseeker::install::job::Driver as _;
 use bmseeker::install::job::Effect as _;
 use bmseeker::install::job::Effect::Download as _;
 use bmseeker::install::job::Effect::Http as _;
@@ -53,6 +52,7 @@ use bmseeker::install::job::Fed::Http as _;
 use bmseeker::install::job::Fed::Woke as _;
 use bmseeker::install::job::FileLink as _;
 use bmseeker::install::job::Files as _;
+use bmseeker::install::job::Got as _;
 use bmseeker::install::job::Installed as _;
 use bmseeker::install::job::Job as _;
 use bmseeker::install::job::Missed as _;
@@ -80,10 +80,13 @@ use bmseeker::install::Failure::NotTheChart as _;
 use bmseeker::library::Library as _;
 use bmseeker::library::Owned as _;
 use bmseeker::links::Links as _;
-#[cfg(not(target_arch = "wasm32"))]
-use bmseeker::native::fetch_files as _;
-#[cfg(not(target_arch = "wasm32"))]
-use bmseeker::native::Native as _;
+use bmseeker::manbow::mirror as _;
+use bmseeker::manbow::mirror::parse_catalog as _;
+use bmseeker::manbow::mirror::parse_index as _;
+use bmseeker::manbow::mirror::Event as _;
+use bmseeker::manbow::mirror::File as _;
+use bmseeker::manbow::mirror::Work as _;
+use bmseeker::manbow::mirror::MAX_BYTES as _;
 use bmseeker::net::too_large as _;
 use bmseeker::net::Answer as _;
 use bmseeker::net::Kind as _;
@@ -117,6 +120,7 @@ use bmseeker::progress::Stage::Adding as _;
 use bmseeker::progress::Stage::Downloading as _;
 use bmseeker::progress::Stage::Finding as _;
 use bmseeker::progress::Stage::Unpacking as _;
+use bmseeker::progress::Stage::Waiting as _;
 use bmseeker::progress::CANCELLED as _;
 use bmseeker::refusal::Refusals as _;
 use bmseeker::sources::Query as _;
@@ -191,6 +195,7 @@ fn _fields_0(v: bmseeker::config::Config) {
         v,
         bmseeker::config::Config {
             folder_naming: _,
+            local_hosts: _,
             third_party: _,
             user_agent: _,
             ..
@@ -295,7 +300,31 @@ fn _fields_9(v: bmseeker::library::Owned) {
     );
 }
 
-fn _fields_10(v: bmseeker::net::Request) {
+fn _fields_10(v: bmseeker::manbow::mirror::Event) {
+    let _ = matches!(
+        v,
+        bmseeker::manbow::mirror::Event {
+            index: _,
+            tag: _,
+            ..
+        }
+    );
+}
+
+fn _fields_11(v: bmseeker::manbow::mirror::File) {
+    let _ = matches!(
+        v,
+        bmseeker::manbow::mirror::File {
+            name: _,
+            original: _,
+            size: _,
+            url: _,
+            ..
+        }
+    );
+}
+
+fn _fields_12(v: bmseeker::net::Request) {
     let _ = matches!(
         v,
         bmseeker::net::Request::Post {
@@ -306,7 +335,7 @@ fn _fields_10(v: bmseeker::net::Request) {
     );
 }
 
-fn _fields_11(v: bmseeker::sources::Query) {
+fn _fields_13(v: bmseeker::sources::Query) {
     let _ = matches!(
         v,
         bmseeker::sources::Query {
@@ -318,7 +347,7 @@ fn _fields_11(v: bmseeker::sources::Query) {
     );
 }
 
-fn _fields_12(v: bmseeker::table::Course) {
+fn _fields_14(v: bmseeker::table::Course) {
     let _ = matches!(
         v,
         bmseeker::table::Course {
@@ -330,7 +359,7 @@ fn _fields_12(v: bmseeker::table::Course) {
     );
 }
 
-fn _fields_13(v: bmseeker::table::DifficultyTable) {
+fn _fields_15(v: bmseeker::table::DifficultyTable) {
     let _ = matches!(
         v,
         bmseeker::table::DifficultyTable {
@@ -343,7 +372,7 @@ fn _fields_13(v: bmseeker::table::DifficultyTable) {
     );
 }
 
-fn _fields_14(v: bmseeker::table::TableEntry) {
+fn _fields_16(v: bmseeker::table::TableEntry) {
     let _ = matches!(
         v,
         bmseeker::table::TableEntry {
@@ -358,7 +387,7 @@ fn _fields_14(v: bmseeker::table::TableEntry) {
     );
 }
 
-fn _fields_15(v: bmseeker::table::TableHeader) {
+fn _fields_17(v: bmseeker::table::TableHeader) {
     let _ = matches!(
         v,
         bmseeker::table::TableHeader {
@@ -369,7 +398,7 @@ fn _fields_15(v: bmseeker::table::TableHeader) {
     );
 }
 
-fn _fields_16(v: bmseeker::unpack::Limits) {
+fn _fields_18(v: bmseeker::unpack::Limits) {
     let _ = matches!(
         v,
         bmseeker::unpack::Limits {
@@ -380,7 +409,7 @@ fn _fields_16(v: bmseeker::unpack::Limits) {
     );
 }
 
-fn _fields_17(v: bmseeker::unpack::Member) {
+fn _fields_19(v: bmseeker::unpack::Member) {
     let _ = matches!(
         v,
         bmseeker::unpack::Member {
