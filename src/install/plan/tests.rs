@@ -1614,3 +1614,52 @@ fn a_song_the_library_does_not_list_keeps_its_files() {
         }
     }
 }
+
+/// Where names in another case are taken as one (Windows, macOS) but a
+/// volume tells them apart, and the library lists songs' folders spelled
+/// so (`X`, the song's; `x` and `x/Sub`, others'): a download for X
+/// replaces nothing of theirs and puts no chart there.
+#[test]
+fn a_songs_folder_listed_in_another_case_is_anothers() {
+    let m = store(&[
+        ("bms/Pack/X/x.bms", PACK_X),
+        ("bms/Pack/x/y.bms", "#TITLE Y\n#ARTIST beta\n"),
+        ("bms/Pack/x/Sub/s.bms", "#TITLE S\n#ARTIST gamma\n"),
+    ]);
+    let songs: BTreeSet<&Path> = ["bms/Pack/X", "bms/Pack/x", "bms/Pack/x/Sub"]
+        .map(Path::new)
+        .into();
+    let to = |f: &str| Path::new("bms/Pack").join(f);
+    let files = [
+        "X/02.ogg",
+        "X/new.bms",
+        "x/01.ogg",
+        "x/new.bms",
+        "x/Sub/s.ogg",
+        "X/Sub/t.ogg",
+    ];
+    let item = Item {
+        outcome: Outcome::Owned("bms/Pack".into()),
+        moves: files.map(|f| (Path::new("dl/s").join(f), to(f))).into(),
+        over: Over::Newer,
+        within: vec!["bms/Pack/X".into()],
+        others: Vec::new(),
+    };
+    let out = charts_to_songs(&m, &songs, item, Spelling::Case);
+    let [own, waiting] = &out[..] else {
+        panic!("{out:?}")
+    };
+    let moved: Vec<&Path> = own.moves.iter().map(|(_, to)| to.as_path()).collect();
+    assert_eq!(moved, [to("X/02.ogg"), to("X/new.bms")]);
+    assert_eq!(waiting.moves, [("dl/s/x/new.bms".into(), "new.bms".into())]);
+    for (f, covered) in [
+        ("X/02.ogg", true),
+        ("X/a/b.ogg", true),
+        ("x/01.ogg", false),
+        ("x/Sub/s.ogg", false),
+        // (the file system may take it as x/Sub)
+        ("X/Sub/t.ogg", false),
+    ] {
+        assert_eq!(own.covers(&to(f), Spelling::Case), covered, "{f}");
+    }
+}

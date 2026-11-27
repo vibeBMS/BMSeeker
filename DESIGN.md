@@ -349,7 +349,10 @@ then places the separate charts that waited for what came in.
   that path are looked at, not the whole library. On
   Windows a path there spelled in another case, on macOS in another case
   or Unicode form, is that folder's (on other systems it is another
-  folder). Its charts go only into the folders of its song (those, a
+  folder), unless the library lists a song's folder of that spelling
+  apart (a volume set to tell cases apart): then a file of that
+  spelling, or below a folder the library lists so spelled, is that
+  other song's. Its charts go only into the folders of its song (those, a
   table's `org_md5`'s, or those its sounds were found in): one it lays
   out anywhere else (beside them, in the pack's folder) waits as a
   separate chart whose song is not known, but for one in a folder the

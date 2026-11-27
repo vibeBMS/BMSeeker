@@ -151,15 +151,24 @@ impl Item {
     /// Whether `to` is in or below one of the song's folders (`within`),
     /// and in none of the library's songs' folders below that (`others`)
     /// but one of those.
-    fn covers(&self, to: &Path) -> bool {
-        let at = |d: &PathBuf| below_as(to, d, SPELLING);
-        (self.within.iter()).any(|d| at(d) && !self.others.iter().any(|o| below(o, d) && at(o)))
+    fn covers(&self, to: &Path, sp: Spelling) -> bool {
+        let at = |d: &Path| below_as(to, d, sp);
+        (self.within.iter()).any(|d| {
+            at(d)
+                && !(self.others.iter()).any(|o| match below(o, d) {
+                    true => at(o),
+                    // (the folder, or one below it, in another spelling the
+                    // library lists apart: a volume may tell them apart;
+                    // only the folder's own spelling is the song's)
+                    false => under_as(o, d, sp) && at(o) && !(same_as(o, d, sp) && below(to, d)),
+                })
+        })
     }
 
     /// What the file moved to `to` does to the one there.
     fn over_at(&self, to: &Path) -> Over {
         match self.over {
-            Over::Newer if !self.covers(to) => Over::Keep,
+            Over::Newer if !self.covers(to, SPELLING) => Over::Keep,
             o => o,
         }
     }
@@ -262,11 +271,20 @@ fn same_name(a: &OsStr, b: &OsStr, sp: Spelling) -> bool {
 /// narrow what a download may do (a file's path spelled otherwise there
 /// is the same file).
 fn below_as(p: &Path, dir: &Path, sp: Spelling) -> bool {
+    under_as(p, dir, sp) && p.components().count() > dir.components().count()
+}
+
+/// Whether `p` is the folder `dir` or below it ([`below_as`]).
+fn under_as(p: &Path, dir: &Path, sp: Spelling) -> bool {
     let mut parts = p.components();
     let within = (dir.components())
         .all(|d| (parts.next()).is_some_and(|c| same_name(c.as_os_str(), d.as_os_str(), sp)));
-    let mut rest = parts.peekable();
-    within && rest.peek().is_some() && rest.all(|c| matches!(c, Component::Normal(_)))
+    within && parts.all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// Whether `a` and `b` name one folder where names are told apart by `sp`.
+fn same_as(a: &Path, b: &Path, sp: Spelling) -> bool {
+    under_as(a, b, sp) && a.components().count() == b.components().count()
 }
 
 /// Whether a download's files may go into the folder `dir`: one below the
@@ -585,7 +603,12 @@ fn diff_items(fs: &dyn Fs, s: &Staged, p: &Package, lib: &Library, req: &Request
 /// song's: a song new to the library), the other files in another song's
 /// folder left out (a file there it lacks may be one its charts would
 /// play).
-fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<Item> {
+fn charts_to_songs(
+    fs: &dyn Fs,
+    songs: &BTreeSet<&Path>,
+    mut item: Item,
+    sp: Spelling,
+) -> Vec<Item> {
     let dest = match &item.outcome {
         Outcome::Into(d) | Outcome::Owned(d) => d.clone(),
         _ => return vec![item],
@@ -599,6 +622,11 @@ fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<
                 .take_while(|o| o.starts_with(d))
                 .map(|o| o.to_path_buf()),
         );
+        // and those the file system may take for it, or for one below it
+        if sp != Spelling::Exact {
+            let spelled = (songs.iter()).filter(|o| !o.starts_with(d) && under_as(o, d, sp));
+            others.extend(spelled.map(|o| o.to_path_buf()));
+        }
     }
     // a song's on the way to its files: one the library lists, or that
     // holds a chart (one the library does not list: hidden, deeper than its
@@ -613,7 +641,8 @@ fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<
             if !seen.insert(f) {
                 break;
             }
-            if !item.within.iter().any(|d| d == f) && (songs.contains(f) || holds_chart(f)) {
+            let own = item.within.iter().any(|d| same_as(f, d, sp));
+            if !own && (songs.contains(f) || holds_chart(f)) {
                 others.push(f.to_path_buf());
             }
         }
@@ -621,7 +650,7 @@ fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<
     others.sort();
     others.dedup();
     item.others = others;
-    let theirs = |to: &Path| item.others.iter().any(|o| below_as(to, o, SPELLING));
+    let theirs = |to: &Path| item.others.iter().any(|o| below_as(to, o, sp));
     let new = |to: &Path| {
         let dir = to.parent().map(|d| fs.read_dir(d));
         dir.is_none_or(|d| d.map_or(true, |e| e.is_empty()))
@@ -629,7 +658,7 @@ fn charts_to_songs(fs: &dyn Fs, songs: &BTreeSet<&Path>, mut item: Item) -> Vec<
     let mut astray = Vec::new();
     let mut moves = Vec::new();
     for (from, to) in std::mem::take(&mut item.moves) {
-        match (item.covers(&to), is_chart(&to)) {
+        match (item.covers(&to, sp), is_chart(&to)) {
             (true, _) => moves.push((from, to)),
             (false, true) if !new(&to) || theirs(&to) => astray.push((from, to)),
             (false, _) if !theirs(&to) => moves.push((from, to)),
@@ -857,7 +886,7 @@ pub(crate) fn plan(fs: &dyn Fs, s: &Staged, lib: &Library, req: &Request) -> Vec
         false => BTreeSet::new(),
     };
     let mut items: Vec<Item> = (items.into_iter())
-        .flat_map(|i| charts_to_songs(fs, &songs, i))
+        .flat_map(|i| charts_to_songs(fs, &songs, i, SPELLING))
         .collect();
     if !new.is_empty() {
         items.push(new_item(fs, s, lib, &new, &packages, req));
