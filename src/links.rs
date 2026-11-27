@@ -207,7 +207,10 @@ impl Links {
     /// Every link `lists` know for `e`'s song, its own first, then each
     /// list's in turn: what [`song_links`](Links::song_links) of the lists
     /// made one with [`and`](Links::and) gives, without making it (a
-    /// player keeps the tables' links and a large list apart).
+    /// player keeps the tables' links and a large list apart); but where
+    /// they know more than `PER_CHART` pairs for the chart in all, the
+    /// pairs past it too (`and` keeps that many, each list here has its
+    /// own).
     pub fn song_links_in(lists: &[&Links], e: &TableEntry) -> Vec<String> {
         Links::all(lists, &e.url, &e.md5, |p| &p.0)
     }

@@ -29,7 +29,7 @@ link get <link>... [-o folder|file]      download from the links in turn
 song find [-t -a --md5] [--diff]         the links the sources know for a song
 table show <URL>                         a difficulty table and its charts per level
 table missing <URL> -L library [--get]   the charts the library lacks (--get: download them; -l level,
-                                         --md5, --sha256: only those)
+                                         --md5, --sha256, --chosen FILE|-: only those)
 table export lr2|bmt <URL> <folder>      an LR2 custom folder / a beatoraja table cache
 library import <file> -L library         a downloaded file into the library
 library place <chart> -L library         the song folders a separate chart may go into
@@ -114,7 +114,7 @@ A native window made with [MyGo](https://github.com/egoist/mygo) (Go). `bmseeker
 ```text
 bmseeker-gui                 the window
 bmseeker-gui <BMS folder>    the window, with that library
-bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, --help ...)
+bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, config, --help ...)
 ```
 
 - **Tables**: the charts the library lacks in a difficulty table, by level; download one or all those shown.

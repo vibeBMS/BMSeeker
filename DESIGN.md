@@ -493,12 +493,14 @@ song find [-t -a --md5] [--diff] [--table URL]... [--list FILE|URL]...
                                                      the links the sources know for the song (--diff: its separate
                                                      chart)
 table show <URL>                                     a difficulty table and its charts per level
-table missing <URL> -L library [-l level] [--md5 MD5]... [--sha256 SHA256]... [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
+table missing <URL> -L library [-l level] [--md5 MD5]... [--sha256 SHA256]... [--chosen FILE|-] [--get [--reinstall]] [--also URL]... [--list ...] [--own-links]
                                                      the charts the library lacks (-l: of that level only; --md5,
                                                      --sha256: of those charts only, named by either hash;
-                                                     --get: download them, each song, then its separate chart,
-                                                     the chart first when the library has its song; each file
-                                                     once)
+                                                     --chosen: the same, their hashes one a line in a file or
+                                                     on stdin, 32 hex digits an MD5 and 64 a SHA-256, anything
+                                                     else an error by its line; --get: download them, each song,
+                                                     then its separate chart, the chart first when the library
+                                                     has its song; each file once)
 table export lr2|bmt <URL> <folder>                  an LR2 custom folder / a beatoraja table cache
 library import <file> -L library [--name NAME] [--reinstall]
                                                      a downloaded file into the library, and the waiting
@@ -547,7 +549,7 @@ check  {"url","state":"archive|chart|page|gone|error","kind"?,"format"?,
 link   {"link","state":"file|page|gone|error","host","url"?,"code"?,"error"?}
 got    {"file","name","format","link","errors":[...]}
 missing {"level","label","title","artist","md5","sha256","url","url_diff"}
-done   {"title","md5"?,"sha256"?,"state":"added|owned|placed|waiting|page|failed","path"?,"files"?,"link"?,"code"?,"error"?}
+done   {"title"?,"md5"?,"sha256"?,"state":"added|owned|placed|waiting|page|failed","path"?,"files"?,"link"?,"code"?,"error"?,"have"?}
 refused {"refused": host,"code":"status|files|challenge|rate_limited|earlier","status"?,"error"}
 notice {"notice":"third_party","text"}
 config {"config":{<every setting, as in the settings file (Config, above)>}}
@@ -557,20 +559,37 @@ A `done` record's `state` is `install::Done::state` (the first four are
 what `install::got` counts as brought in or there already); its `md5` is
 the chart's it was for (`table missing --get`; `library install --md5`),
 else its `sha256` (`table missing --get` of a table that gives no MD5).
+`table missing --get` ends each chart's records with one that has
+`"have"`: whether the library has that chart now (by its hash), whatever
+came of the downloads on the way (a song's archive `owned` may not hold
+the separate chart; a pack an earlier chart brought holds this one). A
+chart that needed nothing gets one of its own: `owned` when the library
+has it (before the run, or brought by an earlier chart), else `failed`
+(`no_link`: nothing to try). With charts named (`--md5`, `--sha256`,
+`--chosen`), each named one the library had before the run gets an
+`owned` one too, and a hash no entry of the table has a `failed` one
+(`not_listed`, its `md5` or `sha256`, no `title`).
 A `missing` record's hash it has not is `""` (a table's entry has one at
 least: one with neither is no chart, and is not read).
 `notice`: what a person is told once a run (with `--json` a record in
-place of the note; `third_party`: third parties' sources are on).
+place of the note; `third_party`: third parties' sources are on). A
+program reading records passes by those it does not know (`event check`
+does by `refused` and `notice`).
+
+When a record cannot be written (what reads them is gone: the window
+closed), the run is cancelled: no download starts after it.
 
 `testdata/records.jsonl` holds the window's runs as the commands write
-them (the command line, the lines in order, the exit code): a test of
+them (the command line, what it read on stdin, the lines in order, the
+exit code): a test of
 `cli` checks them (`BMSEEKER_BLESS=1 cargo test --features cli records`
 writes it anew), and `gui/gui_test.go` replays them as the CLI, so a
 record the window reads cannot change with both sides' tests green.
 
 `"error"` is for a person; `"code"` for a program: `status`, `stalled`,
 `cancelled`, `gone`, `refused`, `other` (the download), `not_the_chart`,
-`no_chart_link`, `no_link`, `downloaded` (the install), `unpack`. Each
+`no_chart_link`, `no_link`, `downloaded` (the install), `unpack`,
+`not_listed` (`table missing`: a chart named that the table lists not). Each
 refusal is written once, when it comes (in text: `refused: ...`).
 
 ## GUI
@@ -592,13 +611,22 @@ with (its hash, each start); without a cache folder (no home) it is not
 unpacked at all (`$BMSEEKER_CLI` if set; a development build without it
 uses `bmseeker` on the PATH). What it starts from is the CLI's settings
 (`config show`: the tables to choose from, the downloads folder, whether
-third-party sources are on in the settings file); the charts chosen in a
-table are downloaded by one run of `table missing --get --md5 …` (each
-named by its MD5, else its SHA-256: `--sha256`; the library's order and
-batch). A host that refused BMSeeker (a `refused` record) is noted
+third-party sources are on in the settings file), read once the window
+is there, and again when Settings is opened or a job starts while they
+could not be read; a `downloads` setting that is absolute is that folder,
+as the CLI takes it. The charts chosen in a table are downloaded by one
+run of `table missing --get --chosen -`, their hashes on its stdin (each
+named by its MD5, else its SHA-256; the library's order and batch; a
+command line could not hold thousands): the log says each chart's last
+record with its place in the run, and a chart leaves the list when that
+record's `have` says the library has it. A CLI that ends otherwise than
+by its own codes 1 and 2 (a signal, a crash) is told as that, with what
+it said last; a line longer than the reader takes (16 MiB) ends the run.
+The window ends the CLI runs going on when it quits. A host that refused BMSeeker (a `refused` record) is noted
 in the log and skipped by every later run while the window is open
 (`--skip-host`). Turning third-party sources on asks first, once (the
-CLI's `third_party` notice is then not repeated in the log); the OK is
+CLI's `third_party` notice is then not repeated in the log; when the
+settings file turned them on, it is said once a session); the OK is
 remembered in `<config folder>/bmseeker/third-party-acknowledged` (in a
 web page, the browser's `localStorage`).
 
@@ -610,7 +638,10 @@ cli` into `gui/bin/`, then `go build`; Go 1.27+).
 The GUI compiled to `js/wasm` (MyGo draws it on a canvas) and the CLI's
 commands (`cli`) compiled to wasm in `bmseeker-web`, which runs in a
 worker. The GUI's `cli_js.go` speaks the CLI's protocol to it: a command
-line in, JSON Lines records and notes out as they come, an exit code.
+line and what it reads for `-` (the page's run hands it over) in, JSON
+Lines records and notes out as they come, an exit code. A command before
+any target is open (a folder waiting for the user's permission) runs on
+a session of no files: the settings (`config show`) need none.
 
 The commands are synchronous; a browser's files and network are not,
 except in a worker: `FileReaderSync` reads a `File`, and synchronous

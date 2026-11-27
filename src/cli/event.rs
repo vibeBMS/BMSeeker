@@ -15,7 +15,7 @@ use crate::hosts::Want;
 use crate::manbow;
 use clap::Subcommand;
 use serde_json::{json, Map, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub(super) enum Event {
@@ -74,7 +74,7 @@ fn works(r: &Run, venue: u32, overrides: Option<PathBuf>) -> Result<(), String> 
         &page(manbow::work_list_url(base, venue))?,
     );
     let by_hand = match overrides {
-        Some(p) => records(&read_text(&p)?, "num")?,
+        Some(p) => records(&r.read_text(&p)?, "num")?,
         None => Vec::new(),
     };
     let (mut review, mut disq) = (0, 0);
@@ -126,9 +126,9 @@ fn check(
     minutes: Option<u64>,
     search: bool,
 ) -> Result<(), String> {
-    let works = records(&read_text(&works)?, "num")?;
+    let works = records(&r.read_text(&works)?, "num")?;
     let known = match known {
-        Some(p) if p.exists() => records(&read_text(&p)?, "url")?,
+        Some(p) if p.exists() => records(&r.read_text(&p)?, "url")?,
         _ => Vec::new(),
     };
     let sources = crate::sources::Sources::from_config(r.config(), Vec::new());
@@ -317,26 +317,15 @@ impl Checks<'_> {
     }
 }
 
-/// `path`'s text, or stdin's for `-`.
-fn read_text(path: &Path) -> Result<String, String> {
-    if path == Path::new("-") {
-        let mut s = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| e.to_string())?;
-        Ok(s)
-    } else {
-        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
-    }
-}
-
 /// Records from `text`: JSON Lines, a JSON array of records, or a JSON
 /// object of records by `key` (`{"42": {...}}`: each gets `key` = its
-/// name, as a number if it is one). The `refused` records a run wrote
-/// among them are left out.
+/// name, as a number if it is one). The `refused` and `notice` records a
+/// run wrote among them are left out.
 fn records(text: &str, key: &str) -> Result<Vec<Map<String, Value>>, String> {
     let all = all_records(text, key)?;
     Ok(all
         .into_iter()
-        .filter(|r| !r.contains_key("refused"))
+        .filter(|r| !r.contains_key("refused") && !r.contains_key("notice"))
         .collect())
 }
 
@@ -406,8 +395,9 @@ mod tests {
         assert_eq!(by_url[0]["url"], "https://a/b.zip");
         assert_eq!(records(r#"{"num":3,"title":"t"}"#, "num").unwrap().len(), 1);
         assert!(records("{\"num\":1}\nnot json\n", "num").is_err());
-        // a run's refusals are no works
-        let lines = "{\"num\":1}\n{\"refused\":\"a.test\",\"code\":\"status\"}\n";
+        // a run's refusals and notices are no works
+        let lines = "{\"notice\":\"third_party\",\"text\":\"t\"}\n{\"num\":1}\n\
+            {\"refused\":\"a.test\",\"code\":\"status\"}\n";
         assert_eq!(records(lines, "num").unwrap().len(), 1);
     }
 }

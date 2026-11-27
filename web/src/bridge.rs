@@ -8,14 +8,18 @@ use bmseeker::fs::Store;
 use bmseeker::hosts::Context;
 use bmseeker::install::job::Driver;
 use clap::Parser;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Run `args` (without the program's name) with `config` on `fs` and
-/// `net`, each line to `sink`: 0 when it went well, 1 when the command
-/// failed, 2 for a command line it does not take. A download that fails is
-/// a page to open (the proxy passes archives only).
+/// `net`, `stdin` what it reads for `-`, each line to `sink`: 0 when it
+/// went well, 1 when the command failed, 2 for a command line it does not
+/// take. A download that fails is a page to open (the proxy passes
+/// archives only).
 pub fn run(
     args: &[String],
+    stdin: &str,
     config: Config,
     fs: Arc<dyn Store + Send + Sync>,
     net: &dyn Driver,
@@ -47,6 +51,7 @@ pub fn run(
         cx,
         fs,
         net,
+        stdin: Rc::new(RefCell::new(std::io::Cursor::new(stdin.to_string()))),
     };
     match cli.run(&run) {
         Ok(()) => 0,
@@ -64,9 +69,7 @@ mod tests {
     use bmseeker::fs::Fs;
     use bmseeker::install::job::{Effect, Fed, Served};
     use bmseeker::net::{NetError, Request};
-    use std::cell::RefCell;
     use std::path::Path;
-    use std::rc::Rc;
 
     const CHART: &str = "#PLAYER 1\n#TITLE Song A\n#ARTIST x\n#WAV01 01.wav\n#00111:01\n";
 
@@ -105,6 +108,7 @@ mod tests {
 
     fn lines(
         args: &[&str],
+        stdin: &str,
         fs: Arc<Mirror>,
         net: &dyn Driver,
     ) -> (i32, Vec<serde_json::Value>, Vec<String>) {
@@ -115,7 +119,7 @@ mod tests {
             ..Default::default()
         };
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let code = run(&args, config, fs, net, move |l| match l {
+        let code = run(&args, stdin, config, fs, net, move |l| match l {
             Line::Record(r) => sink.borrow_mut().0.push(serde_json::from_str(r).unwrap()),
             Line::Note(n) => sink.borrow_mut().1.push(n.to_string()),
         });
@@ -140,6 +144,7 @@ mod tests {
                 "--own-links",
                 "https://h.example/a.zip",
             ],
+            "",
             m.clone(),
             &net,
         );
@@ -182,6 +187,7 @@ mod tests {
                 "/bms",
                 "--own-links",
             ],
+            "",
             m.clone(),
             &net,
         );
@@ -190,6 +196,27 @@ mod tests {
         assert_eq!(records[0]["title"], "B");
         assert!(
             notes.iter().any(|n| n == "1 of 2 charts missing"),
+            "{notes:?}"
+        );
+        // those chosen, read as the CLI reads stdin (`--chosen -`)
+        let (code, records, notes) = lines(
+            &[
+                "--json",
+                "table",
+                "missing",
+                "https://t.example/",
+                "-L",
+                "/bms",
+                "--own-links",
+                "--chosen=-",
+            ],
+            &format!("{md5}\n"),
+            m.clone(),
+            &net,
+        );
+        assert_eq!((code, records.len()), (0, 0), "{records:?}");
+        assert!(
+            notes.iter().any(|n| n == "0 of 1 charts missing"),
             "{notes:?}"
         );
         // the scan's cache kept beside the downloads, the player's files untouched
@@ -215,16 +242,17 @@ mod tests {
                 "--own-links",
                 "https://h.example/none.zip",
             ],
+            "",
             library(),
             &net,
         );
         assert_eq!(code, 1);
         assert_eq!(records[0]["state"], "page", "{records:?}");
         assert_eq!(notes.last().unwrap(), "bmseeker: X: not installed");
-        let (code, _, notes) = lines(&["library", "frobnicate"], library(), &net);
+        let (code, _, notes) = lines(&["library", "frobnicate"], "", library(), &net);
         assert_eq!(code, 2);
         assert!(notes[0].starts_with("error:"), "{notes:?}");
-        let (code, _, notes) = lines(&["--version"], library(), &net);
+        let (code, _, notes) = lines(&["--version"], "", library(), &net);
         let version = concat!("bmseeker ", env!("CARGO_PKG_VERSION"));
         assert_eq!((code, notes[0].as_str()), (0, version));
     }
@@ -273,6 +301,7 @@ mod tests {
                 "https://earlier.example/c.zip",
                 "https://h.example/d.zip",
             ],
+            "",
             library(),
             &net,
         );

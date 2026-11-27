@@ -172,11 +172,13 @@ mod page {
             self.mirror.files().len()
         }
 
-        /// Run a command line: each line to `emit(kind, line)` (kind
-        /// "record" or "note") as it comes; its exit code.
-        pub fn run(&self, args: Vec<String>, emit: js_sys::Function) -> i32 {
+        /// Run a command line, `stdin` what it reads for `-`: each line to
+        /// `emit(kind, line)` (kind "record" or "note") as it comes; its
+        /// exit code.
+        pub fn run(&self, args: Vec<String>, stdin: &str, emit: js_sys::Function) -> i32 {
             bridge::run(
                 &args,
+                stdin,
                 self.config.clone(),
                 self.mirror.clone(),
                 &self.net,

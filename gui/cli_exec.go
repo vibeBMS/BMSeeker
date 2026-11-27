@@ -149,16 +149,34 @@ func passThrough(args []string) {
 	os.Exit(0)
 }
 
-// runCLI runs `bmseeker --json args...`: each record it writes goes to
-// onRecord and each note (stderr) to onNote, as they come, on the
-// goroutine that reads them; then it returns how the command ended.
-func runCLI(args []string, onRecord func(Record), onNote func(string)) error {
+// The CLI runs going on: ended with the window (stopCLIs).
+var running = struct {
+	sync.Mutex
+	cmds map[*exec.Cmd]bool
+}{cmds: map[*exec.Cmd]bool{}}
+
+// stopCLIs ends the CLI runs going on: the window quits, and what it
+// started (a table's downloads) goes with it.
+func stopCLIs() {
+	running.Lock()
+	defer running.Unlock()
+	for c := range running.cmds {
+		_ = c.Process.Kill()
+	}
+}
+
+// runCLI runs `bmseeker --json args...`, stdin what it reads for "-": each
+// record it writes goes to onRecord and each note (stderr) to onNote, as
+// they come, on the goroutine that reads them; then it returns how the
+// command ended. A line too long to read ends it.
+func runCLI(args []string, stdin string, onRecord func(Record), onNote func(string)) error {
 	p, err := cliPath()
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(p, append([]string{"--json"}, args...)...)
 	hideConsole(cmd)
+	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -170,38 +188,71 @@ func runCLI(args []string, onRecord func(Record), onNote func(string)) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	var wg sync.WaitGroup
+	running.Lock()
+	running.cmds[cmd] = true
+	running.Unlock()
+	defer func() {
+		running.Lock()
+		delete(running.cmds, cmd)
+		running.Unlock()
+	}()
+	var (
+		wg      sync.WaitGroup
+		last    string
+		failed  sync.Once
+		readErr error
+	)
+	// (the other reader then ends too: the CLI is gone)
+	unread := func(err error) {
+		failed.Do(func() {
+			readErr = fmt.Errorf("a line the CLI wrote is too long to read (%v)", err)
+			_ = cmd.Process.Kill()
+		})
+	}
 	wg.Add(2)
-	var last string
 	go func() {
 		defer wg.Done()
-		lines(errs, func(l string) {
+		if err := lines(errs, func(l string) {
 			last = l
 			if onNote != nil {
 				onNote(l)
 			}
-		})
+		}); err != nil {
+			unread(err)
+		}
 	}()
 	go func() {
 		defer wg.Done()
-		lines(out, func(l string) {
+		if err := lines(out, func(l string) {
 			var r Record
 			if json.Unmarshal([]byte(l), &r) == nil && onRecord != nil {
 				onRecord(r)
 			}
-		})
+		}); err != nil {
+			unread(err)
+		}
 	}()
 	wg.Wait()
-	if err := cmd.Wait(); err != nil {
-		if last != "" {
-			return errors.New(strings.TrimPrefix(last, "bmseeker: "))
-		}
-		return err
+	err = cmd.Wait()
+	var exit *exec.ExitError
+	switch {
+	case readErr != nil:
+		return readErr
+	case err == nil:
+		return nil
+	// (the CLI's own ends: what failed, or a command line it does not take)
+	case errors.As(err, &exit) && (exit.ExitCode() == 1 || exit.ExitCode() == 2) && last != "":
+		return errors.New(strings.TrimPrefix(last, "bmseeker: "))
+	case last != "":
+		return fmt.Errorf("the CLI stopped (%v); it last said: %s", err, last)
+	default:
+		return fmt.Errorf("the CLI stopped (%v)", err)
 	}
-	return nil
 }
 
-func lines(r io.Reader, f func(string)) {
+// lines gives f each line of r but blank ones, trimmed; the error that
+// ended them, if not the end (a line over 16 MiB).
+func lines(r io.Reader, f func(string)) error {
 	s := bufio.NewScanner(r)
 	s.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for s.Scan() {
@@ -209,4 +260,5 @@ func lines(r io.Reader, f func(string)) {
 			f(l)
 		}
 	}
+	return s.Err()
 }

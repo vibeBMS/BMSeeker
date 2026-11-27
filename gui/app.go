@@ -27,9 +27,14 @@ type waiting struct {
 }
 
 type app struct {
-	win      *mygo.Window
+	win *mygo.Window
+	// post runs a change of the state on the window's goroutine (the
+	// window's Update; a test's own).
+	post     func(func())
 	settings Settings
 	tab      int
+	// The tab the last frame showed.
+	shownTab int
 
 	// Tables
 	table string
@@ -59,8 +64,10 @@ type app struct {
 	// Asking before third-party sources are turned on
 	askThirdParty bool
 	// Third-party sources are on in the CLI's settings file: on whatever
-	// the window says.
+	// the window says. Its notice is then said once (the window did not
+	// ask).
 	configThirdParty bool
+	toldThirdParty   bool
 
 	// Hosts that refused BMSeeker in this session: the CLI skips them
 	// (--skip-host) in every later run.
@@ -81,12 +88,15 @@ func newApp(library string) *app {
 	return a
 }
 
+const readingSettings = "Reading the settings"
+
 // readSettings takes what the window starts from from the CLI's settings
 // in effect (`config show`): the tables, the downloads folder, whether
-// third-party sources are on.
+// third-party sources are on. Until they are read, opening Settings or
+// starting a job reads them again.
 func (a *app) readSettings() {
-	a.job("Reading the settings", func() error {
-		return a.cli([]string{"config", "show"}, func(r Record) {
+	a.job(readingSettings, func() error {
+		return a.cli([]string{"config", "show"}, "", func(r Record) {
 			c, ok := r["config"].(map[string]any)
 			if !ok {
 				return
@@ -108,6 +118,7 @@ func (a *app) readSettings() {
 					a.table = a.settings.Tables[0]
 				}
 				a.settings.Downloads, a.configThirdParty = downloads, on
+				a.settings.Read = true
 			})
 		})
 	})
@@ -115,11 +126,7 @@ func (a *app) readSettings() {
 
 // update changes the state from another goroutine.
 func (a *app) update(f func()) {
-	if a.win != nil {
-		a.win.Update(f)
-	} else {
-		f()
-	}
+	a.post(f)
 }
 
 func (a *app) say(format string, args ...any) {
@@ -131,6 +138,9 @@ func (a *app) say(format string, args ...any) {
 func (a *app) job(name string, f func() error) {
 	if a.busy[name] {
 		return
+	}
+	if !a.settings.Read && name != readingSettings {
+		a.readSettings()
 	}
 	a.busy[name] = true
 	go func() {
@@ -144,18 +154,21 @@ func (a *app) job(name string, f func() error) {
 	}()
 }
 
-// cli runs a command, noting what it says in the log. A host that refuses
-// BMSeeker (a `refused` record) is noted and skipped for the rest of the
-// session; a `notice` record is noted (the third-party sources' not: the
-// window asked when they were turned on). Neither goes to onRecord.
+// cli runs a command (stdin what it reads for "-"), noting what it says in
+// the log. A host that refuses BMSeeker (a `refused` record) is noted and
+// skipped for the rest of the session; a `notice` record is noted (the
+// third-party sources' only once, and only when the window did not ask
+// before they were turned on: the settings file turned them on). Neither
+// goes to onRecord.
 //
 // What a table, a server or a file's name says goes into args only as an
 // option's value attached to it ("--title="+title) or after "--" (links,
 // files): the CLI then reads none of it as an option, whatever it starts
 // with.
-func (a *app) cli(args []string, onRecord func(Record)) error {
+func (a *app) cli(args []string, stdin string, onRecord func(Record)) error {
 	var pre []string
-	if a.settings.ThirdParty {
+	asked := a.settings.ThirdParty
+	if asked {
 		pre = append(pre, "--third-party")
 	}
 	a.mu.Lock()
@@ -164,7 +177,7 @@ func (a *app) cli(args []string, onRecord func(Record)) error {
 	}
 	a.mu.Unlock()
 	args = append(pre, args...)
-	return runCLI(args, func(r Record) {
+	return runCLI(args, stdin, func(r Record) {
 		if host := r.S("refused"); host != "" {
 			a.mu.Lock()
 			if !slices.Contains(a.refused, host) {
@@ -175,8 +188,17 @@ func (a *app) cli(args []string, onRecord func(Record)) error {
 			return
 		}
 		if notice := r.S("notice"); notice != "" {
-			if notice != "third_party" {
-				a.say("%s", r.S("text"))
+			text := r.S("text")
+			switch {
+			case notice != "third_party":
+				a.say("%s", text)
+			case !asked:
+				a.update(func() {
+					if !a.toldThirdParty {
+						a.toldThirdParty = true
+						a.log = append(a.log, time.Now().Format("15:04:05 ")+text)
+					}
+				})
 			}
 			return
 		}
@@ -208,6 +230,10 @@ func (a *app) view(c *ui.Context) {
 			labels = append(labels, fmt.Sprintf("Browser (%d)", len(a.pages)))
 		}
 		ui.Tabs(c, &a.tab, labels...)
+		if a.tab == 3 && a.shownTab != 3 && !a.settings.Read {
+			a.readSettings()
+		}
+		a.shownTab = a.tab
 		ui.Column(c).Grow(1).Gap(8).Children(func() {
 			switch a.tab {
 			case 0:
@@ -232,7 +258,7 @@ func (a *app) view(c *ui.Context) {
 func (a *app) tablesView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
 		ui.Select(c, &a.table, a.settings.Tables).Grow(1)
-		if ui.PrimaryButton(c, "Missing charts").Disabled(a.settings.Library == "").Clicked() {
+		if ui.PrimaryButton(c, "Missing charts").Disabled(a.settings.Library == "" || a.table == "").Clicked() {
 			a.loadMissing()
 		}
 	})
@@ -293,7 +319,7 @@ func (a *app) loadMissing() {
 	url, lib := a.table, a.settings.Library
 	a.job("Reading the table", func() error {
 		var got []missing
-		err := a.cli([]string{"table", "missing", "--library=" + lib, "--", url}, func(r Record) {
+		err := a.cli([]string{"table", "missing", "--library=" + lib, "--", url}, "", func(r Record) {
 			got = append(got, missing{
 				Label: r.S("label"), Level: r.S("level"), Title: r.S("title"), Artist: r.S("artist"),
 				MD5: r.S("md5"), SHA256: r.S("sha256"), URL: r.S("url"), URLDiff: r.S("url_diff"),
@@ -307,36 +333,58 @@ func (a *app) loadMissing() {
 }
 
 // download installs the charts ms of the table the list is of, as the CLI
-// does a table's (`table missing --get` of their MD5s, or SHA-256s where the
-// table gives no MD5, one run: each song,
-// then its separate chart, or the chart first when the library has its
-// song; each file downloaded once). A chart whose download brought it in,
-// or found it in the library, leaves the list.
+// does a table's: one run of `table missing --get`, their MD5s (or SHA-256s
+// where the table gives no MD5) on its stdin, one a line (`--chosen -`;
+// thousands do not fit a command line): each song, then its separate
+// chart, or the chart first when the library has its song; each file
+// downloaded once. Each chart's last record says whether the library has
+// it now (`have`): those it has leave the list, the others stay, whatever
+// came of the downloads on the way.
 func (a *app) download(ms []missing) {
 	lib, url := a.settings.Library, a.missingFrom
-	args := []string{"table", "missing", "--library=" + lib, "--get"}
+	var chosen strings.Builder
+	titles := map[string]string{}
+	n := 0
 	for _, m := range ms {
-		switch {
-		case m.MD5 != "":
-			args = append(args, "--md5="+m.MD5)
-		case m.SHA256 != "":
-			args = append(args, "--sha256="+m.SHA256)
-		default:
+		hash := m.MD5
+		if hash == "" {
+			hash = m.SHA256
+		}
+		if hash == "" {
 			// (the CLI lists none: a table's entry without a hash is no chart to it)
 			a.say("%s: the table gives no hash for it: download it from the Link tab", m.Title)
+			continue
 		}
+		chosen.WriteString(hash + "\n")
+		titles[hash] = m.Title
+		n++
 	}
-	if len(args) == 4 {
+	if n == 0 {
 		return
 	}
-	args = append(args, "--", url)
+	args := []string{"table", "missing", "--library=" + lib, "--get", "--chosen=-", "--", url}
 	a.job("Downloading", func() error {
-		return a.cli(args, func(r Record) {
-			if a.outcome(r.S("title"), r) {
-				hash := r.S("md5")
-				if hash == "" {
-					hash = r.S("sha256")
+		done := 0
+		return a.cli(args, chosen.String(), func(r Record) {
+			hash := r.S("md5")
+			if hash == "" {
+				hash = r.S("sha256")
+			}
+			title := r.S("title")
+			if title == "" {
+				title = titles[hash]
+			}
+			have, last := r["have"].(bool)
+			said := a.outcome(title, r)
+			if !last {
+				if said != "" {
+					a.say("%s", said)
 				}
+				return
+			}
+			done++
+			a.say("(%d/%d) %s", done, n, said)
+			if have {
 				a.update(func() { a.forget(hash) })
 			}
 		})
@@ -352,22 +400,21 @@ func installArgs(lib, title, artist, md5 string, flags []string, links ...string
 	return append(args, links...)
 }
 
-// outcome notes what a download came to (a record's "state"); a link that
-// needs a browser goes to the Browser tab. Whether it brought the song or
-// its chart in, or found it in the library.
-func (a *app) outcome(title string, r Record) bool {
+// outcome is what a download came to (a record's "state"), for the log ("":
+// a record of no download); a link that needs a browser goes to the
+// Browser tab.
+func (a *app) outcome(title string, r Record) string {
 	switch r.S("state") {
 	case "added", "owned", "placed", "waiting":
-		a.say("%s: %s %s", title, r.S("state"), r.S("path"))
-		return true
+		return fmt.Sprintf("%s: %s %s", title, r.S("state"), r.S("path"))
 	case "page":
 		link := r.S("link")
-		a.say("%s: needs a browser: %s", title, link)
 		a.update(func() { a.pages = append(a.pages, page{Title: title, Link: link}) })
+		return fmt.Sprintf("%s: needs a browser: %s", title, link)
 	case "failed":
-		a.say("%s: %s", title, r.S("error"))
+		return fmt.Sprintf("%s: %s", title, r.S("error"))
 	}
-	return false
+	return ""
 }
 
 // forget takes the chart of this hash off the list: its MD5, else (a table
@@ -394,8 +441,10 @@ func (a *app) linkView(c *ui.Context) {
 		}
 		a.job("Downloading", func() error {
 			// (a link that brought nothing has said why)
-			_ = a.cli(installArgs(lib, title, artist, "", []string{"--own-links"}, link), func(r Record) {
-				a.outcome(name, r)
+			_ = a.cli(installArgs(lib, title, artist, "", []string{"--own-links"}, link), "", func(r Record) {
+				if said := a.outcome(name, r); said != "" {
+					a.say("%s", said)
+				}
 			})
 			return nil
 		})
@@ -410,7 +459,7 @@ func (a *app) waitingView(c *ui.Context) {
 			lib := a.settings.Library
 			a.job("Looking at waiting charts", func() error {
 				var got []waiting
-				err := a.cli([]string{"library", "pending", "--library=" + lib}, func(r Record) {
+				err := a.cli([]string{"library", "pending", "--library=" + lib}, "", func(r Record) {
 					best := ""
 					if b, ok := r["best"].(map[string]any); ok {
 						best = fmt.Sprintf("%.0f%% %v", toF(b["coverage"])*100, b["label"])
