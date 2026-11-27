@@ -5,7 +5,8 @@
 //   bmseeker.onchange = fn           called when the state changes
 //   bmseeker.choose(kind)            "vibe" | "folder" | "zip" (a folder: the picker)
 //   bmseeker.allow()                 the folder picked before, allowed again
-//   bmseeker.run(args, each) -> Promise<exit code>   each("record" | "note", line)
+//   bmseeker.run(args, each, stdin) -> Promise<exit code>   each("record" | "note", line);
+//                                    stdin: what the command reads for "-"
 //   bmseeker.pickFile() -> Promise<name | "">   a file for the next run's "{file}"
 //   bmseeker.downloadZip() -> Promise<number of bytes>
 //
@@ -124,10 +125,10 @@
       if ((await dir.requestPermission({ mode: "readwrite" })) === "granted") return open("folder", dir);
       set({ error: `${dir.name}: not allowed` });
     },
-    run(args, each) {
+    run(args, each, stdin = "") {
       const file = args.includes("{file}") ? picked : undefined;
       if (file) picked = null;
-      return ask({ op: "run", args, proxy: PROXY, file }, each, (n) => each("note", n)).then((r) => {
+      return ask({ op: "run", args, stdin, proxy: PROXY, file }, each, (n) => each("note", n)).then((r) => {
         set({ files: r.files });
         return r.code;
       });

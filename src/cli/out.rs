@@ -27,15 +27,31 @@ pub struct Out {
 }
 
 impl Out {
-    /// To stdout and stderr.
-    pub fn stdio(json: bool) -> Out {
-        Out::new(json, |l| match l {
-            Line::Record(s) => {
-                let mut o = std::io::stdout().lock();
-                let _ = writeln!(o, "{s}");
-                let _ = o.flush();
+    /// To stdout and stderr; `gone` when a line cannot be written (what
+    /// read them is gone: a window that closed).
+    pub fn stdio(json: bool, gone: impl Fn() + 'static) -> Out {
+        Out::writing(json, std::io::stdout, std::io::stderr, gone)
+    }
+
+    /// Records to what `records` gives, notes to what `notes` gives;
+    /// `gone` when a line cannot be written.
+    pub(super) fn writing<R: Write, N: Write>(
+        json: bool,
+        records: impl Fn() -> R + 'static,
+        notes: impl Fn() -> N + 'static,
+        gone: impl Fn() + 'static,
+    ) -> Out {
+        Out::new(json, move |l| {
+            let written = match l {
+                Line::Record(s) => {
+                    let mut o = records();
+                    writeln!(o, "{s}").and_then(|()| o.flush())
+                }
+                Line::Note(s) => writeln!(notes(), "{s}"),
+            };
+            if written.is_err() {
+                gone();
             }
-            Line::Note(s) => eprintln!("{s}"),
         })
     }
 
@@ -103,7 +119,47 @@ fn printable(text: &str) -> std::borrow::Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+
+    /// A pipe whose reader is gone.
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A record or a note that cannot be written is told (the run then
+    /// ends: `main`); one that can is not.
+    #[test]
+    fn a_reader_gone_is_told() {
+        let gone = Rc::new(Cell::new(0));
+        let told = gone.clone();
+        let out = Out::writing(
+            true,
+            || Closed,
+            std::io::sink,
+            move || told.set(told.get() + 1),
+        );
+        out.note("a note");
+        assert_eq!(gone.get(), 0);
+        out.record(serde_json::json!({"state": "added"}), String::new);
+        assert_eq!(gone.get(), 1);
+        let told = gone.clone();
+        let out = Out::writing(
+            false,
+            std::io::sink,
+            || Closed,
+            move || told.set(told.get() + 1),
+        );
+        out.record(serde_json::json!({}), || "a record".into());
+        out.note("a note");
+        assert_eq!(gone.get(), 2);
+    }
 
     /// What a server or a file said reaches a terminal as text only: no
     /// escape sequence, in a record or a note, in text or in JSON.

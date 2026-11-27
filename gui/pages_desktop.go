@@ -19,7 +19,7 @@ const pagesHint = "These links give a page, not a file: open one, and its downlo
 // button is then the user's to press).
 func (a *app) pageScript() string {
 	a.scriptOnce.Do(func() {
-		err := runCLI([]string{"link", "page-script"}, func(r Record) { a.script = r.S("script") }, nil)
+		err := runCLI([]string{"link", "page-script"}, "", func(r Record) { a.script = r.S("script") }, nil)
 		if err != nil {
 			a.log = append(a.log, "a page's Download button is not pressed for you: "+err.Error())
 		}
@@ -107,7 +107,7 @@ func (a *app) openPage(p page) {
 			// (what did not come in has no name to be kept under)
 			defer os.Remove(d.Path)
 			got := false
-			err := a.cli(importArgs(lib, named, d.Path), func(r Record) {
+			err := a.cli(importArgs(lib, named, d.Path), "", func(r Record) {
 				if r.S("state") == "other" {
 					a.say("%s: %s is no archive or chart: not kept", p.Title, named)
 					return

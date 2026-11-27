@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,7 @@ const fixture = "../testdata/records.jsonl"
 // A run of the CLI the fixture holds.
 type run struct {
 	Args  []string `json:"args"`
+	Stdin string   `json:"stdin"`
 	Lines []struct {
 		Record json.RawMessage `json:"record"`
 		Note   *string         `json:"note"`
@@ -41,10 +43,16 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// replay writes what the CLI wrote for args in the fixture file's run of
-// them, and ends as it did. A command line it has no run of fails.
+// replay writes what the CLI wrote for args (and what it read on stdin)
+// in the fixture file's run of them, and ends as it did. A command line it
+// has no run of fails.
 func replay(file string, args []string) int {
 	data, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bmseeker:", err)
+		return 2
+	}
+	stdin, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bmseeker:", err)
 		return 2
@@ -55,7 +63,7 @@ func replay(file string, args []string) int {
 			fmt.Fprintln(os.Stderr, "bmseeker:", err)
 			return 2
 		}
-		if !slices.Equal(r.Args, args) {
+		if !slices.Equal(r.Args, args) || r.Stdin != string(stdin) {
 			continue
 		}
 		for _, x := range r.Lines {
@@ -67,22 +75,45 @@ func replay(file string, args []string) int {
 		}
 		return r.Exit
 	}
-	fmt.Fprintf(os.Stderr, "bmseeker: the fixture has no run of %q\n", args)
+	fmt.Fprintf(os.Stderr, "bmseeker: the fixture has no run of %q (stdin %q)\n", args, stdin)
 	return 2
 }
 
-func until(t *testing.T, ok func() bool) {
-	t.Helper()
-	for i := 0; i < 200 && !ok(); i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !ok() {
-		t.Fatal("timed out")
+// posted are the changes of the state an app (fakeApp) posted for the
+// window's goroutine; the test's goroutine runs them (pump).
+var posted = map[*app]*struct {
+	sync.Mutex
+	fs []func()
+}{}
+
+// pump runs what a posted so far, as the window would.
+func pump(a *app) {
+	q := posted[a]
+	q.Lock()
+	fs := q.fs
+	q.fs = nil
+	q.Unlock()
+	for _, f := range fs {
+		f()
 	}
 }
 
+// until waits for ok, running what a posts meanwhile.
+func until(t *testing.T, a *app, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		pump(a)
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out")
+}
+
 // fakeApp is a window on the library /lib, in a home of its own, whose CLI
-// answers as the fixture says.
+// answers as the fixture says; its settings taken as read (a job does not
+// read them first).
 func fakeApp(t *testing.T) *app {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -98,19 +129,45 @@ func fakeApp(t *testing.T) *app {
 	t.Setenv("BMSEEKER_CLI", self)
 	t.Setenv("BMSEEKER_REPLAY", file)
 	cliOnce = sync.Once{}
-	return newApp("/lib")
+	a := newApp("/lib")
+	a.settings.Read = true
+	q := &struct {
+		sync.Mutex
+		fs []func()
+	}{}
+	posted[a] = q
+	a.post = func(f func()) {
+		q.Lock()
+		q.fs = append(q.fs, f)
+		q.Unlock()
+	}
+	return a
+}
+
+// fakeCLI makes the CLI the shell script script, in a folder of its own,
+// which it returns.
+func fakeCLI(t *testing.T, script string) string {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BMSEEKER_CLI", filepath.Join(bin, "bmseeker"))
+	cliOnce = sync.Once{}
+	return bin
 }
 
 // The window on the fixture's runs: its settings, a table's missing
 // charts, those shown downloaded in one run (one into the library, one a
 // page for the Browser tab, one whose source refused, one the table names
-// by its SHA-256 alone), and a later run
-// that skips the host that refused, with third-party sources on, whose
-// notice it does not repeat.
+// by its SHA-256 alone, a separate chart whose song came and whose own
+// link is dead, the two charts of a pack, one by its SHA-256 without a
+// link, one the table no longer lists): those the library has now leave
+// the list, the others stay; and a later run that skips the host that
+// refused, with third-party sources on, whose notice it does not repeat.
 func TestTablesToBrowser(t *testing.T) {
 	a := fakeApp(t)
 	a.readSettings()
-	until(t, func() bool { return len(a.busy) == 0 })
+	until(t, a, func() bool { return len(a.busy) == 0 })
 	if !slices.Equal(a.settings.Tables, []string{"https://t.example/table.json"}) || a.table != a.settings.Tables[0] ||
 		a.settings.downloads() != filepath.Join("/lib", ".bmseeker") || a.configThirdParty {
 		t.Fatalf("settings %+v, table %q, log %q", a.settings, a.table, a.log)
@@ -119,25 +176,33 @@ func TestTablesToBrowser(t *testing.T) {
 	if err := tt.Click("Missing charts"); err != nil {
 		t.Fatal(err)
 	}
-	until(t, func() bool { return len(a.missing) == 4 && len(a.busy) == 0 })
+	until(t, a, func() bool { return len(a.missing) == 8 && len(a.busy) == 0 })
 	tt.Frame()
-	if !tt.HasText("Song A") || !tt.HasText("4 missing") || a.missing[3].MD5 != "" || a.missing[3].SHA256 == "" {
+	if !tt.HasText("Song A") || !tt.HasText("8 missing") || a.missing[3].MD5 != "" || a.missing[3].SHA256 == "" {
 		t.Fatalf("texts %q", tt.Texts())
 	}
+	// (a row of an older listing: the table has it no more)
+	a.missing = append(a.missing, missing{Title: "Gone", MD5: strings.Repeat("f", 32)})
 	if err := tt.Click("Download all shown"); err != nil {
 		t.Fatal(err)
 	}
-	until(t, func() bool { return len(a.busy) == 0 && len(a.pages) == 1 })
-	if len(a.missing) != 2 || a.missing[0].Title != "Song B" || a.missing[1].Title != "Song C" {
-		t.Fatalf("missing %v, log %q", a.missing, a.log)
+	until(t, a, func() bool { return len(a.busy) == 0 && len(a.pages) == 1 })
+	var left []string
+	for _, m := range a.missing {
+		left = append(left, m.Title)
+	}
+	if !slices.Equal(left, []string{"Song B", "Song C", "Song A [EX]", "Song G", "Gone"}) {
+		t.Fatalf("missing %q, log %q", left, a.log)
 	}
 	tt.Frame()
 	if !tt.HasText("Browser (1)") {
 		t.Fatalf("texts %q", tt.Texts())
 	}
 	joined := strings.Join(a.log, "\n")
-	for _, said := range []string{"4 of 4 charts missing", "Song A: added /lib/Song A", "Song D: added /lib/Song D",
-		"Song B: needs a browser: https://b.example/b", "bmssearch.net refused BMSeeker (HTTP 403)", "Song C: no link"} {
+	for _, said := range []string{"8 of 8 charts missing", "(1/9) Gone: the table lists no such chart",
+		"Song A: added /lib/Song A", "Song D: added /lib/Song D", "Pack [1]: added /lib/Pack", "Pack [2]: owned /lib/Pack",
+		"Song B: needs a browser: https://b.example/b", "bmssearch.net refused BMSeeker (HTTP 403)", "Song C: no link",
+		"Song G: no link", "(9/9) "} {
 		if !strings.Contains(joined, said) {
 			t.Fatalf("%q not in the log %q", said, joined)
 		}
@@ -149,9 +214,10 @@ func TestTablesToBrowser(t *testing.T) {
 	// the fixture answers only for this command line
 	a.settings.ThirdParty = true
 	got := 0
-	if err := a.cli([]string{"library", "pending", "--library=/lib"}, func(Record) { got++ }); err != nil {
+	if err := a.cli([]string{"library", "pending", "--library=/lib"}, "", func(Record) { got++ }); err != nil {
 		t.Fatal(err)
 	}
+	pump(a)
 	joined = strings.Join(a.log, "\n")
 	if got != 0 || !strings.Contains(joined, "0 charts waiting") || strings.Contains(joined, "third-party sources are on") {
 		t.Fatalf("records %d, log %q", got, joined)
@@ -213,30 +279,26 @@ func TestThirdPartyAsksFirst(t *testing.T) {
 }
 
 // wordsCLI notes each argument it was given on a line of its own, and an
-// empty line after a command's last.
+// empty line after a command's last; and what it read on stdin.
 const wordsCLI = `#!/bin/sh
 { for a in "$@"; do printf '%s\n' "$a"; done; echo; } >> "$(dirname "$0")/args"
+cat >> "$(dirname "$0")/stdin"
 `
 
 // What a table or a server says (a title, an artist, an MD5, links, a
 // table's URL, a refused host's name) reaches the CLI as an option's
-// value or after "--", never as an argument the CLI could read as an
-// option.
+// value, after "--" or on stdin, never as an argument the CLI could read
+// as an option.
 func TestSaidValuesAreNoOptions(t *testing.T) {
 	a := fakeApp(t)
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(wordsCLI), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BMSEEKER_CLI", filepath.Join(bin, "bmseeker"))
-	cliOnce = sync.Once{}
+	bin := fakeCLI(t, wordsCLI)
 	m := missing{Title: "-ERROR", Artist: "--reinstall", MD5: "--third-party", URL: "--config=/x.json", URLDiff: "-h"}
 	bySHA := missing{Title: "-V", SHA256: "--name-folders"}
 	said := []string{m.Title, m.Artist, m.MD5, m.URL, m.URLDiff, bySHA.Title, bySHA.SHA256, "-x.evil.example", "--help"}
 	a.refused = []string{"-x.evil.example"}
 	a.missingFrom = "--help"
 	a.download([]missing{m, bySHA})
-	until(t, func() bool { return len(a.busy) == 0 })
+	until(t, a, func() bool { return len(a.busy) == 0 })
 	args, _ := os.ReadFile(filepath.Join(bin, "args"))
 	cmds := strings.Split(strings.TrimSpace(string(args)), "\n\n")
 	words := strings.Split(cmds[0], "\n")
@@ -244,9 +306,11 @@ func TestSaidValuesAreNoOptions(t *testing.T) {
 	if len(cmds) != 1 || end < 0 || !slices.Equal(words[end+1:], []string{"--help"}) {
 		t.Fatalf("not one command, its table after \"--\": %q", cmds)
 	}
-	if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--md5=--third-party") ||
-		!slices.Contains(words[:end], "--sha256=--name-folders") {
+	if !slices.Contains(words[:end], "--skip-host=-x.evil.example") || !slices.Contains(words[:end], "--chosen=-") {
 		t.Errorf("values not attached to their options: %q", words)
+	}
+	if stdin, _ := os.ReadFile(filepath.Join(bin, "stdin")); string(stdin) != "--third-party\n--name-folders\n" {
+		t.Errorf("stdin %q", stdin)
 	}
 	// the Link tab's command
 	link := installArgs("/lib", m.Title, m.Artist, m.MD5, []string{"--own-links"}, m.URL)
@@ -258,6 +322,76 @@ func TestSaidValuesAreNoOptions(t *testing.T) {
 		if slices.Contains(said, w) {
 			t.Errorf("%q is an argument of its own: %q, %q", w, words, link)
 		}
+	}
+}
+
+// A download of thousands of charts is one command line of the size of
+// one's: the charts go on stdin (a command line has a limit: Windows'
+// 32,767 characters are some 800 MD5s).
+func TestManyChartsOneCommandLine(t *testing.T) {
+	a := fakeApp(t)
+	bin := fakeCLI(t, wordsCLI)
+	a.missingFrom = "https://t.example/table.json"
+	var ms []missing
+	for i := 0; i < 3000; i++ {
+		ms = append(ms, missing{Title: fmt.Sprint(i), MD5: fmt.Sprintf("%032x", i)})
+	}
+	a.download(ms[:1])
+	until(t, a, func() bool { return len(a.busy) == 0 })
+	a.download(ms)
+	until(t, a, func() bool { return len(a.busy) == 0 })
+	args, _ := os.ReadFile(filepath.Join(bin, "args"))
+	cmds := strings.Split(strings.TrimSpace(string(args)), "\n\n")
+	if len(cmds) != 2 || cmds[0] != cmds[1] {
+		t.Fatalf("command lines %q", cmds)
+	}
+	stdin, _ := os.ReadFile(filepath.Join(bin, "stdin"))
+	if lines := strings.Split(strings.TrimSpace(string(stdin)), "\n"); len(lines) != 3001 || lines[3000] != ms[2999].MD5 {
+		t.Fatalf("%d lines on stdin", len(lines))
+	}
+}
+
+// Settings that could not be read are said, and read again when a job
+// starts; what they say of the downloads folder is taken as the CLI takes
+// it.
+func TestSettingsReadAgain(t *testing.T) {
+	a := fakeApp(t)
+	a.settings.Read = false
+	bin := fakeCLI(t, "#!/bin/sh\necho 'bmseeker: config.json: no such setting' >&2\nexit 2\n")
+	a.readSettings()
+	until(t, a, func() bool { return len(a.busy) == 0 })
+	if a.settings.Read || !strings.Contains(strings.Join(a.log, "\n"), "Reading the settings: config.json: no such setting") {
+		t.Fatalf("settings %+v, log %q", a.settings, a.log)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "bmseeker"), []byte(`#!/bin/sh
+echo '{"config":{"tables":["https://t.example/t.json"],"downloads":"/elsewhere/dl","third_party":false}}'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.job("Something", func() error { return nil })
+	until(t, a, func() bool { return len(a.busy) == 0 })
+	if !a.settings.Read || a.table != "https://t.example/t.json" || a.settings.downloads() != "/elsewhere/dl" {
+		t.Fatalf("settings %+v, table %q, log %q", a.settings, a.table, a.log)
+	}
+	a.settings.Downloads = ""
+	if a.settings.downloads() != "/lib" {
+		t.Errorf("downloads %q", a.settings.downloads())
+	}
+}
+
+// Third-party sources the settings file turns on (the window never asked)
+// are told once a session.
+func TestThirdPartyFromTheSettingsFile(t *testing.T) {
+	a := fakeApp(t)
+	fakeCLI(t, "#!/bin/sh\necho '{\"notice\":\"third_party\",\"text\":\"third-party sources are on\"}'\n")
+	for i := 0; i < 2; i++ {
+		if err := a.cli([]string{"library", "pending", "--library=/lib"}, "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pump(a)
+	if n := strings.Count(strings.Join(a.log, "\n"), "third-party sources are on"); n != 1 {
+		t.Fatalf("told %d times: %q", n, a.log)
 	}
 }
 

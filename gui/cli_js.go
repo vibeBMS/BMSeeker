@@ -96,10 +96,10 @@ func awaitLines(start func(each js.Value) js.Value, onLine func(kind, text strin
 	}
 }
 
-// runCLI runs `bmseeker --json args...` in the page: each record it writes
-// goes to onRecord and each note to onNote, as they come; then it returns
-// how the command ended.
-func runCLI(args []string, onRecord func(Record), onNote func(string)) error {
+// runCLI runs `bmseeker --json args...` in the page, stdin what it reads
+// for "-": each record it writes goes to onRecord and each note to onNote,
+// as they come; then it returns how the command ended.
+func runCLI(args []string, stdin string, onRecord func(Record), onNote func(string)) error {
 	list := make([]any, 0, len(args)+1)
 	list = append(list, "--json")
 	for _, a := range args {
@@ -107,7 +107,7 @@ func runCLI(args []string, onRecord func(Record), onNote func(string)) error {
 	}
 	var last string
 	code, err := awaitLines(func(each js.Value) js.Value {
-		return shim().Call("run", list, each)
+		return shim().Call("run", list, each, stdin)
 	}, func(kind, text string) {
 		var r Record
 		switch {

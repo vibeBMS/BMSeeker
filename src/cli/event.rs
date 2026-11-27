@@ -15,7 +15,7 @@ use crate::hosts::Want;
 use crate::manbow;
 use clap::Subcommand;
 use serde_json::{json, Map, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub(super) enum Event {
@@ -74,7 +74,7 @@ fn works(r: &Run, venue: u32, overrides: Option<PathBuf>) -> Result<(), String> 
         &page(manbow::work_list_url(base, venue))?,
     );
     let by_hand = match overrides {
-        Some(p) => records(&read_text(&p)?, "num")?,
+        Some(p) => records(&r.read_text(&p)?, "num")?,
         None => Vec::new(),
     };
     let (mut review, mut disq) = (0, 0);
@@ -126,9 +126,9 @@ fn check(
     minutes: Option<u64>,
     search: bool,
 ) -> Result<(), String> {
-    let works = records(&read_text(&works)?, "num")?;
+    let works = records(&r.read_text(&works)?, "num")?;
     let known = match known {
-        Some(p) if p.exists() => records(&read_text(&p)?, "url")?,
+        Some(p) if p.exists() => records(&r.read_text(&p)?, "url")?,
         _ => Vec::new(),
     };
     let sources = crate::sources::Sources::from_config(r.config(), Vec::new());
@@ -314,17 +314,6 @@ impl Checks<'_> {
         let state = s(&rec, "state");
         self.r.out.json(&Value::Object(rec));
         state
-    }
-}
-
-/// `path`'s text, or stdin's for `-`.
-fn read_text(path: &Path) -> Result<String, String> {
-    if path == Path::new("-") {
-        let mut s = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| e.to_string())?;
-        Ok(s)
-    } else {
-        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 

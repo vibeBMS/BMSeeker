@@ -4,7 +4,9 @@
 // changed to the target.
 //
 // In:  {id, op: "open", kind, proxy, dir?}   kind: "vibe" | "folder" | "zip"
-//      {id, op: "run", args, proxy, file?}    file: one the user downloaded,
+//      {id, op: "run", args, stdin, proxy, file?}
+//                                             stdin: what the command reads for "-";
+//                                             file: one the user downloaded,
 //                                             put in the downloads folder for "{file}" in args
 //      {id, op: "zip"}
 // Out: {id, line, kind}                       a command's line ("record" / "note")
@@ -249,7 +251,7 @@ async function handle(id, m) {
         const at = session.put(m.file.name, new Uint8Array(await m.file.arrayBuffer()));
         args = args.map((a) => (a === "{file}" ? at : a));
       }
-      const code = session.run(args, (kind, line) => postMessage({ id, kind, line }));
+      const code = session.run(args, m.stdin || "", (kind, line) => postMessage({ id, kind, line }));
       // (a zip's files stay here until it is downloaded)
       if (target?.root) await flush(say);
       return { code, files: session.count() };

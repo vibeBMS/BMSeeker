@@ -28,8 +28,6 @@ func main() {
 		}
 	}
 	a := newApp(library)
-	a.connect()
-	a.readSettings()
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     name(),
@@ -39,6 +37,11 @@ func main() {
 			MinHeight: 480,
 			Content:   ui.View(a.view),
 		})
+		// (what changes the state runs on the window's goroutine: none
+		// before the window is there)
+		a.post = a.win.Update
+		a.connect()
+		a.readSettings()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

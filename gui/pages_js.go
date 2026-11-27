@@ -41,7 +41,7 @@ func (a *app) importButton(c *ui.Context) {
 		a.update(func() {
 			a.job("Importing", func() error {
 				got := false
-				err := a.cli([]string{"library", "import", "--library=" + lib, "--", "{file}"}, func(r Record) {
+				err := a.cli([]string{"library", "import", "--library=" + lib, "--", "{file}"}, "", func(r Record) {
 					got = true
 					a.say("%s: %s %s", name.String(), r.S("state"), r.S("path"))
 				})

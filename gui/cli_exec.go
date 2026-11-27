@@ -149,16 +149,18 @@ func passThrough(args []string) {
 	os.Exit(0)
 }
 
-// runCLI runs `bmseeker --json args...`: each record it writes goes to
-// onRecord and each note (stderr) to onNote, as they come, on the
-// goroutine that reads them; then it returns how the command ended.
-func runCLI(args []string, onRecord func(Record), onNote func(string)) error {
+// runCLI runs `bmseeker --json args...`, stdin what it reads for "-": each
+// record it writes goes to onRecord and each note (stderr) to onNote, as
+// they come, on the goroutine that reads them; then it returns how the
+// command ended.
+func runCLI(args []string, stdin string, onRecord func(Record), onNote func(string)) error {
 	p, err := cliPath()
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(p, append([]string{"--json"}, args...)...)
 	hideConsole(cmd)
+	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

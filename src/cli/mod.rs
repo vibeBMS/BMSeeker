@@ -22,7 +22,9 @@ use crate::net::job::{run_job, Driver, TaskJob};
 use crate::net::Task;
 use crate::refusal::{Guarded, Refusal};
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -118,7 +120,12 @@ impl Cli {
             #[cfg(not(target_arch = "wasm32"))]
             Command::Event(c) => event::event(run, c),
             Command::Config(ConfigCommand::Show) => {
-                let v = serde_json::json!({ "config": run.config() });
+                let mut v = serde_json::json!({ "config": run.config() });
+                // (as the settings file writes it: an f32 read as an f64
+                // has digits of its own, 0.9900000095367432)
+                if let Ok(m) = run.config().min_coverage.to_string().parse::<f64>() {
+                    v["config"]["min_coverage"] = m.into();
+                }
                 run.out.record(v.clone(), || format!("{:#}", v["config"]));
                 Ok(())
             }
@@ -187,18 +194,37 @@ impl SongArgs {
 }
 
 /// What every command runs with: where its records go, the settings and
-/// hosts, the files libraries are in, and what does its requests.
+/// hosts, the files libraries are in, what does its requests, and what it
+/// reads for `-`.
 #[derive(Clone)]
 pub struct Run<'a> {
     pub out: Out,
     pub cx: Context,
     pub fs: Arc<dyn Store + Send + Sync>,
     pub net: &'a dyn Driver,
+    pub stdin: Stdin,
 }
+
+/// What a command reads for a file named `-`: natively stdin, in a web
+/// page what the page hands the run.
+pub type Stdin = Rc<RefCell<dyn std::io::Read>>;
 
 impl Run<'_> {
     fn config(&self) -> &Config {
         &self.cx.config
+    }
+
+    /// The text of the file `path` (the run's files), or stdin's for `-`.
+    fn read_text(&self, path: &Path) -> Result<String, String> {
+        let bytes = if path == Path::new("-") {
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(&mut *self.stdin.borrow_mut(), &mut b)
+                .map_err(|e| format!("stdin: {e}"))?;
+            b
+        } else {
+            crate::fs::Fs::read(&*self.fs, path).map_err(|e| format!("{}: {e}", path.display()))?
+        };
+        String::from_utf8(bytes).map_err(|_| format!("{}: not UTF-8 text", path.display()))
     }
 
     /// `task` run to its end.
@@ -246,6 +272,7 @@ mod tests {
             cx: Context::default(),
             fs: Arc::new(crate::fs::Mem::default()),
             net: &Limiting,
+            stdin: Rc::new(RefCell::new(std::io::empty())),
         };
         let link = "https://mega.nz/file/bzQy3bYS#Og0LBoWkfbKwxUceGvzLHDl2exyI0l1DiQ3XNw79zMw";
         let cli = Cli::try_parse_from(["bmseeker", "--json", "link", "resolve", link]).unwrap();
@@ -258,12 +285,16 @@ mod tests {
     }
 
     /// The protocol as the window reads it: `testdata/records.jsonl`, each
-    /// line a run (its command line, the lines it wrote in order, its exit
-    /// code), which `gui/gui_test.go` replays as the CLI. Its runs are the
-    /// window's: the settings, a table's missing charts, those chosen
-    /// downloaded (one into the library, one a page, one whose source
-    /// refuses, one the table names by its SHA-256 alone), a run after a refusal and with third parties' sources, and
-    /// the script a page's window runs. The commands must write them as the
+    /// line a run (its command line, what it read on stdin, the lines it
+    /// wrote in order, its exit code), which `gui/gui_test.go` replays as
+    /// the CLI. Its runs are the window's: the settings, a table's missing
+    /// charts, those chosen downloaded (one into the library, one a page,
+    /// one whose source refuses, one the table names by its SHA-256 alone,
+    /// a separate chart whose song is there and whose own link is dead, the
+    /// two charts of one pack, one named by its SHA-256 without a link, and
+    /// a hash the table does not list), one the library has chosen again,
+    /// a run after a refusal and with third parties' sources, and the
+    /// script a page's window runs. The commands must write them as the
     /// file has them; `BMSEEKER_BLESS=1 cargo test --features cli records`
     /// writes it anew (a change of the protocol, which the window's test
     /// then reads). (Not on Windows: a path's separator there is `\`.)
@@ -273,11 +304,17 @@ mod tests {
         use crate::install::md5_hex;
         use crate::net::job::Served;
         const TABLE: &str = "https://t.example/table.json";
-        const SONG_A: &str = "#TITLE Song A\n#ARTIST x\n#WAV01 01.wav\n#00111:01\n";
-        const SONG_D: &str = "#TITLE Song D\n#ARTIST w\n#WAV01 01.wav\n#00111:01\n";
-        let (a, b, c) = (md5_hex(SONG_A.as_bytes()), "b".repeat(32), "c".repeat(32));
-        // (a table that gives this chart its SHA-256 alone)
-        let d = crate::chart::sha256_hex(SONG_D.as_bytes());
+        let chart = |title: &str, artist: &str| {
+            format!("#TITLE {title}\n#ARTIST {artist}\n#WAV01 01.wav\n#00111:01\n")
+        };
+        let (song_a, song_d) = (chart("Song A", "x"), chart("Song D", "w"));
+        let (pack_1, pack_2) = (chart("Pack [1]", "p"), chart("Pack [2]", "p"));
+        let (a, b, c) = (md5_hex(song_a.as_bytes()), "b".repeat(32), "c".repeat(32));
+        // (tables that give these charts their SHA-256 alone)
+        let d = crate::chart::sha256_hex(song_d.as_bytes());
+        let g = crate::chart::sha256_hex(chart("Song G", "v").as_bytes());
+        let e = md5_hex(chart("Song A [EX]", "x").as_bytes());
+        let (p1, p2) = (md5_hex(pack_1.as_bytes()), md5_hex(pack_2.as_bytes()));
         let data = serde_json::json!([
             {"md5": a, "title": "Song A", "artist": "x", "level": "1",
                 "url": "https://a.example/a.zip", "url_diff": ""},
@@ -286,8 +323,15 @@ mod tests {
             {"md5": c, "title": "Song C", "artist": "z", "level": "2", "url": "", "url_diff": ""},
             {"sha256": d, "title": "Song D", "artist": "w", "level": "2",
                 "url": "https://d.example/d.zip", "url_diff": ""},
+            {"md5": e, "title": "Song A [EX]", "artist": "x", "level": "2",
+                "url": "https://a.example/a.zip", "url_diff": "https://a.example/dead.bms"},
+            {"md5": p1, "title": "Pack [1]", "artist": "p", "level": "2",
+                "url": "https://p.example/p.zip", "url_diff": ""},
+            {"md5": p2, "title": "Pack [2]", "artist": "p", "level": "2",
+                "url": "https://p.example/p.zip", "url_diff": ""},
+            {"sha256": g, "title": "Song G", "artist": "v", "level": "2", "url": "", "url_diff": ""},
         ]);
-        struct Hosts(Vec<u8>, Vec<u8>, Vec<u8>);
+        struct Hosts(Vec<u8>, Vec<(&'static str, Vec<u8>)>);
         impl Driver for Hosts {
             fn perform(&self, effect: Effect) -> Fed {
                 match effect {
@@ -302,22 +346,38 @@ mod tests {
                         }
                         _ => Err(NetError::Status(404)),
                     }),
-                    Effect::Download { target, .. } => Fed::Downloaded(match target.url.as_str() {
-                        "https://a.example/a.zip" => Ok(Served::bytes(self.1.clone(), None, None)),
-                        "https://d.example/d.zip" => Ok(Served::bytes(self.2.clone(), None, None)),
-                        "https://b.example/b" => {
-                            Ok(Served::bytes(b"<html>a page</html>".to_vec(), None, None))
-                        }
-                        _ => Err(NetError::Status(404).into()),
-                    }),
+                    Effect::Download { target, .. } => {
+                        Fed::Downloaded(match self.1.iter().find(|(u, _)| *u == target.url) {
+                            Some((_, body)) => Ok(Served::bytes(body.clone(), None, None)),
+                            None => Err(NetError::Status(404).into()),
+                        })
+                    }
                     Effect::Sleep(_) => Fed::Woke,
                 }
             }
         }
+        let zip = crate::testkit::zip;
         let net = Hosts(
             data.to_string().into_bytes(),
-            crate::testkit::zip(&[("Song A/a.bms", SONG_A), ("Song A/01.wav", "RIFF")]),
-            crate::testkit::zip(&[("Song D/d.bms", SONG_D), ("Song D/01.wav", "RIFF")]),
+            vec![
+                (
+                    "https://a.example/a.zip",
+                    zip(&[("Song A/a.bms", song_a.as_str()), ("Song A/01.wav", "RIFF")]),
+                ),
+                (
+                    "https://d.example/d.zip",
+                    zip(&[("Song D/d.bms", song_d.as_str()), ("Song D/01.wav", "RIFF")]),
+                ),
+                (
+                    "https://p.example/p.zip",
+                    zip(&[
+                        ("Pack/1.bms", pack_1.as_str()),
+                        ("Pack/2.bms", pack_2.as_str()),
+                        ("Pack/01.wav", "RIFF"),
+                    ]),
+                ),
+                ("https://b.example/b", b"<html>a page</html>".to_vec()),
+            ],
         );
         // the defaults, but a user agent no version changes, the sources the
         // hosts here answer, and their table
@@ -328,29 +388,44 @@ mod tests {
             ..Config::default()
         };
         let fs: Arc<crate::fs::Mem> = Arc::default();
-        let md5s = [&a, &b, &c].map(|m| format!("--md5={m}"));
-        let by_sha = format!("--sha256={d}");
-        let get = ["--json", "table", "missing", "--library=/lib", "--get"]
-            .into_iter()
-            .chain(md5s.iter().map(String::as_str))
-            .chain([by_sha.as_str(), "--", TABLE])
-            .collect::<Vec<_>>();
-        let runs: [&[&str]; 5] = [
-            &["--json", "config", "show"],
-            &["--json", "table", "missing", "--library=/lib", "--", TABLE],
-            &get,
-            &[
-                "--json",
-                "--third-party",
-                "--skip-host=bmssearch.net",
-                "library",
-                "pending",
-                "--library=/lib",
-            ],
-            &["--json", "link", "page-script"],
+        // the window's rows in order, and one gone from the table since
+        let chosen = [&a, &b, &c, &d, &e, &p1, &p2, &g, &"f".repeat(32)]
+            .map(|h| format!("{h}\n"))
+            .concat();
+        let get = [
+            "--json",
+            "table",
+            "missing",
+            "--library=/lib",
+            "--get",
+            "--chosen=-",
+            "--",
+            TABLE,
+        ];
+        let again = format!("{a}\n");
+        let runs: [(&[&str], &str); 6] = [
+            (&["--json", "config", "show"], ""),
+            (
+                &["--json", "table", "missing", "--library=/lib", "--", TABLE],
+                "",
+            ),
+            (&get, &chosen),
+            (&get, &again),
+            (
+                &[
+                    "--json",
+                    "--third-party",
+                    "--skip-host=bmssearch.net",
+                    "library",
+                    "pending",
+                    "--library=/lib",
+                ],
+                "",
+            ),
+            (&["--json", "link", "page-script"], ""),
         ];
         let mut file = String::new();
-        for args in runs {
+        for (args, stdin) in runs {
             let lines: Rc<RefCell<Vec<serde_json::Value>>> = Rc::default();
             let sink = lines.clone();
             let cli = Cli::try_parse_from(std::iter::once(&"bmseeker").chain(args)).unwrap();
@@ -364,6 +439,7 @@ mod tests {
                 cx: Context::new(cli.settings(config.clone())),
                 fs: fs.clone(),
                 net: &net,
+                stdin: Rc::new(RefCell::new(std::io::Cursor::new(stdin.to_string()))),
             };
             // (as the binary ends)
             let exit = match cli.run(&run) {
@@ -373,11 +449,16 @@ mod tests {
                     1
                 }
             };
-            let run = serde_json::json!({"args": args, "lines": *lines.borrow(), "exit": exit});
+            let mut run = serde_json::json!({"args": args});
+            if !stdin.is_empty() {
+                run["stdin"] = stdin.into();
+            }
+            run["lines"] = serde_json::json!(*lines.borrow());
+            run["exit"] = exit.into();
             file.push_str(&format!("{run}\n"));
         }
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/records.jsonl");
-        if std::env::var_os("BMSEEKER_BLESS").is_some() {
+        if std::env::var("BMSEEKER_BLESS").as_deref() == Ok("1") {
             std::fs::write(path, &file).unwrap();
         }
         let kept = std::fs::read_to_string(path).unwrap_or_default();
@@ -394,6 +475,73 @@ mod tests {
             kept.lines().count(),
             "testdata/records.jsonl: runs"
         );
+    }
+
+    /// What reads the records gone (the window closed): the run ends, no
+    /// download started after (`main` cancels it when a line cannot be
+    /// written).
+    #[test]
+    fn a_reader_gone_ends_the_run() {
+        use crate::net::job::Served;
+        const TABLE: &str = "https://t.example/table.json";
+        struct Hosts(Vec<u8>, RefCell<Vec<String>>);
+        impl Driver for Hosts {
+            fn perform(&self, effect: Effect) -> Fed {
+                match effect {
+                    Effect::Http(r) => Fed::Http(match r.url() {
+                        TABLE => Ok(br#"{"name":"T","symbol":"t","data_url":"d.json"}"#.to_vec()),
+                        "https://t.example/d.json" => Ok(self.0.clone()),
+                        _ => Err(NetError::Status(404)),
+                    }),
+                    Effect::Download { target, .. } => {
+                        self.1.borrow_mut().push(target.url);
+                        Fed::Downloaded(Ok(Served::bytes(b"<html>".to_vec(), None, None)))
+                    }
+                    Effect::Sleep(_) => Fed::Woke,
+                }
+            }
+        }
+        /// A pipe whose reader goes once a download's record comes.
+        struct Closing;
+        impl std::io::Write for Closing {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                match String::from_utf8_lossy(b).contains("\"state\"") {
+                    true => Err(std::io::ErrorKind::BrokenPipe.into()),
+                    false => Ok(b.len()),
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let data = serde_json::json!([
+            {"md5": "a".repeat(32), "title": "A", "level": "1", "url": "https://h.example/a.zip"},
+            {"md5": "b".repeat(32), "title": "B", "level": "1", "url": "https://h.example/b.zip"},
+        ]);
+        let net = Hosts(data.to_string().into_bytes(), RefCell::default());
+        let progress = crate::progress::Progress::new();
+        let p = progress.clone();
+        let run = Run {
+            out: Out::writing(true, || Closing, std::io::sink, move || p.cancel()),
+            cx: Context::default().with_progress(progress),
+            fs: Arc::new(crate::fs::Mem::default()),
+            net: &net,
+            stdin: Rc::new(RefCell::new(std::io::empty())),
+        };
+        let args = [
+            "bmseeker",
+            "--json",
+            "table",
+            "missing",
+            "-L",
+            "/lib",
+            "--get",
+            "--own-links",
+            TABLE,
+        ];
+        let e = Cli::try_parse_from(args).unwrap().run(&run).unwrap_err();
+        assert_eq!(e, NetError::Cancelled.to_string());
+        assert_eq!(*net.1.borrow(), ["https://h.example/a.zip"]);
     }
 
     /// The window's command lines (`gui/app.go`): an option's value
@@ -466,6 +614,7 @@ mod tests {
             cx: Context::default(),
             fs: Arc::new(crate::fs::Mem::default()),
             net: &Offline,
+            stdin: Rc::new(RefCell::new(std::io::empty())),
         };
         let cli = Cli::try_parse_from(["bmseeker", "--json", "link", "page-script"]).unwrap();
         cli.run(&run).unwrap();
@@ -508,6 +657,7 @@ mod tests {
             cx: Context::default(),
             fs: Arc::new(crate::fs::Disk),
             net: &Drive,
+            stdin: Rc::new(RefCell::new(std::io::empty())),
         };
         let link = "https://drive.google.com/drive/folders/F";
         let args = ["bmseeker", "link", "get", link, "-o", out.to_str().unwrap()];
@@ -540,6 +690,7 @@ mod tests {
             cx: Context::default(),
             fs: Arc::new(crate::fs::Disk),
             net: &Offline,
+            stdin: Rc::new(RefCell::new(std::io::empty())),
         };
         let args = ["bmseeker", "link", "get", "https://h.example/a.zip", "-o"];
         let args = args.into_iter().chain([socket.to_str().unwrap()]);

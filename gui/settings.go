@@ -17,8 +17,10 @@ type Settings struct {
 	// thirdPartyWarning (remembered: thirdPartyAcknowledged).
 	ThirdParty bool
 	// The folder in a library where downloads wait (the CLI's `downloads`
-	// setting; "" until it is read).
+	// setting: in the library, or a folder of its own).
 	Downloads string
+	// Whether the CLI's settings are read.
+	Read bool
 }
 
 // What the window asks before third-party sources are turned on the first
@@ -30,11 +32,16 @@ const (
 		"vouches for them. Keeping to those sites' terms and to the copyright holders' rights is your responsibility."
 )
 
-// downloads is the library's downloads folder ("" while the CLI's
-// settings are not read, or there is no library).
+// downloads is the library's downloads folder, as the CLI makes it (a
+// `downloads` setting that is absolute is that folder; "" is the library
+// itself); "" while the CLI's settings are not read, or there is no
+// library.
 func (s Settings) downloads() string {
-	if s.Library == "" || s.Downloads == "" {
+	switch {
+	case s.Library == "" || !s.Read:
 		return ""
+	case filepath.IsAbs(s.Downloads):
+		return s.Downloads
 	}
 	return filepath.Join(s.Library, s.Downloads)
 }
