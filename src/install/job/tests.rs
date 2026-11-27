@@ -1,6 +1,6 @@
 use super::*;
 use crate::hosts::{Host, Hosts, Resolved};
-use crate::net::{BoxTask, Ready};
+use crate::net::{Answer, BoxTask, Ready};
 use crate::progress::Progress;
 use crate::testkit::zip;
 use std::cell::RefCell;

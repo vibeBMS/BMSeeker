@@ -90,6 +90,27 @@ pub(crate) fn move_file(store: &dyn Store, from: &Path, to: &Path) -> io::Result
     }
 }
 
+/// An archive: a file in the store, or bytes.
+#[derive(Debug)]
+pub enum Blob {
+    File(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+impl Blob {
+    /// The blob as the file `to` of `store` (a file moved there).
+    pub(crate) fn put(self, store: &dyn Store, to: &Path) -> io::Result<()> {
+        match self {
+            Blob::File(p) => move_file(store, &p, to),
+            Blob::Bytes(b) => {
+                let mut w = store.create(to, None)?;
+                w.write_all(&b)?;
+                w.flush()
+            }
+        }
+    }
+}
+
 /// Seconds since 1970.
 pub(crate) fn now() -> u64 {
     web_time::SystemTime::now()

@@ -132,7 +132,7 @@ pub fn probe(
     want: Option<Want>,
     tmp: &Path,
     cx: &crate::hosts::Context,
-    net: &dyn crate::install::job::Driver,
+    net: &dyn crate::net::job::Driver,
 ) -> Checked {
     let _ = std::fs::remove_dir_all(tmp);
     if let Err(e) = std::fs::create_dir_all(tmp) {
@@ -144,7 +144,7 @@ pub fn probe(
     let file = tmp.join("download");
     let r = if crate::links::chart_link(link) {
         let mut plain = crate::install::job::Acquire::plain(link, file.clone(), cx);
-        match crate::install::job::run_job(&mut plain, net) {
+        match crate::net::job::run_job(&mut plain, net) {
             Ok(g) if g.head.trim_ascii_start().starts_with(b"<") => Err(Fetch::Page),
             r => r.map(|_| ()),
         }
@@ -179,7 +179,7 @@ pub fn probe(
                 let dir: PathBuf = tmp.join("unpacked");
                 match crate::import::unpack_into(
                     &crate::fs::Disk,
-                    crate::unpack::Blob::File(file.clone()),
+                    crate::fs::Blob::File(file.clone()),
                     &format!("a.{format}"),
                     &dir,
                 ) {

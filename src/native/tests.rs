@@ -1,7 +1,6 @@
 use super::*;
 use crate::config::Config;
-use crate::hosts::Target;
-use crate::install::job::{Served, TaskJob, Unserved};
+use crate::net::job::{Served, Target, TaskJob, Unserved};
 use crate::net::{Kind, Request};
 use crate::testkit::{serve, tmp, Reply};
 
@@ -117,8 +116,8 @@ fn downloads() {
     // a MEGA file: decrypted, and the file its key was made for
     let got = download(format!("{}/mega", s.url), Some(key.clone()));
     assert_eq!((got.name, got.at), (None, None));
-    assert_eq!(got.head, plain[..crate::unpack::HEAD]);
-    let crate::unpack::Blob::File(f) = &got.blob else {
+    assert_eq!(got.head, plain[..crate::net::job::HEAD]);
+    let crate::fs::Blob::File(f) = &got.blob else {
         panic!("not a file")
     };
     assert_eq!(std::fs::read(f).unwrap(), plain);
@@ -139,7 +138,7 @@ fn downloads() {
 }
 
 /// A driver's downloads from one host share a connection; a big file's
-/// head is its first [`HEAD`](crate::unpack::HEAD) bytes.
+/// head is its first [`HEAD`](crate::net::job::HEAD) bytes.
 #[test]
 fn downloads_share_a_connection() {
     let big: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
@@ -161,7 +160,7 @@ fn downloads_share_a_connection() {
         }
     }
     assert_eq!(s.connections(), 1);
-    assert_eq!(heads[1], big[..crate::unpack::HEAD]);
+    assert_eq!(heads[1], big[..crate::net::job::HEAD]);
 }
 
 /// The transport keeps to no refusals; under [`Guarded`] (one guard) a

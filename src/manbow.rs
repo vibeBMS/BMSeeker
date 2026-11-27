@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 // an event's works (the command-line tool's)
-#[cfg(feature = "tools")]
+#[cfg(feature = "cli")]
 mod works;
-#[cfg(feature = "tools")]
+#[cfg(feature = "cli")]
 pub use works::*;
 
 fn re(p: &str) -> Pattern {

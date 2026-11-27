@@ -2,7 +2,10 @@
 //! which request it needs next ([`Next::Ask`]) and is fed the answer, until
 //! it is done. A task does no I/O itself, so the same task runs natively
 //! (`native::Native`), in a web page (through a CORS proxy,
-//! asynchronously) and in tests (canned answers).
+//! asynchronously) and in tests (canned answers). A download is a
+//! [`job::Job`]: requests, files downloaded and waits as data.
+
+pub mod job;
 
 /// What a request fetches: how large its answer may be ([`Kind::limit`]).
 /// The limits are some ten times the largest of each kind measured (a

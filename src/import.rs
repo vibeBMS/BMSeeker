@@ -3,12 +3,12 @@
 //! folder (see `placement`), as [`install::take`](crate::install::take)
 //! does with a song's download. On any [`Store`] (a disk, a player's files).
 
-use crate::fs::Store;
+use crate::fs::{Blob, Store};
 use crate::install::plan::{taken, Outcome, Request};
 use crate::install::Done;
 use crate::library::Library;
 use crate::placement;
-use crate::unpack::{is_archive, open, safe_rel, unpack_from, Blob, Opened, BUDGET};
+use crate::unpack::{is_archive, open, safe_rel, unpack_from, Opened, BUDGET};
 use std::path::{Path, PathBuf};
 
 /// What became of a downloaded file.

@@ -47,7 +47,8 @@ impl Host for Uploaders {
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
-    use crate::hosts::{Context, Target};
+    use crate::hosts::Context;
+    use crate::net::job::Target;
     use crate::net::{run, Canned};
 
     #[test]

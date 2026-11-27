@@ -18,7 +18,7 @@ pub use out::{Line, Out};
 use crate::config::Config;
 use crate::fs::Store;
 use crate::hosts::{Context, Want};
-use crate::install::job::{run_job, Driver, TaskJob};
+use crate::net::job::{run_job, Driver, TaskJob};
 use crate::net::Task;
 use crate::refusal::{Guarded, Refusal};
 use clap::{Args, Parser, Subcommand};
@@ -187,7 +187,7 @@ impl Run<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install::job::{Effect, Fed};
+    use crate::net::job::{Effect, Fed};
     use crate::net::NetError;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -321,8 +321,8 @@ mod tests {
                     Effect::Http(_) => Fed::Http(Ok(LISTING.to_vec())),
                     Effect::Download { slot, .. } => {
                         std::fs::write(&slot, ZIP).unwrap();
-                        Fed::Downloaded(Ok(crate::install::job::Served {
-                            blob: crate::unpack::Blob::File(slot),
+                        Fed::Downloaded(Ok(crate::net::job::Served {
+                            blob: crate::fs::Blob::File(slot),
                             name: None,
                             at: None,
                             head: ZIP.to_vec(),

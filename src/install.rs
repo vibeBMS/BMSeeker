@@ -478,7 +478,7 @@ mod tests {
         }
         // (a download that is no archive: nothing comes of it but the sweep)
         let lib = &mut Library::new(Path::new("bms-stale"));
-        let blob = crate::unpack::Blob::Bytes(b"<html>".to_vec());
+        let blob = crate::fs::Blob::Bytes(b"<html>".to_vec());
         take(&m, blob, &Request::default(), dl, lib);
         for f in &kept {
             assert!(m.get(&dl.join(f)).is_some(), "{f}");

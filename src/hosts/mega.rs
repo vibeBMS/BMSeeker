@@ -875,7 +875,7 @@ pub(crate) mod tests {
             };
             let (h, key, node) = mega_folder(link.trim()).unwrap();
             let files = seen.entry(h.clone()).or_insert_with(|| {
-                use crate::install::job::{Driver, Effect, Fed};
+                use crate::net::job::{Driver, Effect, Fed};
                 let req = crate::net::Request::Post {
                     url: format!("{}&n={h}", Config::default().mega_api),
                     body: br#"[{"a":"f","c":1,"r":1,"ca":1}]"#.to_vec(),

@@ -5,8 +5,8 @@
 //! transport, kept to the run's refusals ([`crate::refusal`]) and to what
 //! an answer may have ([`Request::limit`](crate::net::Request::limit)).
 
-use crate::hosts::{MegaCipher, Target};
-use crate::install::job::Served;
+use crate::hosts::MegaCipher;
+use crate::net::job::{Served, Target};
 use crate::net::NetError;
 
 /// How long a request's answer may take to come, whole (ms): a driver's

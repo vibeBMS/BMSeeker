@@ -19,7 +19,7 @@
 //! - [`links`]: links for a table's songs whose own are missing or dead;
 //! - [`sources`]: where else a song's links are looked for, in order (BMS
 //!   SEARCH among them);
-//! - with the feature `tools` (the command-line tool's): `export` (a table
+//! - with the feature `cli` (the command-line tool's): `export` (a table
 //!   as LR2 custom folders or a beatoraja table cache), `probe` and an
 //!   event's works (`manbow`).
 //!
@@ -28,7 +28,7 @@
 //! memory). Whatever reads the network is a [`net::Task`] (it asks for
 //! requests and is fed the answers): [`hosts::Resolver`] (a link through
 //! its hosts' strategies), [`table::TableLoader`], BMS SEARCH's lookup. A
-//! download is an [`install::job::Job`] (requests, files downloaded, waits
+//! download is a [`net::job::Job`] (requests, files downloaded, waits
 //! as effects a platform's driver does): [`install::job::Acquire`] takes a
 //! link to its file. Natively `native::Native` drives both, kept to the
 //! run's refusals by [`refusal::Guarded`]; a web page's driver builds on
@@ -42,7 +42,7 @@ mod chart;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
-#[cfg(feature = "tools")]
+#[cfg(feature = "cli")]
 pub mod export;
 pub mod fs;
 pub mod hosts;
@@ -59,7 +59,7 @@ pub mod net;
 mod package;
 pub mod placement;
 // downloads and unpacks to a disk
-#[cfg(all(feature = "tools", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod probe;
 pub mod progress;
 pub mod refusal;

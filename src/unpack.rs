@@ -4,7 +4,10 @@
 //! `safe_rel`), within a budget (an archive can claim, or expand to,
 //! anything), with the archive's file times.
 
-use crate::fs::{move_file, safe_part, ReadSeek, Store};
+use crate::fs::{safe_part, ReadSeek, Store};
+// (an app names them here too)
+pub use crate::fs::Blob;
+pub use crate::net::job::HEAD;
 use crate::progress::{Progress, CANCELLED};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -123,10 +126,6 @@ impl Format {
     }
 }
 
-/// How many first bytes of a file [`sniff`] is given (a tar's first
-/// header is in them; a gzip's too, compressed).
-pub const HEAD: usize = 4096;
-
 /// A tar's first header (512 bytes) holds `ustar` at 257 (`ustar\0` in a
 /// POSIX one, `ustar ` in a GNU one).
 fn is_tar(h: &[u8]) -> bool {
@@ -191,27 +190,6 @@ pub fn archive_stem(name: &str) -> Option<&str> {
 pub(crate) fn is_archive(p: &Path) -> bool {
     p.file_name()
         .is_some_and(|n| archive_stem(&n.to_string_lossy()).is_some())
-}
-
-/// An archive: a file in the store, or bytes.
-#[derive(Debug)]
-pub enum Blob {
-    File(PathBuf),
-    Bytes(Vec<u8>),
-}
-
-impl Blob {
-    /// The blob as the file `to` of `store` (a file moved there).
-    pub(crate) fn put(self, store: &dyn Store, to: &Path) -> io::Result<()> {
-        match self {
-            Blob::File(p) => move_file(store, &p, to),
-            Blob::Bytes(b) => {
-                let mut w = store.create(to, None)?;
-                w.write_all(&b)?;
-                w.flush()
-            }
-        }
-    }
 }
 
 /// A file unpacked: its path below the folder, size, and time in the

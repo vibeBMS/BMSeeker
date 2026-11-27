@@ -27,10 +27,9 @@ name = "bmseeker"
 required-features = ["cli"]
 
 [features]
-cli = ["dep:clap", "tools", "serde_json/preserve_order"]
-# what only the command-line tool does: an event's works, probing a link,
-# exporting a table
-tools = []
+# the command-line tool, and what only it does: an event's works, probing a
+# link, exporting a table
+cli = ["dep:clap", "serde_json/preserve_order"]
 # archives and folders for tests (a player's too)
 testkit = []
 

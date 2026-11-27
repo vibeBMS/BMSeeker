@@ -13,16 +13,17 @@ web/                    the web page: bmseeker-web (the CLI's commands in a work
 .github/workflows/      CI; releases build the CLI, then the GUI around it
 ```
 
-Features: `cli` (the command-line tool: clap, and `tools`), `tools` (what
-only the tool does: an event's works, probing a link, exporting a table),
-`testkit` (archives, folders and a local server for tests, a player's too).
+Features: `cli` (the command-line tool: clap, and what only the tool does:
+an event's works, probing a link, exporting a table), `testkit` (archives,
+folders and a local server for tests, a player's too).
 
 ## Layers
 
 ```
 net            Request, Answer, NetError (code() for programs), Task / Next: requests as data
+net::job       Effect / Fed / Job / Driver: downloads as data (a Target, a file Served); run_job, TaskJob
 refusal        Refusals: the services that refused in a run (Context::refused); Guarded (the guard); challenge pages
-install::job   Effect / Fed / Job / Driver: downloads as data; run_job, TaskJob; Acquire, Files, Install
+install::job   the jobs of a download: Acquire, Files, Install
 native         Native: the transport natively (an HTTP agent for requests, one for downloads on the calling thread); fetch, fetch_files
 web            what a web page's drivers share: the CORS proxy's URLs, a served download, an answer's error
 hosts          Host strategies (a link -> a file, other links, or a page), Resolver, Context
@@ -75,14 +76,14 @@ Everything that talks to the network is a `net::Task`: `start()` and
 never does I/O, so the same code runs natively, in a web page (vibeBMS's
 fetch through its CORS proxy) and in tests (canned answers).
 
-A download is an `install::job::Job`: it asks for `Effect`s (a request, a
+A download is a `net::job::Job`: it asks for `Effect`s (a request, a
 file downloaded into a slot, a wait) and is fed what came of them (`Fed`).
 `run_job` runs one with a `Driver`; `TaskJob` runs a task as a job. A
 request or a download that meets a server's passing failure (502, 503,
 504) is asked again by the job after a wait (3 s, then 10 s), so every
 driver retries alike and none needs to. A download announced larger than
 the unpack budget, or growing past it, fails as an archive that large
-would.
+would. The jobs of a download, in `install::job`:
 
 - `Acquire`: one link to its file (resolved through the hosts; a page
   reached through redirects opened from where it ended; a page's other
@@ -581,7 +582,7 @@ folders changed are posted on the `BroadcastChannel` `vibebms-library`,
 which open vibeBMS pages list and mount again.
 
 The library builds for wasm32 (the network is `net::Task` and
-`install::job::Job`, so the browser makes the requests; `import`,
+`net::job::Job`, so the browser makes the requests; `import`,
 `install::take` and `unpack` work on whatever `fs::Store` the page keeps
 its files in); `unrar-rs` and `delharc` build for it.
 

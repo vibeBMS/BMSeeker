@@ -208,7 +208,7 @@ impl Needs {
 
 /// The share of `sounds` that `files` (paths in a song's folder) hold
 /// ([`Keys::coverage`]).
-#[cfg(any(test, all(feature = "tools", not(target_arch = "wasm32"))))]
+#[cfg(any(test, all(feature = "cli", not(target_arch = "wasm32"))))]
 pub(crate) fn coverage(files: &[String], sounds: &[String]) -> f32 {
     let names = Names::default();
     Keys::of(&names, files).coverage(&names, sounds)
@@ -1361,8 +1361,9 @@ mod tests {
     /// (older) archive times, do not replace the song's own.
     #[test]
     fn a_package_unpacked_with_its_times() {
+        use crate::fs::Blob;
         use crate::fs::Mem;
-        use crate::unpack::{unpack, Blob, BUDGET};
+        use crate::unpack::{unpack, BUDGET};
         let mem = Mem::default();
         let now = 1_700_000_000;
         mem.put(Path::new("bms/Song/01.ogg"), b"song's", now);

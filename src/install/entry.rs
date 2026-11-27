@@ -4,12 +4,13 @@
 //! has its song; and a batch of entries ([`Batch`]: a table's missing
 //! charts) gets each file once. [`EntryJob`] takes them.
 
-use super::job::{Dead, Fed, Install, Installed, Job, Step};
+use super::job::{Dead, Install, Installed};
 use super::{got, Done, Failure};
 use crate::chart::md5_key;
 use crate::fs::Store;
 use crate::hosts::{Context, DownloadKey, Want};
 use crate::library::Library;
+use crate::net::job::{Fed, Job, Step};
 use crate::net::NetError;
 use crate::package::Role;
 use crate::sources::{Query, Sources};
@@ -335,8 +336,8 @@ mod tests {
     use super::*;
     use crate::fs::Mem;
     use crate::install::job::tests::Canned;
-    use crate::install::job::{Served, Unserved};
     use crate::install::md5_hex;
+    use crate::net::job::{Served, Unserved};
     use crate::testkit::zip;
     use std::path::Path;
 
@@ -491,7 +492,7 @@ mod tests {
         let lib = Library::scan(&**m, Path::new("bms"));
         let job = EntryJob::new(m.clone(), "dl".into(), lib, e.clone(), sources, cx);
         let mut job = job.addons(addons.iter().map(|s| s.to_string()));
-        let out = crate::install::job::run_job(&mut job, d);
+        let out = crate::net::job::run_job(&mut job, d);
         let asked = asked.0.lock().unwrap().clone();
         (out, asked)
     }
@@ -799,7 +800,7 @@ mod tests {
         for e in &entries {
             let dl = downloads.clone();
             let job = EntryJob::new(Arc::new(Disk), dl, lib, e.clone(), Sources::default(), &cx);
-            let out = crate::install::job::run_job(&mut job.batch(batch), &native);
+            let out = crate::net::job::run_job(&mut job.batch(batch), &native);
             (lib, batch) = (out.lib, out.batch);
         }
         let mut asked = server.asked();
@@ -876,7 +877,7 @@ mod tests {
                 sources.clone(),
                 &cx,
             );
-            crate::install::job::run_job(&mut { job }, &crate::native::Native::new(&cx))
+            crate::net::job::run_job(&mut { job }, &crate::native::Native::new(&cx))
         };
         let want = Want {
             title: "Ours".into(),
