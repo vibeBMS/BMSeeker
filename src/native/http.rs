@@ -699,12 +699,14 @@ mod tests {
         let e = std::io::copy(&mut slow, &mut std::io::sink()).unwrap_err();
         assert!(e.get_ref().is_some_and(|e| e.is::<TooSlow>()), "{e}");
         assert!(t.elapsed() < ms(2000));
-        let mut fast = Paced::new(Drip(ms(1), 300), ms(50), 5);
-        assert_eq!(std::io::copy(&mut fast, &mut std::io::sink()).unwrap(), 300);
+        // (the windows are wide: a sleep of 1 ms takes 16 ms on Windows, and
+        // longer on a busy machine)
+        let mut fast = Paced::new(Drip(ms(1), 60), ms(500), 5);
+        assert_eq!(std::io::copy(&mut fast, &mut std::io::sink()).unwrap(), 60);
         // (a short last window is the end, not slowness)
         let mut short = Paced::new(Drip(ms(60), 1), ms(50), 100);
         assert!(std::io::copy(&mut short, &mut std::io::sink()).is_err());
-        let mut end = Paced::new(Drip(ms(1), 3), ms(50), 100);
+        let mut end = Paced::new(Drip(ms(1), 3), ms(2000), 100);
         assert_eq!(std::io::copy(&mut end, &mut std::io::sink()).unwrap(), 3);
     }
 }
