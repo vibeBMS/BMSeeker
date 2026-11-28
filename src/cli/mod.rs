@@ -77,6 +77,10 @@ enum Command {
     /// The settings.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// The licences: BMSeeker's, the notices of the works it is derived
+    /// from, and the licences of the crates and Go modules its programs
+    /// are built from, as one `licenses` record.
+    Licenses,
 }
 
 #[derive(Subcommand)]
@@ -129,12 +133,37 @@ impl Cli {
                 run.out.record(v.clone(), || format!("{:#}", v["config"]));
                 Ok(())
             }
+            Command::Licenses => {
+                // (the files one after the other, a blank line between)
+                let text = LICENSES.map(|(_, t)| t).join("\n");
+                let v = serde_json::json!({"licenses": LICENSES.map(|(f, _)| f), "text": text});
+                run.out.record(v, || text.trim_end().to_string());
+                Ok(())
+            }
         };
         // (one a task kept from the last answer: MEGA's -4)
         guarded.tell();
         done
     }
 }
+
+/// What `licenses` writes, in order (each file by its name in the
+/// repository): BMSeeker's licence, the notices of the works it is derived
+/// from, and the licences of the crates and Go modules its programs are
+/// built from (`tools/gen_licenses.sh`, which CI checks). Compiled into the
+/// command-line tool only: the library as a player links it has none of it.
+const LICENSES: [(&str, &str); 4] = [
+    ("LICENSE-MIT", include_str!("../../LICENSE-MIT")),
+    ("LICENSE-APACHE", include_str!("../../LICENSE-APACHE")),
+    (
+        "THIRD_PARTY_NOTICES.md",
+        include_str!("../../THIRD_PARTY_NOTICES.md"),
+    ),
+    (
+        "THIRD_PARTY_LICENSES.md",
+        include_str!("../../THIRD_PARTY_LICENSES.md"),
+    ),
+];
 
 /// What the tool says once a run when third parties' copies are used
 /// (`--third-party`, the setting): with `--json` the `text` of a
@@ -656,6 +685,66 @@ mod tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0]["script"], crate::hosts::PRESS_DOWNLOAD_JS);
         assert!(crate::hosts::PRESS_DOWNLOAD_JS.contains("location.hostname"));
+    }
+
+    /// `licenses`: BMSeeker's licence first, then the notices and the
+    /// crates' and Go modules' licences, as one record, asking nothing.
+    #[test]
+    fn the_licenses_are_compiled_in() {
+        struct Offline;
+        impl Driver for Offline {
+            fn perform(&self, effect: Effect) -> Fed {
+                panic!("{effect:?}: nothing is asked for");
+            }
+        }
+        // the lines it writes, records only, with `--json` or without
+        let licenses = |json: bool| {
+            let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+            let sink = lines.clone();
+            let run = Run {
+                out: Out::new(json, move |l| match l {
+                    Line::Record(r) => sink.borrow_mut().push(r.to_string()),
+                    Line::Note(n) => panic!("a note: {n}"),
+                }),
+                cx: Context::default(),
+                fs: Arc::new(crate::fs::Mem::default()),
+                net: &Offline,
+                stdin: Rc::new(RefCell::new(std::io::empty())),
+            };
+            let args = ["bmseeker", "--json", "licenses"];
+            let args = args.into_iter().filter(|a| json || *a != "--json");
+            Cli::try_parse_from(args).unwrap().run(&run).unwrap();
+            lines.take()
+        };
+        let (records, text_lines) = (licenses(true), licenses(false));
+        assert_eq!((records.len(), text_lines.len()), (1, 1));
+        let record: serde_json::Value = serde_json::from_str(&records[0]).unwrap();
+        let names = [
+            "LICENSE-MIT",
+            "LICENSE-APACHE",
+            "THIRD_PARTY_NOTICES.md",
+            "THIRD_PARTY_LICENSES.md",
+        ];
+        assert_eq!(record["licenses"], serde_json::json!(names));
+        let text = record["text"].as_str().unwrap();
+        assert_eq!(text_lines[0], text.trim_end());
+        assert!(text.starts_with("MIT License\n\nCopyright (c) 2026 vibeBMS contributors\n"));
+        // in order: the Apache licence, the notices (UnRAR's), a crate's
+        // and a Go module's entries of the generated list
+        let mut at = 0;
+        for part in [
+            "Apache License\n                           Version 2.0",
+            "# Third-party notices",
+            "UnRAR source code may be used",
+            "# Third-party licences",
+            "\n- `serde` (",
+            "\n- `github.com/egoist/mygo`: ",
+        ] {
+            match text[at..].find(part) {
+                Some(i) => at += i,
+                None => panic!("{part:?} not after byte {at}"),
+            }
+        }
     }
 
     /// `link get` into a folder: the file is put right in it, under one

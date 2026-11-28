@@ -257,6 +257,21 @@ mod tests {
         assert_eq!((code, notes[0].as_str()), (0, version));
     }
 
+    /// `licenses`, as the page's Settings runs it: the texts, asking
+    /// nothing and writing nothing.
+    #[test]
+    fn licenses_need_no_files() {
+        let net = Canned(Vec::new());
+        let m = library();
+        let (code, records, notes) = lines(&["--json", "licenses"], "", m.clone(), &net);
+        assert_eq!((code, records.len()), (0, 1), "{notes:?}");
+        let text = records[0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("MIT License\n") && text.contains("\n- `github.com/egoist/mygo`: ")
+        );
+        assert!(m.changes().is_empty());
+    }
+
     /// Answers 429 on refusing.example, else 404; notes what was asked.
     struct Refusing(RefCell<Vec<String>>);
 
