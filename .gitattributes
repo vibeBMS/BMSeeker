@@ -1,0 +1,5 @@
+# no line-ending conversion: every checkout has the committed bytes, so the
+# files built into the programs (the licences `bmseeker licenses` prints, the
+# page's scripts) are the same on Windows, whatever git's core.autocrlf says
+# there
+* -text
