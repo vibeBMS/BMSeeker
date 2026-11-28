@@ -27,12 +27,13 @@ var bundled embed.FS
 
 // cliWords are the first arguments that make this binary the CLI.
 var cliWords = map[string]bool{
-	"link": true, "song": true, "table": true, "library": true, "event": true, "config": true,
+	"link": true, "song": true, "table": true, "library": true, "event": true, "config": true, "licenses": true,
 	"help": true, "--help": true, "-h": true, "--version": true, "-V": true,
 	"--json": true, "--config": true,
 }
 
-// isCLI reports whether args (without the program) are a CLI command.
+// isCLI reports whether args (without the program) are a CLI command. A
+// library folder of one of these names is given as a path (./licenses).
 func isCLI(args []string) bool {
 	return len(args) > 0 && cliWords[args[0]]
 }

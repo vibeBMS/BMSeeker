@@ -564,14 +564,87 @@ func TestBundledCLI(t *testing.T) {
 }
 
 func TestCLIWords(t *testing.T) {
-	for _, a := range [][]string{{"link", "get"}, {"--help"}, {"--json", "table"}, {"config", "show"}} {
+	for _, a := range [][]string{{"link", "get"}, {"--help"}, {"--json", "table"}, {"config", "show"}, {"licenses"}} {
 		if !isCLI(a) {
 			t.Errorf("%v is the CLI", a)
 		}
 	}
-	for _, a := range [][]string{nil, {"/home/me/bms"}, {"Song"}} {
+	for _, a := range [][]string{nil, {"/home/me/bms"}, {"Song"}, {"./licenses"}} {
 		if isCLI(a) {
 			t.Errorf("%v is the window", a)
 		}
+	}
+}
+
+// Settings' Licences: the CLI's `licenses` read once, its text shown in a
+// text area that keeps drawing frames quickly with a text of the real
+// one's size (some 330 KB, 6,000 lines and more), scrolled too; Back
+// leads to the settings again.
+func TestLicences(t *testing.T) {
+	a := fakeApp(t)
+	var text strings.Builder
+	text.WriteString("MIT License\n\nCopyright (c) 2026 vibeBMS contributors\n")
+	for i := 0; text.Len() < 340_000; i++ {
+		fmt.Fprintf(&text, "- `crate-%d` (MIT OR Apache-2.0): https://example.com/a/rather/long/address/of/crate-%d\n", i, i)
+	}
+	text.WriteString("- `github.com/egoist/mygo`: https://pkg.go.dev/github.com/egoist/mygo\n")
+	record, err := json.Marshal(map[string]any{"licenses": []string{"LICENSE-MIT"}, "text": text.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := fakeCLI(t, wordsCLI+`[ "$2" = licenses ] && cat "$(dirname "$0")/record"`+"\n")
+	if err := os.WriteFile(filepath.Join(bin, "record"), append(record, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(a.view, 980, 720)
+	if err := tt.Click("Settings"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Licences"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, a, func() bool { return len(a.busy) == 0 })
+	start := time.Now()
+	tt.Frame()
+	opened := time.Since(start)
+	area, ok := tt.AccessByRole(ui.RoleTextField, "Licences")
+	if !ok || area.Value != text.String() || a.licences != text.String() {
+		t.Fatalf("area %v (%d bytes), log %q", ok, len(area.Value), a.log)
+	}
+	// scrolled through, a frame at a time: what it shows moves
+	top := sha256.Sum256(tt.Image().Pix)
+	start = time.Now()
+	const frames = 50
+	for i := 0; i < frames; i++ {
+		tt.Scroll(area.Bounds.X+area.Bounds.W/2, area.Bounds.Y+area.Bounds.H/2, 0, 2000)
+		tt.Frame()
+	}
+	scrolled := time.Since(start) / frames
+	if sha256.Sum256(tt.Image().Pix) == top {
+		t.Error("scrolling shows the same")
+	}
+	t.Logf("opened in %v, a frame scrolling %v", opened, scrolled)
+	if opened > 5*time.Second || scrolled > time.Second {
+		t.Errorf("opened in %v, a frame scrolling %v", opened, scrolled)
+	}
+	// read once a session: Back, and Licences again, runs no CLI
+	if err := tt.Click("Back"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if !tt.HasText("Difficulty tables") {
+		t.Fatalf("texts %q", tt.Texts())
+	}
+	if err := tt.Click("Licences"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	args, _ := os.ReadFile(filepath.Join(bin, "args"))
+	if cmds := strings.Split(strings.TrimSpace(string(args)), "\n\n"); len(cmds) != 1 || cmds[0] != "--json\nlicenses" {
+		t.Fatalf("command lines %q", cmds)
+	}
+	if _, ok := tt.AccessByRole(ui.RoleTextField, "Licences"); !ok {
+		t.Fatal("not shown again")
 	}
 }
