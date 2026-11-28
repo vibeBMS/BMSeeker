@@ -9,7 +9,7 @@
 #![allow(clippy::unneeded_wildcard_pattern)]
 
 // (only their types: with type parameters of their own or of their
-// type, they cannot be named without a call) bmseeker::hosts::Target::url, bmseeker::install::job::TaskJob::new, bmseeker::library::Library::from_catalog, bmseeker::links::Links::from_tables
+// type, they cannot be named without a call) bmseeker::hosts::Target::url, bmseeker::install::job::TaskJob::new, bmseeker::library::Library::from_catalog, bmseeker::links::Links::from_tables, bmseeker::testkit::Reply::ok, bmseeker::testkit::Reply::status
 
 use bmseeker::config::native_user_agent as _;
 use bmseeker::config::user_agent_with as _;
@@ -53,7 +53,6 @@ use bmseeker::install::job::Fed::Woke as _;
 use bmseeker::install::job::FileLink as _;
 use bmseeker::install::job::Files as _;
 use bmseeker::install::job::Got as _;
-use bmseeker::install::job::Installed as _;
 use bmseeker::install::job::Job as _;
 use bmseeker::install::job::Missed as _;
 use bmseeker::install::job::Step as _;
@@ -77,6 +76,8 @@ use bmseeker::install::Failure as _;
 use bmseeker::install::Failure::Net as _;
 use bmseeker::install::Failure::NoChartLink as _;
 use bmseeker::install::Failure::NotTheChart as _;
+use bmseeker::install::Failure::Other as _;
+use bmseeker::install::Session as _;
 use bmseeker::library::Library as _;
 use bmseeker::library::Owned as _;
 use bmseeker::links::Links as _;
@@ -135,12 +136,16 @@ use bmseeker::table::TableHeader as _;
 use bmseeker::table::DEFAULT_TABLES as _;
 use bmseeker::table::INSANE as _;
 use bmseeker::table::MOVED as _;
+#[cfg(all(feature = "testkit", not(target_arch = "wasm32")))]
+use bmseeker::testkit::serve as _;
 #[cfg(feature = "testkit")]
 use bmseeker::testkit::tar as _;
 #[cfg(feature = "testkit")]
 use bmseeker::testkit::tar_gz as _;
 #[cfg(feature = "testkit")]
 use bmseeker::testkit::zip as _;
+#[cfg(feature = "testkit")]
+use bmseeker::testkit::Reply as _;
 #[cfg(feature = "testkit")]
 use bmseeker::testkit::SIZELESS_RAR as _;
 #[cfg(feature = "testkit")]
@@ -182,8 +187,10 @@ fn _associated() {
     let _ = bmseeker::install::Entry::from_table_in;
     let _ = bmseeker::install::EntryJob::new;
     let _ = bmseeker::install::Request::default;
+    let _ = bmseeker::install::Session::new;
     let _ = bmseeker::install::job::Files::new;
     let _ = bmseeker::install::job::Files::slot;
+    let _ = bmseeker::library::Library::new;
     let _ = bmseeker::links::Links::chart_links_in;
     let _ = bmseeker::links::Links::from_stella;
     let _ = bmseeker::links::Links::song_links_in;
@@ -204,6 +211,7 @@ fn _fields_0(v: bmseeker::config::Config) {
         bmseeker::config::Config {
             folder_naming: _,
             local_hosts: _,
+            sources: _,
             third_party: _,
             user_agent: _,
             ..
@@ -251,6 +259,7 @@ fn _fields_5(v: bmseeker::install::Entry) {
     let _ = matches!(
         v,
         bmseeker::install::Entry {
+            md5: _,
             song: _,
             want: _,
             ..
@@ -398,6 +407,7 @@ fn _fields_17(v: bmseeker::table::TableEntry) {
             level: _,
             md5: _,
             org_md5: _,
+            sha256: _,
             title: _,
             url: _,
             url_diff: _,
