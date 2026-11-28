@@ -733,7 +733,8 @@ Local builds are `<version>-dev` (`Cargo.toml`).
 `THIRD_PARTY_LICENSES.md` has the licence texts of the Rust crates the
 releases are built from (every system's and the web page's; not the
 tests') and of the window's Go modules and Go itself, each text once with
-the crates or modules under it, without versions. `tools/gen_licenses.sh`
+the crates or modules under it (each with the copyright notices its own
+file has), without versions. `tools/gen_licenses.sh`
 makes it: cargo-about for the crates (its version and hash pinned in the
 script; `about.toml` names the licences accepted, and a crate under any
 other stops it), and the modules' own licence files for Go (a kind of text
