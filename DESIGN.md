@@ -119,15 +119,28 @@ would. The jobs of a download, in `install::job`:
   take no lock that a step holds, so a screen's thread never waits for an
   unpack; on the web, one thread, nothing waits. A file one job downloads
   is claimed in the batch: another job that wants it waits (500 ms, then
-  asks again) until it came (had: that job then finds its chart in the
-  library, `Done::Owned`, or takes what is left), failed (the failure
-  answers it, no second download) or was cancelled or its job dropped (the
-  waiting job downloads it). A job holds one claim at most, only while it
-  downloads, and never waits holding one, so two jobs cannot wait for each
-  other; a claim held through 1,200 asks (ten minutes: its job kept but
-  never fed) is taken over, and stays the taker's when the first job ends
-  after all. A job that panics with the library loses it: the session's
-  later steps end at once with a failure.
+  asks again; its progress says `Stage::Waiting`) until it came (had: that
+  job then finds its chart in the library, `Done::Owned`, waiting for its
+  song, `Done::Waiting`, or not in it), was a page (a page for it too),
+  failed (the failure answers it, no second download) or was cancelled or
+  its job dropped (the waiting job downloads it). A job holds one claim at
+  most, only while it downloads (it may sleep holding it: a download's own
+  waits before it asks again), and never waits for a claim while holding
+  one, so two jobs cannot wait for each other. A claim whose job shows no
+  life (the same job holding it, the bytes its progress counts unmoved)
+  through 1,200 asks (ten minutes: a slow download that moves is never
+  taken over) is taken over by one waiter; the others wait for the
+  taker. A taker whose download fails keeps no failure for the file and
+  waits for the first job again (it brings the file, or shows no life:
+  then the taker ends with its failure); one cancelled or dropped leaves
+  the claim to the first. What a file brought is known for the session's
+  life; what failed (a download, a page, a take of nothing) answers the
+  jobs of its round: `Session::again` (a player's retry) starts the next,
+  and a later job tries those files again. A separate charts' archive
+  answers for the charts it kept (those wanted when it came, and its
+  job's); a chart wanted since gets the archive again. A job that panics
+  with the library loses it: the session's later steps end at once with a
+  failure, and `with_library` has none.
 
 A run's sources share a memo of their GETs (`net::Memo`: successes and
 404s, 4 MiB at most), so a request several sources make is asked once.
@@ -425,7 +438,9 @@ then places the separate charts that waited for what came in.
   `gdrive:ID`, MediaFire's, MEGA's, Dropbox's, else the URL without its
   scheme and `#` part; a folder's link with the song looked for in it). A
   file whose download failed is not tried again that run, whatever link
-  leads to it.
+  leads to it (its scheme kept: what failed over `http://` may come over
+  `https://`). A link that was a page is a page for each entry that has
+  it.
 
 Whether two charts are of one song is `titles::same_song` (the fork's:
 the artists the same and the titles' Dice coefficient at least 0.72, both
