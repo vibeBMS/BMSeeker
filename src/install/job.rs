@@ -601,7 +601,7 @@ impl Install {
             Err(Fetch::Failed(e)) => vec![Done::Failed(e.into())],
         };
         self.store.remove_dir(&t.job);
-        self.batch.tried(t.key, &done);
+        self.batch.tried(self.id, t.key, &done);
         match self.tries.record(done) {
             Some(done) => Step::Done(done),
             None => self.next(),

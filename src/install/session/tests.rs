@@ -193,8 +193,8 @@ fn a_dropped_or_leaked_job_holds_nothing() {
     );
 }
 
-/// A job made after another brought its song in: the chart first, the
-/// song not downloaded again.
+/// A job that starts after another brought its song in (made before
+/// that): the chart first, the song not downloaded again.
 #[test]
 fn a_later_job_sees_the_song() {
     const N: &str = "#TITLE Song [N]\n#ARTIST alpha\n#WAV01 01.wav\n";
@@ -221,10 +221,11 @@ fn a_later_job_sees_the_song() {
     );
     let s = session(&Arc::new(Mem::default()));
     let cx = Context::default();
+    let x = e("Song [X]", X, &["https://e.test/x.bms"]);
+    let mut later = s.job(x.clone(), &cx);
     let first = crate::net::job::run_job(&mut s.job(e("Song [N]", N, &[]), &cx), &d);
     assert!(matches!(&first[..], [Done::Added(..)]), "{first:?}");
-    let x = e("Song [X]", X, &["https://e.test/x.bms"]);
-    let second = crate::net::job::run_job(&mut s.job(x.clone(), &cx), &d);
+    let second = crate::net::job::run_job(&mut later, &d);
     assert!(
         matches!(&second[..], [Done::Placed(p)] if p.ends_with("x.bms")),
         "{second:?}"
@@ -237,6 +238,102 @@ fn a_later_job_sees_the_song() {
         ]
     );
     assert!(s.with_library(|l| l.owns(&x.md5)));
+}
+
+/// A job that starts after another brought its chart in: in the library
+/// already, nothing downloaded.
+#[test]
+fn a_job_started_after_its_chart_came() {
+    let s = session(&Arc::new(Mem::default()));
+    let d = Canned::default();
+    d.file(PACK, Ok(Served::bytes(pack(), None, None)));
+    let cx = Context::default();
+    let mut two = s.job(entry(2), &cx);
+    assert!(!two.is_empty());
+    let first = crate::net::job::run_job(&mut s.job(entry(1), &cx), &d);
+    assert!(matches!(&first[..], [Done::Added(..)]), "{first:?}");
+    let second = done(two.start());
+    assert!(matches!(&second[..], [Done::Owned(_)]), "{second:?}");
+    assert_eq!(downloads(&d).len(), 1);
+}
+
+/// Whether a job has anything to try is the entry's alone: what an
+/// `EntryJob` on a library without the chart says, with its song there
+/// or not.
+#[test]
+fn nothing_to_try_without_the_library() {
+    let m = Arc::new(Mem::default());
+    m.put(Path::new("bms/Song/n.bms"), chart("Song [N]").as_bytes(), 0);
+    m.put(Path::new("bms/Song/01.wav"), b"RIFF", 0);
+    let lib = Library::scan(&*m, Path::new("bms"));
+    let s = Session::new(m.clone(), "dl".into(), lib.clone(), Sources::default());
+    let cx = Context::default();
+    let links: [&[&str]; 3] = [
+        &[],
+        &["", "file:///x.zip", "https://user@e.test/a.zip"],
+        &["https://e.test/a.zip"],
+    ];
+    let l = &links;
+    let combos: Vec<_> = (l.iter())
+        .flat_map(|a| {
+            l.iter()
+                .flat_map(move |b| l.iter().map(move |c| (*a, *b, *c)))
+        })
+        .collect();
+    let list = |l: &[&str]| l.iter().map(|u| u.to_string()).collect::<Vec<_>>();
+    for title in ["Song [X]", "Other"] {
+        for md5 in [String::new(), md5_hex(title.as_bytes())] {
+            for (song, chart, addons) in combos.iter().copied() {
+                let e = Entry {
+                    md5: md5.clone(),
+                    want: Want {
+                        title: title.into(),
+                        artist: "p".into(),
+                    },
+                    song: list(song),
+                    chart: list(chart),
+                    ..Default::default()
+                };
+                let (store, lib) = (m.clone(), lib.clone());
+                let alone =
+                    EntryJob::new(store, "dl".into(), lib, e.clone(), Sources::default(), &cx);
+                let alone = alone.addons(list(addons));
+                let job = s.job(e.clone(), &cx).addons(list(addons));
+                assert_eq!(job.is_empty(), alone.is_empty(), "{e:?} {addons:?}");
+            }
+        }
+    }
+}
+
+/// Making a job, asking whether it has anything to try, wanting charts
+/// and dropping a job not started do not wait for a step that holds the
+/// session (another job unpacking).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_screens_thread_never_waits() {
+    let s = session(&Arc::new(Mem::default()));
+    let (held, release) = std::sync::mpsc::channel::<()>();
+    let (locked, is_locked) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let s = &s;
+        let holder = scope.spawn(move || {
+            let _step = s.0.state.lock().unwrap();
+            locked.send(()).unwrap();
+            // (a bound only for a failure: one that waits never signals)
+            release
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .is_ok()
+        });
+        is_locked.recv().unwrap();
+        let job = s
+            .job(entry(1), &Context::default())
+            .addons(["https://e.test/x.bms".into()]);
+        assert!(!job.is_empty());
+        s.want([entry(2).md5]);
+        drop(job);
+        held.send(()).unwrap();
+        assert!(holder.join().unwrap(), "waited for the session's lock");
+    });
 }
 
 /// A driver of the pack for jobs on threads: a download takes a while, a

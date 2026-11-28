@@ -2,7 +2,7 @@
 //! added to it) and the batch (each file once), for jobs that run one
 //! after another or at once.
 
-use super::entry::{Batch, Entry, EntryJob};
+use super::entry::{holding, untried, Batch, Entry, EntryJob};
 use super::job::Installed;
 use super::{Done, Failure};
 use crate::fs::Store;
@@ -11,6 +11,7 @@ use crate::library::Library;
 use crate::net::job::{Fed, Job, Step};
 use crate::sources::Sources;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// A run of downloads into one library: its entries' jobs
@@ -22,9 +23,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 ///
 /// The library and the batch are lent to a job for each of its steps,
 /// under one lock, never while its effect (a request, a download, a wait)
-/// is done: a job waits for the lock only while another unpacks what came.
-/// A job that panics while it has them loses the library: every later
-/// step of the session's jobs ends at once (a failure, [`LOST`]).
+/// is done. The longest hold is one step: an archive that came unpacked
+/// and applied (seconds for a large one); what waits for it is the other
+/// jobs' next steps, [`Session::with_library`], and the drop of a job that
+/// has started. Making a job, [`SessionJob::is_empty`] and
+/// [`Session::want`] do not take it (a screen's thread does not wait for
+/// an unpack). A job that panics while it has them loses the library:
+/// every later step of the session's jobs ends at once (a failure,
+/// [`LOST`]).
 #[derive(Clone)]
 pub struct Session(Arc<Shared>);
 
@@ -33,13 +39,17 @@ struct Shared {
     downloads: PathBuf,
     sources: Sources,
     state: Mutex<State>,
+    /// The charts wanted since the last step (MD5s): into the batch at the
+    /// next one. (A lock of its own, held for a copy: `want` does not wait
+    /// for a step.)
+    wanted: Mutex<Vec<String>>,
+    /// The last job's number (the batch's claims name a job by it).
+    jobs: AtomicU64,
 }
 
 struct State {
     lib: Library,
     batch: Batch,
-    /// The last job's number (the batch's claims name a job by it).
-    jobs: u64,
 }
 
 /// What a session's job ends with once a job panicked with its library.
@@ -61,42 +71,31 @@ impl Session {
             state: Mutex::new(State {
                 lib,
                 batch: Batch::default(),
-                jobs: 0,
             }),
+            wanted: Mutex::default(),
+            jobs: AtomicU64::new(0),
         }))
     }
 
     /// The charts the run wants too (MD5s): a separate charts' archive
-    /// keeps those of them it holds waiting for their songs.
+    /// keeps those of them it holds waiting for their songs. Without
+    /// waiting for a job's step: the jobs' steps from the next one on see
+    /// them.
     pub fn want(&self, md5s: impl IntoIterator<Item = String>) {
-        if let Ok(mut s) = self.0.state.lock() {
-            s.batch.want(md5s);
-        }
+        let mut w = self.0.wanted.lock().unwrap_or_else(PoisonError::into_inner);
+        w.extend(md5s);
     }
 
-    /// The job of `e` ([`EntryJob`]) in this session, its progress and
-    /// cancel `cx`'s: its steps as the library is now (the chart first
-    /// when another job brought its song). It waits for the lock while
-    /// another job's step holds it.
+    /// The job of `e` in this session, its progress and cancel `cx`'s.
+    /// Nothing is read of the library until it starts: its steps
+    /// ([`EntryJob`]'s) are made then, from the library as it is (the
+    /// chart first when another job brought its song; a chart another job
+    /// brought: [`Done::Owned`] at once).
     pub fn job(&self, e: Entry, cx: &Context) -> SessionJob {
-        let sh = &self.0;
-        let mut state = sh.state.lock();
-        let (lib, id) = match &mut state {
-            Ok(s) => {
-                s.jobs += 1;
-                (std::mem::take(&mut s.lib), s.jobs)
-            }
-            Err(_) => (Library::default(), 0),
-        };
-        let store = sh.store.clone();
-        let mut inner = EntryJob::new(store, sh.downloads.clone(), lib, e, sh.sources.clone(), cx);
-        if let Ok(s) = &mut state {
-            s.lib = std::mem::take(&mut inner.install.lib);
-        }
-        inner.install.id = id;
         SessionJob {
-            inner,
+            id: self.0.jobs.fetch_add(1, Ordering::Relaxed) + 1,
             session: self.clone(),
+            job: Lent::Made(Box::new((e, Vec::new(), cx.clone()))),
         }
     }
 
@@ -111,42 +110,83 @@ impl Session {
     }
 }
 
+/// A session's job before and after it starts.
+enum Lent {
+    /// Its entry, add-ons and context.
+    Made(Box<(Entry, Vec<String>, Context)>),
+    Started(Box<EntryJob>),
+}
+
 /// An entry's job in a [`Session`]: an [`EntryJob`] on the session's
-/// library and batch; it ends with what became of its links (the library
-/// and batch are the session's). Dropped before its end, the files it was
-/// downloading are left to the session's other jobs.
+/// library and batch, made when it starts; it ends with what became of its
+/// links (the library and batch are the session's). Dropped before its
+/// end, the files it was downloading are left to the session's other
+/// jobs.
 pub struct SessionJob {
-    inner: EntryJob,
+    id: u64,
     session: Session,
+    job: Lent,
 }
 
 impl SessionJob {
     /// Then each of `links` on its own ([`EntryJob::addons`]).
     pub fn addons(mut self, links: impl IntoIterator<Item = String>) -> SessionJob {
-        self.inner.add(links);
+        match &mut self.job {
+            Lent::Made(m) => m.1.extend(links),
+            Lent::Started(j) => j.add(links),
+        }
         self
     }
 
-    /// Whether there is nothing to try ([`EntryJob::is_empty`]).
+    /// Whether there is nothing to try, whatever the library has: no link
+    /// a download could try, no MD5 for the sources. (An entry whose chart
+    /// the library has when it starts ends [`Done::Owned`].)
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        match &self.job {
+            Lent::Made(m) => untried(&m.0, &m.1),
+            Lent::Started(j) => j.is_empty(),
+        }
     }
 
-    /// A step of the inner job (`f`), the session's library and batch lent
-    /// to it.
+    /// A step of the job (`f`), the session's library and batch lent to
+    /// it; the first makes its steps from them.
     fn lent(&mut self, f: impl FnOnce(&mut EntryJob) -> Step<Installed>) -> Step<Vec<Done>> {
-        let Ok(mut s) = self.session.0.state.lock() else {
+        let sh = &self.session.0;
+        let Ok(mut s) = sh.state.lock() else {
             return Step::Done(vec![Done::Failed(Failure::Other(LOST.into()))]);
         };
         let s = &mut *s;
-        let install = &mut self.inner.install;
-        install.lib = std::mem::take(&mut s.lib);
-        install.batch = std::mem::take(&mut s.batch);
-        match f(&mut self.inner) {
+        let wanted = std::mem::take(&mut *sh.wanted.lock().unwrap_or_else(PoisonError::into_inner));
+        s.batch.want(wanted);
+        let lib = std::mem::take(&mut s.lib);
+        let lib = match &mut self.job {
+            Lent::Made(m) => {
+                let (e, addons, cx) = &mut **m;
+                if let Some(dir) = holding(&lib, &e.hashes()) {
+                    s.lib = lib;
+                    return Step::Done(vec![Done::Owned(dir)]);
+                }
+                let (store, downloads) = (sh.store.clone(), sh.downloads.clone());
+                let e = std::mem::take(e);
+                let mut j = EntryJob::new(store, downloads, lib, e, sh.sources.clone(), cx);
+                j.add(std::mem::take(addons));
+                j.install.id = self.id;
+                self.job = Lent::Started(Box::new(j));
+                None
+            }
+            Lent::Started(_) => Some(lib),
+        };
+        let Lent::Started(job) = &mut self.job else {
+            unreachable!("started above")
+        };
+        if let Some(lib) = lib {
+            job.install.lib = lib;
+        }
+        job.install.batch = std::mem::take(&mut s.batch);
+        match f(job) {
             Step::Do(e) => {
-                let install = &mut self.inner.install;
-                s.lib = std::mem::take(&mut install.lib);
-                s.batch = std::mem::take(&mut install.batch);
+                s.lib = std::mem::take(&mut job.install.lib);
+                s.batch = std::mem::take(&mut job.install.batch);
                 Step::Do(e)
             }
             Step::Done(out) => {
@@ -169,8 +209,11 @@ impl Job for SessionJob {
 
 impl Drop for SessionJob {
     fn drop(&mut self) {
-        let mut s = (self.session.0.state.lock()).unwrap_or_else(PoisonError::into_inner);
-        s.batch.release(self.inner.install.id);
+        // (one not started has claimed nothing: no lock)
+        if let Lent::Started(_) = self.job {
+            let mut s = (self.session.0.state.lock()).unwrap_or_else(PoisonError::into_inner);
+            s.batch.release(self.id);
+        }
     }
 }
 

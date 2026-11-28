@@ -64,7 +64,7 @@ impl Entry {
     }
 
     /// The chart's hashes.
-    fn hashes(&self) -> Vec<String> {
+    pub(super) fn hashes(&self) -> Vec<String> {
         vec![self.md5.clone(), self.sha256.clone()]
     }
 
@@ -232,12 +232,15 @@ impl Batch {
         self.claims.retain(|_, j| *j != id);
     }
 
-    /// The file of `key` came to `done` (its claim released): had, unless
-    /// it did not come (a failed download: `dead` answers for it;
-    /// cancelled) or was not the chart looked for (found by name, it may
-    /// be another's).
-    pub(crate) fn tried(&mut self, key: DownloadKey, done: &[Done]) {
-        self.claims.remove(&key);
+    /// The file of `key` job `id` downloaded came to `done` (the claim
+    /// released if it is still `id`'s, not one taken over): had, unless it
+    /// did not come (a failed download: `dead` answers for it; cancelled)
+    /// or was not the chart looked for (found by name, it may be
+    /// another's).
+    pub(crate) fn tried(&mut self, id: u64, key: DownloadKey, done: &[Done]) {
+        if self.claims.get(&key) == Some(&id) {
+            self.claims.remove(&key);
+        }
         let again = done
             .iter()
             .any(|d| matches!(d, Done::Failed(Failure::Net(_) | Failure::NotTheChart)));
@@ -421,6 +424,17 @@ fn asks(e: &Entry, role: Role, lib: &Library) -> bool {
     md5_key(&e.md5).is_some() && (role == Role::Song || has_song(e, lib))
 }
 
+/// Whether `e` with the add-ons `addons` has nothing to try, whatever
+/// the library has: no link a download could try and no MD5 for the
+/// sources. Else [`EntryJob::new`] makes steps, unless the library has
+/// the chart: the library decides nothing more of it (`entry_steps`
+/// keeps the chart's step when the song is there, the song's when not,
+/// each with links or the sources).
+pub(super) fn untried(e: &Entry, addons: &[String]) -> bool {
+    let mut links = e.song.iter().chain(&e.chart).chain(addons);
+    md5_key(&e.md5).is_none() && !links.any(|u| is_link(u))
+}
+
 /// Whether a download could try `u` (`hosts::Link`'s rule).
 fn is_link(u: &str) -> bool {
     crate::hosts::Link::parse(u, 0).is_some()
@@ -545,28 +559,35 @@ mod tests {
         let view = "https://drive.google.com/file/d/ID1/view";
         let uc = "https://drive.google.com/uc?id=ID1&export=download";
         assert!(!b.has(&Batch::key(view, &song)));
-        b.tried(Batch::key(view, &song), &[Done::Added("bms/S".into(), 2)]);
+        b.tried(
+            0,
+            Batch::key(view, &song),
+            &[Done::Added("bms/S".into(), 2)],
+        );
         assert!(b.has(&Batch::key(uc, &diff)));
         // not the chart (found by name), or cancelled: may come again
         let other = "https://e/b.zip";
         b.tried(
+            0,
             Batch::key(other, &diff),
             &[Done::Failed(Failure::NotTheChart)],
         );
         b.tried(
+            0,
             Batch::key(other, &diff),
             &[Done::Failed(crate::net::NetError::Cancelled.into())],
         );
         assert!(!b.has(&Batch::key(other, &diff)));
         // nor one whose download failed (the batch's dead files say why)
         b.tried(
+            0,
             Batch::key(other, &diff),
             &[Done::Failed(crate::net::NetError::Status(404).into())],
         );
         assert!(!b.has(&Batch::key(other, &diff)));
         // a folder's link: the song looked for in it counts
         let folder = "https://drive.google.com/drive/folders/F1";
-        b.tried(Batch::key(folder, &song), &[]);
+        b.tried(0, Batch::key(folder, &song), &[]);
         let mut other_song = e.clone();
         other_song.want.title = "Other".into();
         assert!(b.has(&Batch::key(folder, &song)));
@@ -583,14 +604,39 @@ mod tests {
         assert_eq!(b.claim(&key, 1, false), Claim::Mine);
         assert_eq!(b.claim(&key, 2, false), Claim::Busy);
         let failed = [Done::Failed(crate::net::NetError::Status(404).into())];
-        b.tried(key.clone(), &failed);
+        b.tried(1, key.clone(), &failed);
         assert_eq!(b.claim(&key, 2, false), Claim::Mine);
         b.release(2);
         assert_eq!(b.claim(&key, 3, false), Claim::Mine);
-        // (taken over from a job taken to be gone)
-        assert_eq!(b.claim(&key, 4, true), Claim::Mine);
-        assert_eq!(b.claim(&key, 3, false), Claim::Busy);
-        b.tried(key.clone(), &[Done::Added("bms/S".into(), 2)]);
+        b.release(3);
+        assert!(b.claims.is_empty());
+        b.tried(1, key.clone(), &[Done::Added("bms/S".into(), 2)]);
+        assert_eq!(b.claim(&key, 3, false), Claim::Had);
+    }
+
+    /// A claim taken over (its job taken to be gone) stays the taker's
+    /// when the first job ends after all: a third job waits for the taker.
+    /// Had once the file came, whoever brought it.
+    #[test]
+    fn a_claim_taken_over_stays_the_takers() {
+        let key = Batch::key("https://e/song.zip", &entry("Song", &[]).query(Role::Song));
+        let cancelled = [Done::Failed(crate::net::NetError::Cancelled.into())];
+        let failed = [Done::Failed(crate::net::NetError::Status(404).into())];
+        for end in [&cancelled[..], &failed] {
+            let mut b = Batch::default();
+            assert_eq!(b.claim(&key, 1, false), Claim::Mine);
+            assert_eq!(b.claim(&key, 2, true), Claim::Mine);
+            b.tried(1, key.clone(), end);
+            b.release(1);
+            assert_eq!(b.claim(&key, 3, false), Claim::Busy, "{end:?}");
+            b.tried(2, key.clone(), end);
+            assert_eq!(b.claim(&key, 3, false), Claim::Mine, "{end:?}");
+        }
+        let mut b = Batch::default();
+        b.claim(&key, 1, false);
+        b.claim(&key, 2, true);
+        b.tried(1, key.clone(), &[Done::Added("bms/S".into(), 2)]);
+        assert_eq!(b.claims.get(&key), Some(&2));
         assert_eq!(b.claim(&key, 3, false), Claim::Had);
     }
 
