@@ -560,6 +560,8 @@ event check [works FILE|-] [--known FILE] [--days N] [--minutes M] [--search]
                                                      each work's links downloaded and looked into (JSON Lines)
 config show                                          the settings in effect: the settings file's (or the defaults)
                                                      with what the command line turns on
+licenses                                             the licences: LICENSE-MIT, LICENSE-APACHE,
+                                                     THIRD_PARTY_NOTICES.md and THIRD_PARTY_LICENSES.md, compiled in
 ```
 
 With `--json`, every command writes JSON Lines (one record a line, as it
@@ -594,6 +596,7 @@ done   {"title"?,"md5"?,"sha256"?,"state":"added|owned|placed|waiting|page|faile
 refused {"refused": host,"code":"status|files|challenge|rate_limited|earlier","status"?,"error"}
 notice {"notice":"third_party","text"}
 config {"config":{<every setting, as in the settings file (Config, above)>}}
+licenses {"licenses":["LICENSE-MIT","LICENSE-APACHE","THIRD_PARTY_NOTICES.md","THIRD_PARTY_LICENSES.md"],"text"}
 ```
 
 A `done` record's `state` is `install::Done::state` (the first four are
@@ -612,6 +615,10 @@ has it (before the run, or brought by an earlier chart), else `failed`
 (`not_listed`, its `md5` or `sha256`, no `title`).
 A `missing` record's hash it has not is `""` (a table's entry has one at
 least: one with neither is no chart, and is not read).
+`licenses`: the files' texts one after the other, a blank line between
+(without `--json`, the text itself), compiled into the CLI (`cli`), not
+into the library a player links; `testdata/records.jsonl` leaves it out
+(some 330 KB), `cli`'s own tests check it.
 `notice`: what a person is told once a run (with `--json` a record in
 place of the note; `third_party`: third parties' sources are on). A
 program reading records passes by those it does not know (`event check`
@@ -669,7 +676,12 @@ in the log and skipped by every later run while the window is open
 CLI's `third_party` notice is then not repeated in the log; when the
 settings file turned them on, it is said once a session); the OK is
 remembered in `<config folder>/bmseeker/third-party-acknowledged` (in a
-web page, the browser's `localStorage`).
+web page, the browser's `localStorage`). Settings' Licences (by the
+version) shows what `licenses` writes, read once a session, in a
+read-only text area (it lays out only the lines in view; the text can be
+selected and copied); Back leads to the settings again. The window's own
+Go modules are in THIRD_PARTY_LICENSES.md with the crates, so the one text
+covers both.
 
 Build: `gui/build.sh` (builds the CLI with `cargo build --release --features
 cli` into `gui/bin/`, then `go build`; Go 1.27+).
@@ -682,7 +694,8 @@ worker. The GUI's `cli_js.go` speaks the CLI's protocol to it: a command
 line and what it reads for `-` (the page's run hands it over) in, JSON
 Lines records and notes out as they come, an exit code. A command before
 any target is open (a folder waiting for the user's permission) runs on
-a session of no files: the settings (`config show`) need none.
+a session of no files: the settings (`config show`) and the licences
+(`licenses`) need none.
 
 The commands are synchronous; a browser's files and network are not,
 except in a worker: `FileReaderSync` reads a `File`, and synchronous
@@ -744,4 +757,7 @@ but an update that adds or removes a crate or module or changes a licence
 text fails CI, Dependabot's too (and is not merged), until someone runs
 `tools/gen_licenses.sh`, reads what changed and commits the file (on a
 Dependabot pull request that commit is not Dependabot's, so it is then
-merged by hand).
+merged by hand). None of these files is in a release's packages: the
+programs show them, compiled in from the committed files (what CI
+checked): `bmseeker licenses`, and the window's and the web page's
+Settings, Licences.

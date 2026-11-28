@@ -4,7 +4,7 @@
 //
 //	bmseeker-gui                 the window
 //	bmseeker-gui <BMS folder>    the window, with that library
-//	bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, config, --help ...)
+//	bmseeker-gui <CLI command>   the CLI itself (link, song, table, library, event, config, licenses, --help ...)
 package main
 
 import (

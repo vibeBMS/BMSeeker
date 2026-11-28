@@ -69,6 +69,11 @@ type app struct {
 	configThirdParty bool
 	toldThirdParty   bool
 
+	// The licences (the CLI's `licenses`), read once a session; shown in
+	// Settings in place of the settings while licencesOpen.
+	licences     string
+	licencesOpen bool
+
 	// Hosts that refused BMSeeker in this session: the CLI skips them
 	// (--skip-host) in every later run.
 	refused []string
@@ -486,6 +491,10 @@ func (a *app) waitingView(c *ui.Context) {
 }
 
 func (a *app) settingsView(c *ui.Context) {
+	if a.licencesOpen {
+		a.licencesView(c)
+		return
+	}
 	a.libraryView(c)
 	ui.Text(c, "Downloads").Bold()
 	on := a.settings.ThirdParty || a.configThirdParty
@@ -523,7 +532,49 @@ func (a *app) settingsView(c *ui.Context) {
 		}
 	})
 	ui.Text(c, "About").Bold()
-	ui.Text(c, name()+" "+version())
+	ui.Row(c).Gap(8).Children(func() {
+		ui.Text(c, name()+" "+version())
+		if ui.Button(c, "Licences").Clicked() {
+			a.openLicences()
+		}
+	})
+}
+
+const readingLicences = "Reading the licences"
+
+// openLicences shows the licences: BMSeeker's, the notices of the works it
+// is derived from, and the licences of the crates and Go modules it is
+// built from (this window's modules too), as the CLI has them compiled in.
+func (a *app) openLicences() {
+	a.licencesOpen = true
+	if a.licences != "" {
+		return
+	}
+	a.job(readingLicences, func() error {
+		return a.cli([]string{"licenses"}, "", func(r Record) {
+			if _, ok := r["licenses"]; ok {
+				text := r.S("text")
+				a.update(func() { a.licences = text })
+			}
+		})
+	})
+}
+
+// licencesView shows the licences in a text area, which lays out only the
+// lines in view (the text is some 330 KB): read-only, its text can be
+// selected and copied.
+func (a *app) licencesView(c *ui.Context) {
+	ui.Row(c).Gap(8).Children(func() {
+		if ui.Button(c, "Back").Clicked() {
+			a.licencesOpen = false
+		}
+		ui.Text(c, "Licences").Bold()
+	})
+	placeholder := ""
+	if a.busy[readingLicences] {
+		placeholder = readingLicences + "…"
+	}
+	ui.TextArea(c, &a.licences).ReadOnly(true).Label("Licences").Placeholder(placeholder).Grow(1)
 }
 
 func toF(v any) float64 {
