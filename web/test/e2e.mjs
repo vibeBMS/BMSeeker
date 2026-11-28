@@ -132,24 +132,44 @@ try {
   await seeker.waitForTimeout(1500);
   await seeker.screenshot({ path: `${shots}/1-bmseeker.png` });
 
-  // the settings need no target: a worker asked before one is opened (as
-  // a folder waiting for the user's permission leaves it) answers
+  // the settings and the licences need no target: a worker asked before
+  // one is opened (as a folder waiting for the user's permission leaves it)
+  // answers
   const early = await seeker.evaluate(async (proxy) => {
     const src = [...document.scripts].find((s) => /bmseeker\.js$/.test(s.src)).src;
     const w = new Worker(new URL("worker.js", src), { type: "module" });
-    const records = [];
-    const done = await new Promise((resolve) => {
-      w.onmessage = (e) => {
-        if (e.data.kind === "record") records.push(JSON.parse(e.data.line));
-        else if (e.data.ok !== undefined) resolve(e.data);
-      };
-      w.postMessage({ id: 1, op: "run", args: ["--json", "config", "show"], stdin: "", proxy });
-    });
+    const ask = (id, args) =>
+      new Promise((resolve) => {
+        const records = [];
+        w.onmessage = (e) => {
+          if (e.data.kind === "record") records.push(JSON.parse(e.data.line));
+          else if (e.data.ok !== undefined) resolve({ ...e.data, records });
+        };
+        w.postMessage({ id, op: "run", args, stdin: "", proxy });
+      });
+    const settings = await ask(1, ["--json", "config", "show"]);
+    const licences = await ask(2, ["--json", "licenses"]);
     w.terminate();
-    const config = records.find((r) => r.config);
-    return { ok: done.ok, error: done.error, tables: config ? config.config.tables.length : 0 };
+    const config = settings.records.find((r) => r.config);
+    const text = (licences.records.find((r) => r.licenses) || {}).text || "";
+    return {
+      ok: settings.ok, error: settings.error, tables: config ? config.config.tables.length : 0,
+      licences: { ok: licences.ok, code: licences.value && licences.value.code, error: licences.error, bytes: text.length,
+        mit: text.startsWith("MIT License\n"), crate: text.includes("\n- `serde` ("), module: text.includes("\n- `github.com/egoist/mygo`: ") },
+    };
   }, `${base}/proxy/`);
   check(early.ok && early.tables > 0, `the settings are read before any target is opened (${JSON.stringify(early)})`);
+  const l = early.licences;
+  check(l.ok && l.code === 0 && l.mit && l.crate && l.module, `the licences are read before any target is opened (${JSON.stringify(l)})`);
+  // and through the page's own run, as the window's Settings asks for them
+  const shown = await seeker.evaluate(async () => {
+    let text = "";
+    const code = await bmseeker.run(["--json", "licenses"], (kind, line) => {
+      if (kind === "record") text = JSON.parse(line).text || text;
+    });
+    return { code, bytes: text.length, mit: text.startsWith("MIT License\n") };
+  });
+  check(shown.code === 0 && shown.mit && shown.bytes > 300000, `the page's run gives the licences (${JSON.stringify(shown)})`);
 
   let vibe = null;
   if (vibeDir) {
