@@ -30,7 +30,7 @@ hosts          Host strategies (a link -> a file, other links, or a page), Resol
 sources        Source strategies (a chart's MD5, a song's title and artist -> links)
 unpack         archives (zip, 7z, rar, lzh, tar, tar.gz; nested) into an fs::Store, capped; read: chosen members into a Sink; the archive name rules
 package        a staged download as packages, each classified against the library
-install        Done (state()) / Failure (code()); plan (nothing written), apply, take; Entry, EntryJob, Batch
+install        Done (state()) / Failure (code()); plan (nothing written), apply, take; Entry, EntryJob, Batch, Session
 library        the library's song folders, their files, the charts' hashes, titles and artists
 placement      which song folder a chart of its own belongs in; the smart overwrite (clash)
 titles         titles and artists as the BeMusicSeeker fork compares them; same_song
@@ -102,6 +102,32 @@ would. The jobs of a download, in `install::job`:
   made. `Entry::from_table_in` takes a table's entry's links from several
   `Links` lists in turn (`Links::song_links_in`, `chart_links_in`: as the
   lists made one, without making it).
+- `Session`: what a run of entries' jobs shares, the library (what came in
+  added to it) and the `Batch` (each file once; the charts the run wants,
+  `want`, wait for their songs), for jobs that run one after another (the
+  CLI's `table missing --get`) or at once (a player's downloads, each on a
+  thread natively, interleaved in a web page). `Session::job` is an
+  entry's `SessionJob`; its steps are made when it starts, from the
+  library as it is then (the chart first when another job brought its
+  song; the chart another job brought: `Done::Owned` at once). The library
+  and batch are lent to a job for each step under one lock, never while
+  its effect is done: the longest hold is one step's unpack and apply
+  (seconds for a large archive), and what waits for it is the other jobs'
+  next steps, a read of the library, and the drop of a started job. Making
+  a job, asking whether it has anything to try (`is_empty`: no link a
+  download could try and no MD5, whatever the library has) and `want`
+  take no lock that a step holds, so a screen's thread never waits for an
+  unpack; on the web, one thread, nothing waits. A file one job downloads
+  is claimed in the batch: another job that wants it waits (500 ms, then
+  asks again) until it came (had: that job then finds its chart in the
+  library, `Done::Owned`, or takes what is left), failed (the failure
+  answers it, no second download) or was cancelled or its job dropped (the
+  waiting job downloads it). A job holds one claim at most, only while it
+  downloads, and never waits holding one, so two jobs cannot wait for each
+  other; a claim held through 1,200 asks (ten minutes: its job kept but
+  never fed) is taken over, and stays the taker's when the first job ends
+  after all. A job that panics with the library loses it: the session's
+  later steps end at once with a failure.
 
 A run's sources share a memo of their GETs (`net::Memo`: successes and
 404s, 4 MiB at most), so a request several sources make is asked once.

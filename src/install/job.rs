@@ -6,6 +6,7 @@
 //! other links tried when its file does not come, Google Drive's quota told
 //! apart from a page).
 
+use super::entry::Claim;
 use super::{Batch, Done, Failure, Tries};
 use crate::fs::{Blob, Store};
 use crate::hosts::{Context, Fetch, Link, Resolver, Want};
@@ -17,6 +18,7 @@ use crate::sources::{Query, Sources};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// What [`Acquire`] got: the file, its name (where the host told it, else
 /// the server's or the URL's, else `download`; one file name, no path:
@@ -357,20 +359,40 @@ enum Doing {
     /// A source's links.
     Finding(TaskJob<BoxTask<Vec<String>>>),
     Trying(Box<Trying>),
+    /// Another job of the batch downloading the next link's file
+    /// ([`Claim::Busy`]): asked again when woken.
+    Waiting,
 }
+
+/// The wait before a file another job downloads is asked for again.
+pub(crate) const BUSY_WAIT: Duration = Duration::from_millis(500);
+
+/// Times a file another job downloads is asked for, [`BUSY_WAIT`] apart
+/// (ten minutes), before this job takes it to be gone (kept, never fed nor
+/// dropped) and downloads the file itself.
+pub(crate) const BUSY_ASKS: u32 = 1200;
 
 /// A song (or its separate chart: `q.diff`) from its own links in order,
 /// then those each source finds (asked one after another, only while
 /// nothing has come in): each link's file ([`Acquire`]; a chart's own link
 /// as it is) into the library ([`super::take`]), until one brings it in
-/// (`Tries`). A file the batch has had is not downloaded again.
+/// (`Tries`). A file the batch has had is not downloaded again, nor one
+/// another job of the batch downloads (it waits for it: [`Batch::claim`]).
 /// Natively each download passes through a folder of its own in
 /// `downloads` (`.job-…`).
 pub struct Install {
     store: Arc<dyn Store + Send + Sync>,
     downloads: PathBuf,
     pub(super) lib: Library,
-    batch: Batch,
+    pub(super) batch: Batch,
+    /// The job it is of, as the batch's claims name it (0: a job alone).
+    pub(super) id: u64,
+    /// An entry's chart (its hashes): when another job brings it in, this
+    /// one ends ([`Done::Owned`]).
+    chart: Vec<String>,
+    /// Times the next link's file was asked for while another job
+    /// downloads it.
+    asks: u32,
     q: Query,
     sources: Sources,
     pub(super) cx: Context,
@@ -400,6 +422,9 @@ impl Install {
             downloads,
             lib,
             batch: Batch::default(),
+            id: 0,
+            chart: Vec::new(),
+            asks: 0,
             q,
             sources: Sources::default(),
             cx: cx.clone(),
@@ -424,9 +449,16 @@ impl Install {
         self
     }
 
-    /// This install's library and batch, for the song `q` from `own` and
-    /// then `sources`.
-    pub(super) fn again(&mut self, q: Query, own: Vec<String>, sources: Sources) {
+    /// This install's library, batch and job, for the song `q` from `own`
+    /// and then `sources`; ended once the library has the chart of one of
+    /// `chart`'s hashes.
+    pub(super) fn again(
+        &mut self,
+        q: Query,
+        own: Vec<String>,
+        sources: Sources,
+        chart: Vec<String>,
+    ) {
         let next = Install::new(
             self.store.clone(),
             std::mem::take(&mut self.downloads),
@@ -435,7 +467,11 @@ impl Install {
             own,
             &self.cx,
         );
-        *self = next.batch(std::mem::take(&mut self.batch)).sources(sources);
+        *self = Install {
+            id: self.id,
+            chart,
+            ..next.batch(std::mem::take(&mut self.batch)).sources(sources)
+        };
     }
 
     /// `done`, the library and the batch handed back.
@@ -453,21 +489,40 @@ impl Install {
             if self.cx.cancelled() {
                 return Step::Done(vec![Done::Failed(NetError::Cancelled.into())]);
             }
+            // another job brought it in (a pack of several entries' charts)
+            if let Some(dir) = super::entry::holding(&self.lib, &self.chart) {
+                return Step::Done(vec![Done::Owned(dir)]);
+            }
             let Some(link) = self.links.pop_front() else {
                 break;
             };
             let key = Batch::key(&link, &self.q);
-            if !self.tried.insert(key.clone()) {
+            if self.tried.contains(&key) {
                 continue;
             }
-            if self.batch.has(&key) {
-                self.tries.record(vec![Done::Failed(Failure::Downloaded)]);
-                continue;
+            match self.batch.claim(&key, self.id, self.asks >= BUSY_ASKS) {
+                Claim::Busy => {
+                    self.asks += 1;
+                    self.links.push_front(link);
+                    self.doing = Doing::Waiting;
+                    return Step::Do(Effect::Sleep(BUSY_WAIT));
+                }
+                Claim::Had => {
+                    self.asks = 0;
+                    self.tried.insert(key);
+                    self.tries.record(vec![Done::Failed(Failure::Downloaded)]);
+                    continue;
+                }
+                Claim::Mine => {
+                    self.asks = 0;
+                    self.tried.insert(key.clone());
+                }
             }
             let check = self.checked && crate::chart::md5_key(&self.q.md5).is_some();
             super::sweep(&*self.store, &self.downloads);
             let job = self.downloads.join(format!(".job-{}", super::unique()));
             if let Err(e) = self.store.create_new_dir(&job) {
+                self.batch.release(self.id);
                 let failed = Failure::Other(format!("{}: {e}", job.display()));
                 self.tries.record(vec![Done::Failed(failed)]);
                 continue;
@@ -546,7 +601,7 @@ impl Install {
             Err(Fetch::Failed(e)) => vec![Done::Failed(e.into())],
         };
         self.store.remove_dir(&t.job);
-        self.batch.tried(t.key, &done);
+        self.batch.tried(self.id, t.key, &done);
         match self.tries.record(done) {
             Some(done) => Step::Done(done),
             None => self.next(),
@@ -564,6 +619,7 @@ impl Install {
                 let step = t.acquire.feed(fed);
                 self.acquiring(t, step)
             }
+            Doing::Waiting => self.next(),
             Doing::Nothing => {
                 debug_assert!(false, "fed with nothing asked");
                 self.next()

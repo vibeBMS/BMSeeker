@@ -4,7 +4,7 @@ use super::library::{done_record, scan};
 use super::link::fetch_list;
 use super::Run;
 use crate::export;
-use crate::install::{self, Batch, Done, Entry, EntryJob, Failure};
+use crate::install::{self, Done, Entry, Failure, Session};
 use crate::links::Links;
 use crate::net::job::run_job;
 use crate::sources::Sources;
@@ -226,7 +226,7 @@ fn missing(
 ) -> Result<(), String> {
     let (t, links) = load_filled(r, url, args)?;
     // the library read once for the run (what comes in added to it)
-    let mut have = scan(r, library);
+    let have = scan(r, library);
     let listed: Vec<&TableEntry> = t.entries.iter().filter(|e| chosen.keeps(e)).collect();
     let owned =
         |lib: &crate::library::Library, e: &TableEntry| lib.owns(&e.md5) || lib.owns(&e.sha256);
@@ -271,9 +271,10 @@ fn missing(
         Sources::from_config(r.config(), Vec::new())
     };
     let downloads = library.join(&r.config().downloads);
-    // one batch: each file downloaded once; the charts it wants wait for
+    // one session: each file downloaded once; the charts it wants wait for
     // their songs
-    let mut batch = Batch::new(missing.iter().map(|e| e.md5.clone()));
+    let session = Session::new(r.fs.clone(), downloads, have, sources);
+    session.want(missing.iter().map(|e| e.md5.clone()));
     for e in missing {
         // (what read the records is gone)
         if r.cx.cancelled() {
@@ -281,21 +282,12 @@ fn missing(
         }
         // an earlier one brought it, or its song (the chart first then)
         let entry = Entry::from_table(e, &links);
-        let job = EntryJob::new(
-            r.fs.clone(),
-            downloads.clone(),
-            have,
-            entry,
-            sources.clone(),
-            &r.cx,
-        );
-        let out = run_job(&mut job.batch(batch), r.net);
-        (have, batch) = (out.lib, out.batch);
-        let got = owned(&have, e);
-        let Some((last, before)) = out.done.split_last() else {
+        let done = run_job(&mut session.job(entry, &r.cx), r.net);
+        let got = session.with_library(|lib| owned(lib, e));
+        let Some((last, before)) = done.split_last() else {
             // nothing to do: an earlier one brought it; or nothing to try
             let d = match got {
-                true => in_the_library(&have, e),
+                true => session.with_library(|lib| in_the_library(lib, e)),
                 false => Done::Failed(Failure::NoLink),
             };
             closing(r, e, &d, got);

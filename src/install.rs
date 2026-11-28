@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 pub(crate) mod entry;
 pub mod job;
 pub(crate) mod plan;
+pub(crate) mod session;
 
 pub use crate::chart::md5_hex;
 pub use crate::package::Role;
 pub use entry::{Batch, Entry, EntryJob};
 pub use plan::{take, Naming, Request};
+pub use session::{Session, SessionJob};
 
 /// What became of one link.
 #[derive(Clone, Debug)]
