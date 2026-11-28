@@ -32,6 +32,19 @@ impl DownloadKey {
             None => DownloadKey(key),
         }
     }
+
+    /// The key of the file `url` downloads, its scheme kept: a server may
+    /// serve over one what fails over the other (a failure is kept by
+    /// this key).
+    pub(crate) fn of_file(url: &str) -> DownloadKey {
+        let key = DownloadKey::of(url, None);
+        match (key.0.starts_with("//"), url.trim().split_once("://")) {
+            (true, Some((scheme, _))) => {
+                DownloadKey(format!("{}:{}", scheme.to_ascii_lowercase(), key.0))
+            }
+            _ => key,
+        }
+    }
 }
 
 /// The URL without its scheme and fragment, its host in lower case.
@@ -161,5 +174,13 @@ mod tests {
             key("http://manbow.nothing.sh/event/event.cgi?num=6")
         );
         assert_eq!(key("not a link"), "not a link");
+        // a file's own: http and https apart, a host's id as it is
+        let file = |u: &str| DownloadKey::of_file(u).0;
+        assert_eq!(file("HTTPS://E.test/a.zip#x"), "https://e.test/a.zip");
+        assert_ne!(file("http://e.test/a.zip"), file("https://e.test/a.zip"));
+        assert_eq!(
+            file("http://www.mediafire.com/?abc123x"),
+            "mediafire:abc123x"
+        );
     }
 }

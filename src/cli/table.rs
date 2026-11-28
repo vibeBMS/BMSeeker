@@ -283,14 +283,13 @@ fn missing(
         // an earlier one brought it, or its song (the chart first then)
         let entry = Entry::from_table(e, &links);
         let done = run_job(&mut session.job(entry, &r.cx), r.net);
-        let got = session.with_library(|lib| owned(lib, e));
+        // (a library lost: its jobs said so, none is had)
+        let now = session.with_library(|lib| owned(lib, e).then(|| in_the_library(lib, e)));
+        let now = now.flatten();
+        let got = now.is_some();
         let Some((last, before)) = done.split_last() else {
             // nothing to do: an earlier one brought it; or nothing to try
-            let d = match got {
-                true => session.with_library(|lib| in_the_library(lib, e)),
-                false => Done::Failed(Failure::NoLink),
-            };
-            closing(r, e, &d, got);
+            closing(r, e, &now.unwrap_or(Done::Failed(Failure::NoLink)), got);
             continue;
         };
         for d in before {
