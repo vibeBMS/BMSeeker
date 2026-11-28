@@ -304,6 +304,8 @@ mod tests {
         use crate::install::md5_hex;
         use crate::net::job::Served;
         const TABLE: &str = "https://t.example/table.json";
+        // (entries sharing a link: a page, a file that came cut off)
+        const TWO: &str = "https://t.example/two.json";
         let chart = |title: &str, artist: &str| {
             format!("#TITLE {title}\n#ARTIST {artist}\n#WAV01 01.wav\n#00111:01\n")
         };
@@ -331,23 +333,38 @@ mod tests {
                 "url": "https://p.example/p.zip", "url_diff": ""},
             {"sha256": g, "title": "Song G", "artist": "v", "level": "2", "url": "", "url_diff": ""},
         ]);
-        struct Hosts(Vec<u8>, Vec<(&'static str, Vec<u8>)>);
+        let shared = |md5: char, title: &str, url: &str| {
+            serde_json::json!({"md5": md5.to_string().repeat(32), "title": title, "artist": "s",
+                "level": "1", "url": url, "url_diff": ""})
+        };
+        let two = serde_json::json!([
+            shared('1', "Event [1]", "https://e.example/event"),
+            shared('2', "Event [2]", "https://e.example/event"),
+            shared('3', "Cut [1]", "https://k.example/cut.zip"),
+            shared('4', "Cut [2]", "https://k.example/cut.zip"),
+        ]);
+        struct Hosts(Vec<u8>, Vec<u8>, Vec<(&'static str, Vec<u8>)>);
         impl Driver for Hosts {
             fn perform(&self, effect: Effect) -> Fed {
                 match effect {
-                    Effect::Http(r) => Fed::Http(match r.url() {
-                        TABLE => {
-                            Ok(br#"{"name":"Fixture","symbol":"F","data_url":"data.json"}"#
-                                .to_vec())
-                        }
-                        "https://t.example/data.json" => Ok(self.0.clone()),
-                        u if crate::net::host(u) == "api.bmssearch.net" => {
-                            Err(NetError::Status(403))
-                        }
-                        _ => Err(NetError::Status(404)),
-                    }),
+                    Effect::Http(r) => {
+                        Fed::Http(match r.url() {
+                            TABLE => {
+                                Ok(br#"{"name":"Fixture","symbol":"F","data_url":"data.json"}"#
+                                    .to_vec())
+                            }
+                            "https://t.example/data.json" => Ok(self.0.clone()),
+                            TWO => Ok(br#"{"name":"Two","symbol":"T","data_url":"two-data.json"}"#
+                                .to_vec()),
+                            "https://t.example/two-data.json" => Ok(self.1.clone()),
+                            u if crate::net::host(u) == "api.bmssearch.net" => {
+                                Err(NetError::Status(403))
+                            }
+                            _ => Err(NetError::Status(404)),
+                        })
+                    }
                     Effect::Download { target, .. } => {
-                        Fed::Downloaded(match self.1.iter().find(|(u, _)| *u == target.url) {
+                        Fed::Downloaded(match self.2.iter().find(|(u, _)| *u == target.url) {
                             Some((_, body)) => Ok(Served::bytes(body.clone(), None, None)),
                             None => Err(NetError::Status(404).into()),
                         })
@@ -357,8 +374,11 @@ mod tests {
             }
         }
         let zip = crate::testkit::zip;
+        let mut cut = zip(&[("Cut/1.bms", pack_1.as_str()), ("Cut/01.wav", "RIFF")]);
+        cut.truncate(cut.len() / 2);
         let net = Hosts(
             data.to_string().into_bytes(),
+            two.to_string().into_bytes(),
             vec![
                 (
                     "https://a.example/a.zip",
@@ -377,6 +397,8 @@ mod tests {
                     ]),
                 ),
                 ("https://b.example/b", b"<html>a page</html>".to_vec()),
+                ("https://e.example/event", b"<html>an event</html>".to_vec()),
+                ("https://k.example/cut.zip", cut),
             ],
         );
         // the defaults, but a user agent no version changes, the sources the
@@ -403,7 +425,7 @@ mod tests {
             TABLE,
         ];
         let again = format!("{a}\n");
-        let runs: [(&[&str], &str); 6] = [
+        let runs: [(&[&str], &str); 7] = [
             (&["--json", "config", "show"], ""),
             (
                 &["--json", "table", "missing", "--library=/lib", "--", TABLE],
@@ -423,6 +445,18 @@ mod tests {
                 "",
             ),
             (&["--json", "link", "page-script"], ""),
+            (
+                &[
+                    "--json",
+                    "table",
+                    "missing",
+                    "--library=/lib",
+                    "--get",
+                    "--",
+                    TWO,
+                ],
+                "",
+            ),
         ];
         let mut file = String::new();
         for (args, stdin) in runs {

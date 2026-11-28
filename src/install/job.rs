@@ -6,7 +6,7 @@
 //! other links tried when its file does not come, Google Drive's quota told
 //! apart from a page).
 
-use super::entry::Claim;
+use super::entry::{Asker, Claim, Had};
 use super::{Batch, Done, Failure, Tries};
 use crate::fs::{Blob, Store};
 use crate::hosts::{Context, Fetch, Link, Resolver, Want};
@@ -36,8 +36,9 @@ pub(crate) const MOVES: u8 = 2;
 /// The files whose download failed, and why: another link that leads to
 /// one (a venue's page naming the links its event's index named, a
 /// source's link to the work a table links) fails at once, not after the
-/// host's timeout again.
-pub(crate) type Dead = Arc<Mutex<HashMap<crate::hosts::DownloadKey, NetError>>>;
+/// host's timeout again. Each with the round it failed in: a job of a
+/// later round tries it again ([`Session::again`](super::Session::again)).
+pub(crate) type Dead = Arc<Mutex<HashMap<crate::hosts::DownloadKey, (NetError, u64)>>>;
 
 /// One link to its file ([`Got`]); a link that is a page for a browser:
 /// [`Fetch::Page`].
@@ -57,6 +58,9 @@ pub struct Acquire {
     /// The link is the file's own ([`Acquire::plain`]).
     plain: bool,
     dead: Dead,
+    /// The round of the job it is for (what failed in an earlier one is
+    /// tried again).
+    round: u64,
 }
 
 impl Acquire {
@@ -81,13 +85,18 @@ impl Acquire {
             again: Again::default(),
             plain: false,
             dead: Default::default(),
+            round: 0,
         }
     }
 
-    /// A file in `dead` failing at once; one whose download fails put
-    /// there.
-    pub(crate) fn dead(self, dead: Dead) -> Acquire {
-        Acquire { dead, ..self }
+    /// A file in `dead` failing at once (for a job of `round`: one that
+    /// failed in it or later); one whose download fails put there.
+    pub(crate) fn dead(self, dead: Dead, round: u64) -> Acquire {
+        Acquire {
+            dead,
+            round,
+            ..self
+        }
     }
 
     /// The file `url` itself (a mirror's), not through the hosts: whatever
@@ -104,7 +113,11 @@ impl Acquire {
         match step {
             Step::Do(e) => Step::Do(e),
             Step::Done(Ok(t)) => {
-                let failed = self.dead.lock().unwrap().get(&dead_key(&t)).cloned();
+                let dead = self.dead.lock().unwrap();
+                let failed = (dead.get(&dead_key(&t)))
+                    .filter(|(_, round)| *round >= self.round)
+                    .map(|(e, _)| e.clone());
+                drop(dead);
                 if let Some(e) = failed {
                     return self.failed(Fetch::Failed(e), None);
                 }
@@ -166,8 +179,13 @@ impl Acquire {
             let moved = u.at.filter(|a| *a != t.url);
             return self.failed(Fetch::Page, moved);
         }
-        let e = u.error.clone();
-        self.dead.lock().unwrap().insert(dead_key(&t), e);
+        let mut dead = self.dead.lock().unwrap();
+        let key = dead_key(&t);
+        let round = dead
+            .get(&key)
+            .map_or(self.round, |(_, r)| self.round.max(*r));
+        dead.insert(key, (u.error.clone(), round));
+        drop(dead);
         self.failed(Fetch::Failed(u.error), None)
     }
 
@@ -200,7 +218,7 @@ impl Acquire {
 }
 
 fn dead_key(t: &Target) -> crate::hosts::DownloadKey {
-    crate::hosts::DownloadKey::of(&t.url, None)
+    crate::hosts::DownloadKey::of_file(&t.url)
 }
 
 /// Whether a file's first bytes are a page's.
@@ -368,16 +386,37 @@ enum Doing {
 pub(crate) const BUSY_WAIT: Duration = Duration::from_millis(500);
 
 /// Times a file another job downloads is asked for, [`BUSY_WAIT`] apart
-/// (ten minutes), before this job takes it to be gone (kept, never fed nor
-/// dropped) and downloads the file itself.
+/// (ten minutes), while that job shows no life (the same job, the bytes
+/// its progress counts unmoved), before this one takes it to be gone (kept,
+/// never fed nor dropped) and downloads the file itself: far longer than a
+/// download goes without data ([`STALL_MS`]) or waits to ask again. (A
+/// driver that counts no bytes, as a web page's may not: ten minutes from
+/// when this job first found that one downloading it.)
+///
+/// [`STALL_MS`]: crate::hosts::STALL_MS
 pub(crate) const BUSY_ASKS: u32 = 1200;
+
+/// A job's wait for a file another job downloads ([`Claim::Busy`]): that
+/// job and the bytes it had when last asked, the times asked since either
+/// changed, and, when this job took the file over and its own download
+/// failed while the other may still bring it, what that came to (said if
+/// the other too shows no life: the file is not taken over twice).
+#[derive(Default)]
+struct Wait {
+    holder: u64,
+    bytes: u64,
+    asks: u32,
+    failed: Option<Vec<Done>>,
+}
 
 /// A song (or its separate chart: `q.diff`) from its own links in order,
 /// then those each source finds (asked one after another, only while
 /// nothing has come in): each link's file ([`Acquire`]; a chart's own link
 /// as it is) into the library ([`super::take`]), until one brings it in
 /// (`Tries`). A file the batch has had is not downloaded again, nor one
-/// another job of the batch downloads (it waits for it: [`Batch::claim`]).
+/// another job of the batch downloads (it waits for it: [`Batch::claim`]);
+/// what another job's take of it brought of this one's chart is this
+/// link's outcome.
 /// Natively each download passes through a folder of its own in
 /// `downloads` (`.job-…`).
 pub struct Install {
@@ -387,12 +426,13 @@ pub struct Install {
     pub(super) batch: Batch,
     /// The job it is of, as the batch's claims name it (0: a job alone).
     pub(super) id: u64,
+    /// The round the job is of ([`Asker::round`]).
+    pub(super) round: u64,
     /// An entry's chart (its hashes): when another job brings it in, this
     /// one ends ([`Done::Owned`]).
     chart: Vec<String>,
-    /// Times the next link's file was asked for while another job
-    /// downloads it.
-    asks: u32,
+    /// While another job downloads the next link's file.
+    wait: Option<Wait>,
     q: Query,
     sources: Sources,
     pub(super) cx: Context,
@@ -423,8 +463,9 @@ impl Install {
             lib,
             batch: Batch::default(),
             id: 0,
+            round: 0,
             chart: Vec::new(),
-            asks: 0,
+            wait: None,
             q,
             sources: Sources::default(),
             cx: cx.clone(),
@@ -469,6 +510,7 @@ impl Install {
         );
         *self = Install {
             id: self.id,
+            round: self.round,
             chart,
             ..next.batch(std::mem::take(&mut self.batch)).sources(sources)
         };
@@ -500,24 +542,44 @@ impl Install {
             if self.tried.contains(&key) {
                 continue;
             }
-            match self.batch.claim(&key, self.id, self.asks >= BUSY_ASKS) {
-                Claim::Busy => {
-                    self.asks += 1;
-                    self.links.push_front(link);
-                    self.doing = Doing::Waiting;
-                    return Step::Do(Effect::Sleep(BUSY_WAIT));
-                }
-                Claim::Had => {
-                    self.asks = 0;
+            // (one whose own download of the file failed does not take it
+            // over again)
+            let stale = (self.wait.as_ref())
+                .filter(|w| w.asks >= BUSY_ASKS && w.failed.is_none())
+                .map(|w| (w.holder, w.bytes));
+            let shared = match self.batch.claim(&key, &self.asker(), &self.q, stale) {
+                Claim::Busy { holder, bytes } => {
+                    let w = self.wait.get_or_insert_with(Wait::default);
+                    if (w.holder, w.bytes) != (holder, bytes) {
+                        (w.holder, w.bytes, w.asks) = (holder, bytes, 0);
+                    }
+                    if w.asks < BUSY_ASKS {
+                        w.asks += 1;
+                        self.cx.stage(crate::progress::Stage::Waiting);
+                        self.links.push_front(link);
+                        self.doing = Doing::Waiting;
+                        return Step::Do(Effect::Sleep(BUSY_WAIT));
+                    }
+                    let failed = self.wait.take().and_then(|w| w.failed);
                     self.tried.insert(key);
-                    self.tries.record(vec![Done::Failed(Failure::Downloaded)]);
-                    continue;
+                    match self.tries.record(failed.unwrap_or_default()) {
+                        Some(done) => return Step::Done(done),
+                        None => continue,
+                    }
                 }
-                Claim::Mine => {
-                    self.asks = 0;
-                    self.tried.insert(key.clone());
+                Claim::Had(had) => {
+                    self.wait = None;
+                    self.tried.insert(key);
+                    match self.tries.record(self.had(link, had)) {
+                        Some(done) => return Step::Done(done),
+                        None => continue,
+                    }
                 }
-            }
+                Claim::Mine => true,
+                Claim::Taken => false,
+            };
+            self.wait = None;
+            self.tried.insert(key.clone());
             let check = self.checked && crate::chart::md5_key(&self.q.md5).is_some();
             super::sweep(&*self.store, &self.downloads);
             let job = self.downloads.join(format!(".job-{}", super::unique()));
@@ -536,7 +598,12 @@ impl Install {
                     Acquire::new(&link, want, false, job.join("download"), &self.cx)
                 }
             };
-            let mut acquire = acquire.dead(self.batch.dead.clone());
+            // (taken over: its failure is not the file's while the other
+            // job may still bring it)
+            let mut acquire = match shared {
+                true => acquire.dead(self.batch.dead.clone(), self.round),
+                false => acquire,
+            };
             let step = acquire.start();
             let t = Trying {
                 acquire,
@@ -588,7 +655,7 @@ impl Install {
         };
         let done = match got {
             // a page where a chart was expected
-            Ok(g) if t.chart.is_some() && is_page(&g.head) => vec![Done::Page(t.link)],
+            Ok(g) if t.chart.is_some() && is_page(&g.head) => vec![Done::Page(t.link.clone())],
             Ok(g) => {
                 self.cx.stage(crate::progress::Stage::Unpacking);
                 let file = t.chart.unwrap_or_else(|| "download".into());
@@ -597,15 +664,84 @@ impl Install {
                 req.progress = self.cx.progress.clone();
                 super::take(&*self.store, g.blob, &req, &self.downloads, &mut self.lib)
             }
-            Err(Fetch::Page) => vec![Done::Page(t.link)],
+            Err(Fetch::Page) => vec![Done::Page(t.link.clone())],
             Err(Fetch::Failed(e)) => vec![Done::Failed(e.into())],
         };
         self.store.remove_dir(&t.job);
-        self.batch.tried(self.id, t.key, &done);
+        let back = (self.batch).tried(&self.asker(), t.key.clone(), &self.q, &done);
+        if back && !self.cx.cancelled() {
+            // the job it took the file over from may still bring it
+            self.tried.remove(&t.key);
+            self.links.push_front(t.link);
+            self.wait = Some(Wait {
+                failed: Some(done),
+                ..Default::default()
+            });
+            return self.next();
+        }
         match self.tries.record(done) {
             Some(done) => Step::Done(done),
             None => self.next(),
         }
+    }
+
+    /// This job as the batch knows it.
+    fn asker(&self) -> Asker {
+        Asker {
+            id: self.id,
+            round: self.round,
+            progress: self.cx.progress.clone(),
+        }
+    }
+
+    /// What another job's take of `link`'s file came to (`had`) for this
+    /// job: a page is a page; what it brought, this job's chart if it was
+    /// among it ([`Install::found`]); else nothing for it.
+    fn had(&self, link: String, had: Had) -> Vec<Done> {
+        let found = match had {
+            Had::Page => Some(Done::Page(link)),
+            Had::Nothing => None,
+            Had::Brought(done) => self.found(&done),
+        };
+        vec![found.unwrap_or(Done::Failed(Failure::Downloaded))]
+    }
+
+    /// This job's chart in what another job's take brought (`done`; one in
+    /// the library ended it already): waiting for its song, by its hashes;
+    /// without a hash, a song's folder that came holding a chart of its
+    /// song, as this job's own take of the file would find it
+    /// ([`Done::Owned`]).
+    fn found(&self, done: &[Done]) -> Option<Done> {
+        let fs = &*self.store;
+        let hashes: Vec<&String> = (self.chart.iter().chain([&self.q.md5]))
+            .filter(|h| !h.is_empty())
+            .collect();
+        if !hashes.is_empty() {
+            let ours = |p: &std::path::Path| {
+                crate::chart::read(fs, p).is_some_and(|b| {
+                    let (md5, sha256) = (super::md5_hex(&b), crate::chart::sha256_hex(&b));
+                    (hashes.iter())
+                        .any(|h| h.eq_ignore_ascii_case(&md5) || h.eq_ignore_ascii_case(&sha256))
+                })
+            };
+            let waiting = |d: &&Done| matches!(d, Done::Waiting(p) if ours(p));
+            return done.iter().find(waiting).cloned();
+        }
+        let song = crate::chart::ChartInfo {
+            title: self.q.want.title.clone(),
+            artist: self.q.want.artist.clone(),
+            ..Default::default()
+        };
+        let songs = self.lib.song_folders_like(&[song]);
+        done.iter().find_map(|d| {
+            let dir = match d {
+                Done::Added(dir, _) | Done::Owned(dir) => dir.as_path(),
+                Done::Placed(p) => p.parent()?,
+                _ => return None,
+            };
+            let song = songs.iter().find(|s| s.starts_with(dir))?;
+            Some(Done::Owned(song.clone()))
+        })
     }
 
     /// What the effect asked for came to.

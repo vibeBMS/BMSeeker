@@ -21,16 +21,20 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// waits for it, then finds its chart in the library ([`Done::Owned`]) or
 /// takes what is left of the file's. A copy is the same session.
 ///
+/// What a file brought is known for the session's life; what failed (a
+/// download, a page, a file that brought nothing) answers the jobs of its
+/// round: [`Session::again`] starts the next.
+///
 /// The library and the batch are lent to a job for each of its steps,
 /// under one lock, never while its effect (a request, a download, a wait)
 /// is done. The longest hold is one step: an archive that came unpacked
 /// and applied (seconds for a large one); what waits for it is the other
 /// jobs' next steps, [`Session::with_library`], and the drop of a job that
-/// has started. Making a job, [`SessionJob::is_empty`] and
-/// [`Session::want`] do not take it (a screen's thread does not wait for
-/// an unpack). A job that panics while it has them loses the library:
+/// has started. Making a job, [`SessionJob::is_empty`], [`Session::want`]
+/// and [`Session::again`] do not take it (a screen's thread does not wait
+/// for an unpack). A job that panics while it has them loses the library:
 /// every later step of the session's jobs ends at once (a failure,
-/// [`LOST`]).
+/// [`LOST`]), and [`Session::with_library`] has none.
 #[derive(Clone)]
 pub struct Session(Arc<Shared>);
 
@@ -45,6 +49,8 @@ struct Shared {
     wanted: Mutex<Vec<String>>,
     /// The last job's number (the batch's claims name a job by it).
     jobs: AtomicU64,
+    /// The round the jobs made now are of ([`Session::again`]).
+    round: AtomicU64,
 }
 
 struct State {
@@ -74,6 +80,7 @@ impl Session {
             }),
             wanted: Mutex::default(),
             jobs: AtomicU64::new(0),
+            round: AtomicU64::new(0),
         }))
     }
 
@@ -82,8 +89,18 @@ impl Session {
     /// waiting for a job's step: the jobs' steps from the next one on see
     /// them.
     pub fn want(&self, md5s: impl IntoIterator<Item = String>) {
+        let md5s: Vec<String> = md5s.into_iter().collect();
         let mut w = self.0.wanted.lock().unwrap_or_else(PoisonError::into_inner);
         w.extend(md5s);
+    }
+
+    /// A new round (a retry of what failed): the jobs made from now on try
+    /// again what failed for the jobs before (a download, a file that came
+    /// but brought nothing, a page: a page's download may come now); what
+    /// came in stays known, and a file another job downloads is still
+    /// waited for. Without waiting for a job's step.
+    pub fn again(&self) {
+        self.0.round.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The job of `e` in this session, its progress and cancel `cx`'s.
@@ -94,6 +111,7 @@ impl Session {
     pub fn job(&self, e: Entry, cx: &Context) -> SessionJob {
         SessionJob {
             id: self.0.jobs.fetch_add(1, Ordering::Relaxed) + 1,
+            round: self.0.round.load(Ordering::Relaxed),
             session: self.clone(),
             job: Lent::Made(Box::new((e, Vec::new(), cx.clone()))),
         }
@@ -103,10 +121,12 @@ impl Session {
     /// place: a clone (`with_library(Library::clone)`) shares the charts'
     /// hashes and records until one changes, but copies the index of its
     /// songs' folders once that has been read. It waits for the lock while
-    /// a job's step holds it.
-    pub fn with_library<T>(&self, f: impl FnOnce(&Library) -> T) -> T {
-        let s = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&s.lib)
+    /// a job's step holds it, so `f` must not call it again nor drop a job
+    /// of the session that has started. None: the library was lost (a job
+    /// panicked with it).
+    pub fn with_library<T>(&self, f: impl FnOnce(&Library) -> T) -> Option<T> {
+        let s = self.0.state.lock().ok()?;
+        Some(f(&s.lib))
     }
 }
 
@@ -124,6 +144,7 @@ enum Lent {
 /// jobs.
 pub struct SessionJob {
     id: u64,
+    round: u64,
     session: Session,
     job: Lent,
 }
@@ -170,7 +191,7 @@ impl SessionJob {
                 let e = std::mem::take(e);
                 let mut j = EntryJob::new(store, downloads, lib, e, sh.sources.clone(), cx);
                 j.add(std::mem::take(addons));
-                j.install.id = self.id;
+                (j.install.id, j.install.round) = (self.id, self.round);
                 self.job = Lent::Started(Box::new(j));
                 None
             }

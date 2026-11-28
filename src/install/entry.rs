@@ -13,8 +13,9 @@ use crate::library::Library;
 use crate::net::job::{Fed, Job, Step};
 use crate::net::NetError;
 use crate::package::Role;
+use crate::progress::Progress;
 use crate::sources::{Query, Sources};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -158,28 +159,101 @@ pub(crate) fn entry_steps(e: &Entry, lib: &Library) -> Vec<EntryStep> {
     out
 }
 
-/// What a batch of downloads (a table's missing charts) shares: the files
-/// it has had (by their `DownloadKey`), the charts it wants (a separate
-/// chart's archive of many keeps those waiting for their songs), the
-/// files whose download failed (a copy shares them), and the files being
-/// downloaded, by which job ([`Batch::claim`]: a session's jobs at once).
+/// What a batch of downloads (a table's missing charts, a session's run)
+/// shares: what each file it has had came to (by its `DownloadKey`), the
+/// charts it wants (a separate chart's archive of many keeps those waiting
+/// for their songs), the files whose download failed (a copy shares them),
+/// and the files being downloaded, by which job ([`Batch::claim`]: a
+/// session's jobs at once). What a file brought is kept for good; what
+/// failed (a download, a take, a page) for the jobs of the round it was
+/// tried in and later ones ([`Asker::round`]).
 #[derive(Clone, Debug, Default)]
 pub struct Batch {
-    seen: HashSet<DownloadKey>,
+    seen: HashMap<DownloadKey, Seen>,
     wanted: Vec<String>,
     pub(super) dead: Dead,
-    claims: HashMap<DownloadKey, u64>,
+    claims: HashMap<DownloadKey, Holder>,
+}
+
+/// What a file the batch has had came to.
+#[derive(Clone, Debug)]
+enum Seen {
+    /// It brought `done`, keeping waiting (a separate charts' archive) only
+    /// the charts `kept` names: the first so many of those wanted then,
+    /// and those its takes were for (None: all it held).
+    Brought {
+        done: Vec<Done>,
+        kept: Option<(usize, Vec<String>)>,
+    },
+    /// A page for a browser (`page`), or nothing (its take failed), for
+    /// the jobs of `round` and later.
+    Missed { page: bool, round: u64 },
+}
+
+/// The job downloading a file, its progress (how far it has got: whether
+/// it shows life), and the job it took the file over from, which may still
+/// bring it.
+#[derive(Clone, Debug)]
+struct Holder {
+    id: u64,
+    progress: Option<Arc<Progress>>,
+    under: Option<Box<Holder>>,
+}
+
+impl Holder {
+    fn bytes(&self) -> u64 {
+        self.progress.as_ref().map_or(0, |p| p.bytes().0)
+    }
+
+    /// Job `id` gone from those it was taken over from.
+    fn forget(&mut self, id: u64) {
+        let Some(u) = &mut self.under else {
+            return;
+        };
+        if u.id == id {
+            let below = u.under.take();
+            self.under = below;
+        } else {
+            u.forget(id);
+        }
+    }
+}
+
+/// A job as the batch knows it: its number (0: a job alone), its round
+/// (a session's jobs made after [`Session::again`](super::Session::again)
+/// are of a later one: what failed before is tried again for them), and
+/// the progress its downloads count bytes in.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Asker {
+    pub(crate) id: u64,
+    pub(crate) round: u64,
+    pub(crate) progress: Option<Arc<Progress>>,
 }
 
 /// Whether a job downloads a file ([`Batch::claim`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum Claim {
-    /// The batch has had it.
-    Had,
+    /// The batch has had it: what it came to.
+    Had(Had),
     /// This job's to download.
     Mine,
-    /// Another job downloads it: ask again after a wait.
-    Busy,
+    /// This job's, taken over from one that showed no life (its failure
+    /// is not the file's while that one may still bring it).
+    Taken,
+    /// Another job (`holder`, its progress at `bytes`) downloads it: ask
+    /// again after a wait.
+    Busy { holder: u64, bytes: u64 },
+}
+
+/// What a file the batch has had came to, for a job that asks for it.
+#[derive(Clone, Debug)]
+pub(crate) enum Had {
+    /// It brought these (another job's take of it).
+    Brought(Vec<Done>),
+    /// A page.
+    Page,
+    /// Nothing (its take failed).
+    Nothing,
 }
 
 impl Batch {
@@ -205,48 +279,140 @@ impl Batch {
         DownloadKey::of(link, (!q.diff).then_some(&q.want))
     }
 
-    /// Whether the batch has had the file of `key`.
-    pub(crate) fn has(&self, key: &DownloadKey) -> bool {
-        self.seen.contains(key)
-    }
-
-    /// Whether job `id` downloads the file of `key`: had already; else its
-    /// own (claimed until [`Batch::tried`] or [`Batch::release`]), unless
-    /// another job has claimed it (`take_over`: that job is taken to be
-    /// gone, the claim is `id`'s).
-    pub(crate) fn claim(&mut self, key: &DownloadKey, id: u64, take_over: bool) -> Claim {
-        if self.has(key) {
-            return Claim::Had;
+    /// Whether `job` downloads the file of `key` for `q`: had already
+    /// (what it brought, if it kept `q`'s chart had there been one; a page
+    /// or nothing, tried in `job`'s round or later); else its own (claimed
+    /// until [`Batch::tried`] or [`Batch::release`]), unless another job
+    /// has claimed it. That one is taken to be gone when it is `stale`
+    /// (the job and its bytes as `job` found them through its wait): the
+    /// claim is `job`'s then, until it ends.
+    pub(crate) fn claim(
+        &mut self,
+        key: &DownloadKey,
+        job: &Asker,
+        q: &Query,
+        stale: Option<(u64, u64)>,
+    ) -> Claim {
+        match self.seen.get(key) {
+            Some(Seen::Brought { done, kept }) if self.kept(kept.as_ref(), q) => {
+                return Claim::Had(Had::Brought(done.clone()));
+            }
+            Some(Seen::Missed { page, round }) if *round >= job.round => {
+                return Claim::Had(if *page { Had::Page } else { Had::Nothing });
+            }
+            _ => {}
         }
-        match self.claims.get(key) {
-            Some(&other) if other != id && !take_over => Claim::Busy,
-            _ => {
-                self.claims.insert(key.clone(), id);
+        let mine = Holder {
+            id: job.id,
+            progress: job.progress.clone(),
+            under: None,
+        };
+        match self.claims.get_mut(key) {
+            None => {
+                self.claims.insert(key.clone(), mine);
                 Claim::Mine
             }
+            Some(h) if h.id == job.id => Claim::Mine,
+            Some(h) if stale == Some((h.id, h.bytes())) => {
+                let under = std::mem::replace(h, mine);
+                h.under = Some(Box::new(under));
+                Claim::Taken
+            }
+            Some(h) => Claim::Busy {
+                holder: h.id,
+                bytes: h.bytes(),
+            },
         }
     }
 
-    /// Job `id`'s claims released (it ended, or is gone).
-    pub(super) fn release(&mut self, id: u64) {
-        self.claims.retain(|_, j| *j != id);
+    /// Whether a file that kept the charts `kept` names kept `q`'s.
+    fn kept(&self, kept: Option<&(usize, Vec<String>)>, q: &Query) -> bool {
+        let Some((wanted, takers)) = kept else {
+            return true;
+        };
+        md5_key(&q.md5).is_some_and(|m| self.wanted[..*wanted].contains(&m) || takers.contains(&m))
     }
 
-    /// The file of `key` job `id` downloaded came to `done` (the claim
-    /// released if it is still `id`'s, not one taken over): had, unless it
-    /// did not come (a failed download: `dead` answers for it; cancelled)
-    /// or was not the chart looked for (found by name, it may be
-    /// another's).
-    pub(crate) fn tried(&mut self, id: u64, key: DownloadKey, done: &[Done]) {
-        if self.claims.get(&key) == Some(&id) {
-            self.claims.remove(&key);
+    /// Job `id`'s claims released (it ended, or is gone): one it took over
+    /// is the job's it took it from again.
+    pub(super) fn release(&mut self, id: u64) {
+        self.claims.retain(|_, h| {
+            if h.id != id {
+                h.forget(id);
+                return true;
+            }
+            match h.under.take() {
+                Some(under) => {
+                    *h = *under;
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+
+    /// The file of `key` `job` downloaded for `q` came to `done`, the
+    /// claim released if it is `job`'s: had, unless it did not come (a
+    /// failed download: `dead` answers for it; cancelled) or was not the
+    /// chart looked for (found by name, it may be another's). True: it
+    /// brought nothing and the job it was taken over from may still bring
+    /// it; that one's claim again, nothing kept.
+    pub(crate) fn tried(
+        &mut self,
+        job: &Asker,
+        key: DownloadKey,
+        q: &Query,
+        done: &[Done],
+    ) -> bool {
+        let came = got(done);
+        match self.claims.get_mut(&key) {
+            Some(h) if h.id == job.id => match h.under.take() {
+                Some(under) if !came => {
+                    *h = *under;
+                    return true;
+                }
+                _ => {
+                    self.claims.remove(&key);
+                }
+            },
+            Some(h) => h.forget(job.id),
+            None => {}
         }
         let again = done
             .iter()
             .any(|d| matches!(d, Done::Failed(Failure::Net(_) | Failure::NotTheChart)));
-        if !again {
-            self.seen.insert(key);
+        if came {
+            // (a separate charts' archive kept waiting only those wanted)
+            let md5 = md5_key(&q.md5).filter(|_| q.diff);
+            let kept = md5.map(|m| (self.wanted.len(), vec![m]));
+            match self.seen.get_mut(&key) {
+                Some(Seen::Brought { done: had, kept: k }) => {
+                    had.extend_from_slice(done);
+                    *k = match (k.take(), kept) {
+                        (Some((_, mut takers)), Some((wanted, m))) => {
+                            takers.extend(m);
+                            Some((wanted, takers))
+                        }
+                        _ => None,
+                    };
+                }
+                _ => {
+                    let done = done.to_vec();
+                    self.seen.insert(key, Seen::Brought { done, kept });
+                }
+            }
+        } else if !again {
+            let page = done.iter().any(|d| matches!(d, Done::Page(_)));
+            let newer = |s: &Seen| match s {
+                Seen::Brought { .. } => true,
+                Seen::Missed { round, .. } => *round > job.round,
+            };
+            if !self.seen.get(&key).is_some_and(newer) {
+                let round = job.round;
+                self.seen.insert(key, Seen::Missed { page, round });
+            }
         }
+        false
     }
 
     /// The charts wanted but `q`'s.
@@ -389,10 +555,8 @@ impl EntryJob {
         let page = done.iter().any(|d| matches!(d, Done::Page(_)));
         let missed = !done.is_empty() && !cancelled(&done) && !got(&done);
         // (the library as it is now: another job of a session may have
-        // brought the chart in, or its song)
-        if let Some(dir) = holding(lib, &self.e.hashes()).filter(|_| missed) {
-            done = vec![Done::Owned(dir)];
-        } else if missed && !page && has_song(&self.e, lib) {
+        // brought its song)
+        if missed && !page && has_song(&self.e, lib) {
             done = vec![Done::Failed(Failure::NoChartLink)];
         }
         let no_link = |d: &Done| matches!(d, Done::Failed(Failure::NoLink | Failure::NoChartLink));
@@ -550,6 +714,21 @@ mod tests {
         assert!(!missing.due(&e, &lib, &[]));
     }
 
+    /// Job `id` of the first round, as the batch knows it.
+    fn job(id: u64) -> Asker {
+        Asker {
+            id,
+            ..Default::default()
+        }
+    }
+
+    /// Whether the batch has had `link`'s file for `asker`'s `q`.
+    fn has(b: &mut Batch, link: &str, q: &Query, asker: &Asker) -> bool {
+        let c = b.claim(&Batch::key(link, q), asker, q, None);
+        b.release(asker.id);
+        matches!(c, Claim::Had(_))
+    }
+
     #[test]
     fn a_batch_has_each_file_once() {
         let e = entry("Song", &[]);
@@ -558,86 +737,207 @@ mod tests {
         assert_eq!(b.also(&song), [md5_hex(b"other")]);
         let view = "https://drive.google.com/file/d/ID1/view";
         let uc = "https://drive.google.com/uc?id=ID1&export=download";
-        assert!(!b.has(&Batch::key(view, &song)));
-        b.tried(
-            0,
-            Batch::key(view, &song),
-            &[Done::Added("bms/S".into(), 2)],
-        );
-        assert!(b.has(&Batch::key(uc, &diff)));
+        let j = job(9);
+        assert!(!has(&mut b, view, &song, &j));
+        let added = [Done::Added("bms/S".into(), 2)];
+        b.tried(&job(0), Batch::key(view, &song), &song, &added);
+        assert!(has(&mut b, uc, &diff, &j));
         // not the chart (found by name), or cancelled: may come again
         let other = "https://e/b.zip";
-        b.tried(
-            0,
-            Batch::key(other, &diff),
-            &[Done::Failed(Failure::NotTheChart)],
-        );
-        b.tried(
-            0,
-            Batch::key(other, &diff),
-            &[Done::Failed(crate::net::NetError::Cancelled.into())],
-        );
-        assert!(!b.has(&Batch::key(other, &diff)));
+        let not = [Done::Failed(Failure::NotTheChart)];
+        b.tried(&job(0), Batch::key(other, &diff), &diff, &not);
+        let cancelled = [Done::Failed(crate::net::NetError::Cancelled.into())];
+        b.tried(&job(0), Batch::key(other, &diff), &diff, &cancelled);
+        assert!(!has(&mut b, other, &diff, &j));
         // nor one whose download failed (the batch's dead files say why)
-        b.tried(
-            0,
-            Batch::key(other, &diff),
-            &[Done::Failed(crate::net::NetError::Status(404).into())],
-        );
-        assert!(!b.has(&Batch::key(other, &diff)));
+        let failed = [Done::Failed(crate::net::NetError::Status(404).into())];
+        b.tried(&job(0), Batch::key(other, &diff), &diff, &failed);
+        assert!(!has(&mut b, other, &diff, &j));
         // a folder's link: the song looked for in it counts
         let folder = "https://drive.google.com/drive/folders/F1";
-        b.tried(0, Batch::key(folder, &song), &[]);
+        b.tried(&job(0), Batch::key(folder, &song), &song, &added);
         let mut other_song = e.clone();
         other_song.want.title = "Other".into();
-        assert!(b.has(&Batch::key(folder, &song)));
-        assert!(!b.has(&Batch::key(folder, &other_song.query(Role::Song))));
+        assert!(has(&mut b, folder, &song, &j));
+        assert!(!has(&mut b, folder, &other_song.query(Role::Song), &j));
+    }
+
+    /// What failed (a page, a take of nothing) answers the jobs of its
+    /// round and later ones; what came, every job.
+    #[test]
+    fn what_failed_answers_its_round() {
+        let q = entry("Song", &[]).query(Role::Song);
+        let (page, cut, came) = ("https://e/page", "https://e/cut.zip", "https://e/song.zip");
+        let mut b = Batch::default();
+        let key = |l: &str| Batch::key(l, &q);
+        b.tried(&job(1), key(page), &q, &[Done::Page(page.into())]);
+        let nothing = [Done::Failed(Failure::Other("cut off".into()))];
+        b.tried(&job(1), key(cut), &q, &nothing);
+        b.tried(&job(1), key(came), &q, &[Done::Added("bms/S".into(), 2)]);
+        let now = |b: &mut Batch, l: &str, round: u64| {
+            let asker = Asker {
+                id: 2,
+                round,
+                ..Default::default()
+            };
+            let c = b.claim(&key(l), &asker, &q, None);
+            b.release(2);
+            c
+        };
+        assert!(matches!(now(&mut b, page, 0), Claim::Had(Had::Page)));
+        assert!(matches!(now(&mut b, cut, 0), Claim::Had(Had::Nothing)));
+        assert!(matches!(now(&mut b, page, 1), Claim::Mine));
+        assert!(matches!(now(&mut b, cut, 1), Claim::Mine));
+        for round in [0, 1] {
+            let c = now(&mut b, came, round);
+            assert!(
+                matches!(&c, Claim::Had(Had::Brought(d)) if d.len() == 1),
+                "{c:?}"
+            );
+        }
+        // a job of an earlier round: a failure since answers it too
+        let later = Asker {
+            id: 3,
+            round: 1,
+            ..Default::default()
+        };
+        b.tried(&later, key(page), &q, &[Done::Page(page.into())]);
+        assert!(matches!(now(&mut b, page, 0), Claim::Had(Had::Page)));
+        assert!(matches!(now(&mut b, page, 1), Claim::Had(Had::Page)));
+        assert!(matches!(now(&mut b, page, 2), Claim::Mine));
+    }
+
+    /// A separate charts' archive kept waiting only the charts wanted when
+    /// it came: it answers for those, and for the chart its take was for;
+    /// a chart wanted since gets it again. A song's archive kept all.
+    #[test]
+    fn a_charts_archive_answers_for_the_charts_it_kept() {
+        let chart = |t: &str| Query {
+            md5: md5_hex(t.as_bytes()),
+            diff: true,
+            ..Default::default()
+        };
+        let (a, c, n) = (chart("a"), chart("c"), chart("n"));
+        let none = Query {
+            md5: String::new(),
+            ..a.clone()
+        };
+        let link = "https://e/charts.zip";
+        let k = Batch::key(link, &a);
+        let mut b = Batch::new([n.md5.clone()]);
+        b.tried(&job(1), k.clone(), &a, &[Done::Waiting("dl/a.bms".into())]);
+        b.want([c.md5.clone()]);
+        let j = job(9);
+        assert!(has(&mut b, link, &a, &j) && has(&mut b, link, &n, &j));
+        assert!(!has(&mut b, link, &c, &j) && !has(&mut b, link, &none, &j));
+        b.tried(&job(2), k, &c, &[Done::Waiting("dl/c.bms".into())]);
+        for q in [&a, &c, &n] {
+            assert!(has(&mut b, link, q, &j), "{q:?}");
+        }
+        let song = Query {
+            diff: false,
+            ..a.clone()
+        };
+        let pack = "https://e/pack.zip";
+        b.tried(
+            &job(3),
+            Batch::key(pack, &song),
+            &song,
+            &[Done::Added("bms/S".into(), 2)],
+        );
+        assert!(has(&mut b, pack, &c, &j) && has(&mut b, pack, &none, &j));
     }
 
     /// A file one job downloads is another's to wait for, until it came
     /// (had), did not (the next asker's), or the job is gone.
     #[test]
     fn claims() {
-        let key = Batch::key("https://e/song.zip", &entry("Song", &[]).query(Role::Song));
+        let q = entry("Song", &[]).query(Role::Song);
+        let key = Batch::key("https://e/song.zip", &q);
         let mut b = Batch::default();
-        assert_eq!(b.claim(&key, 1, false), Claim::Mine);
-        assert_eq!(b.claim(&key, 1, false), Claim::Mine);
-        assert_eq!(b.claim(&key, 2, false), Claim::Busy);
+        let claim = |b: &mut Batch, id| b.claim(&key, &job(id), &q, None);
+        assert!(matches!(claim(&mut b, 1), Claim::Mine));
+        assert!(matches!(claim(&mut b, 1), Claim::Mine));
+        assert!(matches!(
+            claim(&mut b, 2),
+            Claim::Busy {
+                holder: 1,
+                bytes: 0
+            }
+        ));
         let failed = [Done::Failed(crate::net::NetError::Status(404).into())];
-        b.tried(1, key.clone(), &failed);
-        assert_eq!(b.claim(&key, 2, false), Claim::Mine);
+        assert!(!b.tried(&job(1), key.clone(), &q, &failed));
+        assert!(matches!(claim(&mut b, 2), Claim::Mine));
         b.release(2);
-        assert_eq!(b.claim(&key, 3, false), Claim::Mine);
+        assert!(matches!(claim(&mut b, 3), Claim::Mine));
         b.release(3);
         assert!(b.claims.is_empty());
-        b.tried(1, key.clone(), &[Done::Added("bms/S".into(), 2)]);
-        assert_eq!(b.claim(&key, 3, false), Claim::Had);
+        b.tried(&job(1), key.clone(), &q, &[Done::Added("bms/S".into(), 2)]);
+        assert!(matches!(claim(&mut b, 3), Claim::Had(_)));
     }
 
-    /// A claim taken over (its job taken to be gone) stays the taker's
-    /// when the first job ends after all: a third job waits for the taker.
-    /// Had once the file came, whoever brought it.
+    /// A claim is taken over only from the job, at the bytes, a waiter
+    /// found unmoved through its wait: then it is the taker's (a third
+    /// waits for it), until the taker ends. Bringing nothing, or gone, the
+    /// taker leaves it to the job it took it from, if that one has not
+    /// ended; had once the file came, whoever brought it.
     #[test]
-    fn a_claim_taken_over_stays_the_takers() {
-        let key = Batch::key("https://e/song.zip", &entry("Song", &[]).query(Role::Song));
-        let cancelled = [Done::Failed(crate::net::NetError::Cancelled.into())];
+    fn a_claim_taken_over() {
+        let q = entry("Song", &[]).query(Role::Song);
+        let key = Batch::key("https://e/song.zip", &q);
         let failed = [Done::Failed(crate::net::NetError::Status(404).into())];
-        for end in [&cancelled[..], &failed] {
-            let mut b = Batch::default();
-            assert_eq!(b.claim(&key, 1, false), Claim::Mine);
-            assert_eq!(b.claim(&key, 2, true), Claim::Mine);
-            b.tried(1, key.clone(), end);
-            b.release(1);
-            assert_eq!(b.claim(&key, 3, false), Claim::Busy, "{end:?}");
-            b.tried(2, key.clone(), end);
-            assert_eq!(b.claim(&key, 3, false), Claim::Mine, "{end:?}");
-        }
+        let p = crate::progress::Progress::new();
+        let first = Asker {
+            id: 1,
+            progress: Some(p.clone()),
+            ..Default::default()
+        };
         let mut b = Batch::default();
-        b.claim(&key, 1, false);
-        b.claim(&key, 2, true);
-        b.tried(1, key.clone(), &[Done::Added("bms/S".into(), 2)]);
-        assert_eq!(b.claims.get(&key), Some(&2));
-        assert_eq!(b.claim(&key, 3, false), Claim::Had);
+        let claim = |b: &mut Batch, id, stale| b.claim(&key, &job(id), &q, stale);
+        assert!(matches!(b.claim(&key, &first, &q, None), Claim::Mine));
+        p.add(5);
+        // (its bytes moved since)
+        let c = claim(&mut b, 2, Some((1, 0)));
+        assert!(
+            matches!(
+                c,
+                Claim::Busy {
+                    holder: 1,
+                    bytes: 5
+                }
+            ),
+            "{c:?}"
+        );
+        assert!(matches!(claim(&mut b, 2, Some((1, 5))), Claim::Taken));
+        assert!(matches!(
+            claim(&mut b, 3, Some((1, 5))),
+            Claim::Busy { holder: 2, .. }
+        ));
+        // the taker brought nothing: the first's again
+        assert!(b.tried(&job(2), key.clone(), &q, &failed));
+        assert!(matches!(
+            claim(&mut b, 3, None),
+            Claim::Busy { holder: 1, .. }
+        ));
+        // taken again, the taker gone
+        assert!(matches!(claim(&mut b, 2, Some((1, 5))), Claim::Taken));
+        b.release(2);
+        assert!(matches!(
+            claim(&mut b, 3, None),
+            Claim::Busy { holder: 1, .. }
+        ));
+        // the first ends while the taker downloads: the taker's alone
+        assert!(matches!(claim(&mut b, 2, Some((1, 5))), Claim::Taken));
+        assert!(!b.tried(&first, key.clone(), &q, &failed));
+        assert!(!b.tried(&job(2), key.clone(), &q, &failed));
+        assert!(b.claims.is_empty());
+        // the taker brings it
+        assert!(matches!(claim(&mut b, 1, None), Claim::Mine));
+        assert!(matches!(claim(&mut b, 2, Some((1, 0))), Claim::Taken));
+        let added = [Done::Added("bms/S".into(), 2)];
+        assert!(!b.tried(&job(2), key.clone(), &q, &added));
+        assert!(b.claims.is_empty());
+        assert!(matches!(claim(&mut b, 3, None), Claim::Had(_)));
     }
 
     /// A source that finds nothing, keeping whether each query was a

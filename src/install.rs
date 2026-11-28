@@ -65,8 +65,9 @@ pub enum Failure {
     NoChartLink,
     /// No link to try.
     NoLink,
-    /// The link's file this batch of downloads has had already (and what
-    /// it brought is in the library, or waits).
+    /// The link's file this batch of downloads has had already, and it
+    /// brought nothing of this chart (it was not in it, or its take
+    /// failed in this round).
     Downloaded,
     /// Anything else (unpacking, the disk), as said.
     Other(String),

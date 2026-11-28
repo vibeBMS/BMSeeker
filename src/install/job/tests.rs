@@ -732,7 +732,8 @@ fn install_in_a_batch_and_cancelled() {
     let d = Canned::default();
     let link = "https://drive.google.com/file/d/ID9/view";
     let mut batch = Batch::default();
-    batch.tried(0, Batch::key(link, &q), &[Done::Added("bms/S".into(), 1)]);
+    let added = [Done::Added("bms/S".into(), 1)];
+    batch.tried(&Default::default(), Batch::key(link, &q), &q, &added);
     let other = "https://drive.google.com/uc?id=ID9";
     let out = install(
         &Arc::new(crate::fs::Mem::default()),
@@ -748,7 +749,9 @@ fn install_in_a_batch_and_cancelled() {
         &out.done[..],
         [Done::Failed(crate::install::Failure::Downloaded)]
     ));
-    assert!(out.batch.has(&Batch::key(link, &q)));
+    let mut batch = out.batch;
+    let had = batch.claim(&Batch::key(link, &q), &Default::default(), &q, None);
+    assert!(matches!(had, Claim::Had(_)));
     let p = Progress::new();
     p.cancel();
     let cx = Context::default().with_progress(p);
