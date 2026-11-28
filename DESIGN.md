@@ -729,3 +729,19 @@ size, per channel) and `builds.json` (every build's). Its version is
 `bmseeker --version`, the window's Settings and the web page's foot show;
 a tag `v<version>` releases `<version>` (`.github/workflows/release.yml`).
 Local builds are `<version>-dev` (`Cargo.toml`).
+
+`THIRD_PARTY_LICENSES.md` has the licence texts of the Rust crates the
+releases are built from (every system's and the web page's; not the
+tests') and of the window's Go modules and Go itself, each text once with
+the crates or modules under it, without versions. `tools/gen_licenses.sh`
+makes it: cargo-about for the crates (its version and hash pinned in the
+script; `about.toml` names the licences accepted, and a crate under any
+other stops it), and the modules' own licence files for Go (a kind of text
+it does not know stops it too). CI's web job runs
+`tools/gen_licenses.sh --check`, which fails when the committed file is not
+what Cargo.lock and `gui/go.sum` give: a version bump leaves it as it is,
+but an update that adds or removes a crate or module or changes a licence
+text fails CI, Dependabot's too (and is not merged), until someone runs
+`tools/gen_licenses.sh`, reads what changed and commits the file (on a
+Dependabot pull request that commit is not Dependabot's, so it is then
+merged by hand).

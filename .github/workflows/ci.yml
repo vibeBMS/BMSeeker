@@ -155,6 +155,11 @@ jobs:
       - run: GOOS=js GOARCH=wasm go vet ./...
         working-directory: gui
       - run: node web/test/proxy.mjs
+      # THIRD_PARTY_LICENSES.md is what Cargo.lock and gui/go.sum give: a
+      # crate or module that comes or goes, or a new licence text, waits for
+      # it to be made again (cargo-about, pinned in the script by version and
+      # hash; this job has the Rust and the Go the file is made with)
+      - run: tools/gen_licenses.sh --check
 
   # the release builds, once the checks pass (a pull request's too, as
   # artifacts)

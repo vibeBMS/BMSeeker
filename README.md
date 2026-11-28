@@ -153,4 +153,5 @@ written again in Rust, with some of its regular expressions as they are; its not
 ## License
 
 `MIT OR Apache-2.0`. RAR files are unpacked with unrar-rs, under the UnRAR licence restriction; its notice is in
-full in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+full in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The licences of the Rust crates and Go modules it is built
+from, generated from Cargo.lock and gui/go.sum, are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

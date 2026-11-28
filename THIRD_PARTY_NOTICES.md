@@ -2,7 +2,8 @@
 
 BMSeeker (`MIT OR Apache-2.0`, see LICENSE-MIT and LICENSE-APACHE) is derived in
 part from the works below. The Rust crates (and, for the GUI, Go modules) it is
-built from keep their own licences (listed by `cargo about` / `go-licenses`).
+built from keep their own licences, listed with their texts in
+THIRD_PARTY_LICENSES.md (made by `tools/gen_licenses.sh`).
 
 ## BeMusicSeeker (unofficial fork)
 
