@@ -751,7 +751,13 @@ file has), without versions. `tools/gen_licenses.sh`
 makes it: cargo-about for the crates (its version and hash pinned in the
 script; `about.toml` names the licences accepted, and a crate under any
 other stops it), and the modules' own licence files for Go (a kind of text
-it does not know stops it too). CI's web job runs
+it does not know stops it too). `about.toml` also names, by checksum, each
+crate's licence file that cargo-about does not recognise, and
+`licence-notices.toml` the notice files it does not read (and the licence
+files of crates that ship none, from their repositories, by version): an
+update that changes one of those files, or such a crate's version, stops the
+script until someone reads the file and updates the entry, and one that
+leaves them as they are needs nothing. CI's web job runs
 `tools/gen_licenses.sh --check`, which fails when the committed file is not
 what Cargo.lock and `gui/go.sum` give: a version bump leaves it as it is,
 but an update that adds or removes a crate or module or changes a licence
