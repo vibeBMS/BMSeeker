@@ -37,6 +37,8 @@ library pending -L library               separate charts waiting for their songs
 library install <link>... -L library     a song (or its separate chart) from its links, then the sources'
 event works | check                      an event's works and their links (JSON Lines)
 config show                              the settings in effect
+licenses                                 the licences and notices, compiled in (the window's and the web page's
+                                         Settings: Licences)
 ```
 
 For example:
@@ -155,3 +157,5 @@ written again in Rust, with some of its regular expressions as they are; its not
 `MIT OR Apache-2.0`. RAR files are unpacked with unrar-rs, under the UnRAR licence restriction; its notice is in
 full in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The licences of the Rust crates and Go modules it is built
 from, generated from Cargo.lock and gui/go.sum, are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+The programs carry all four texts (LICENSE-MIT, LICENSE-APACHE and these two), compiled into the CLI:
+`bmseeker licenses` prints them, and the window and the web page show them in Settings (Licences).
